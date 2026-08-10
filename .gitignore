@@ -27,3 +27,6 @@ venv/
 # 涓存椂
 *.tmp
 .DS_Store
+
+# 部署构建产物
+citrus_agent_deploy.zip
