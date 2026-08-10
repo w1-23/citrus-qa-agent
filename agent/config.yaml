@@ -14,6 +14,7 @@ retrieval:
   dynamic_threshold_ratio: 0.60  # 动态阈值 = top_score * ratio
   web_relevance_threshold: 0.3   # Web 语义过滤阈值（BGE reranker 分数，0=不相关 1=完美匹配）
   rag_hyde_enabled: true         # HyDE: 本地RAG检索前生成英文假想答案提升召回
+  hyde_max_tokens: 512           # HyDE 假想答案输出上限（与 prompt 250词约束配套，防截断）
 
 # 学术搜索配置（CrossRef/PubMed/Semantic Scholar/OpenAlex）
 # 根据网络状况选择性启用。大陆网络仅 CrossRef+PubMed 稳定。

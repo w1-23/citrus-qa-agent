@@ -311,7 +311,7 @@ _HYDE_PROMPT = (
     "that might appear in a citrus research paper.\n\n"
     "Rules:\n"
     "1. Write in English.\n"
-    "2. Keep it under 180 words.\n"
+    "2. Keep it under 250 words.\n"
     "3. Do not invent specific numbers, p-values, gene IDs, accession numbers, or citations.\n"
     "4. If uncertain, use generic academic phrasing.\n"
     "5. Include likely biological mechanisms, gene families, pathways, and domain terms.\n"
@@ -334,7 +334,7 @@ def _generate_hyde_answer(query: str) -> str | None:
                 {"role": "user", "content": f"User question:\n{query}\n\nHypothetical answer paragraph:"},
             ],
             temperature=0.2,
-            max_tokens=300,
+            max_tokens=settings.HYDE_MAX_TOKENS,
         )
         answer = resp.choices[0].message.content.strip()
         return answer if len(answer) >= 30 else None
