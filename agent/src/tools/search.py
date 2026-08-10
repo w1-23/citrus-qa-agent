@@ -325,7 +325,7 @@ def _generate_hyde_answer(query: str) -> str | None:
         client = OpenAI(
             api_key=settings.RESOLVED_FAST_API_KEY,
             base_url=settings.RESOLVED_FAST_BASE_URL,
-            timeout=3,
+            timeout=15,  # v8.3.1: 3s 太短导致 flash 生成假想答案频繁超时降级（每次检索白等+丢 hyde_dense 一路）
         )
         resp = client.chat.completions.create(
             model=settings.FAST_MODEL,
@@ -339,7 +339,7 @@ def _generate_hyde_answer(query: str) -> str | None:
         answer = resp.choices[0].message.content.strip()
         return answer if len(answer) >= 30 else None
     except Exception as e:
-        logger.debug(f"[HyDE] generation failed: {e}")
+        logger.warning(f"[HyDE] generation failed (fallback to basic retrieval): {e}")
         return None
 
 # 2. Web search provider
