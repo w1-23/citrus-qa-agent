@@ -149,6 +149,18 @@ async def run_agent(
 
         dt_llm = (time.perf_counter() - t_llm) * 1000
         messages.append(response)
+        # v8.3.1: 子 Agent 真实 token 消耗也推送（前端上下文面板实时刷新）
+        try:
+            usage = (getattr(response, "usage_metadata", None)
+                     or (getattr(response, "response_metadata", {}) or {}).get("usage", {}))
+            if isinstance(usage, dict) and usage.get("total_tokens"):
+                emit_encoded("context_usage", {
+                    "input_tokens": usage.get("input_tokens", 0),
+                    "output_tokens": usage.get("output_tokens", 0),
+                    "total": usage.get("total_tokens", 0),
+                })
+        except Exception:
+            pass
 
         if hasattr(response, "content") and response.content:
             logger.debug(

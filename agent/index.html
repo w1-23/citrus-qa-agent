@@ -1139,19 +1139,21 @@ function renderContextPanel(data) {
 }
 
 function updateContextTokens(extraTokens) {
+  // v8.3.1: 入参即 token 数（调用方自行折算字符→token；context_usage 事件传真实 token）
   _totalTokensUsed += (extraTokens || 0);
   if (!_ctxData) return;
   var max = _ctxData.max_tokens || 1000000;
-  var est = (_ctxData.estimated_tokens || 0) + Math.round(_totalTokensUsed * 0.7);
+  var est = (_ctxData.estimated_tokens || 0) + Math.round(_totalTokensUsed);
   var pct = max > 0 ? Math.min(est / max, 1) : 0;
 
   _updateCtxBtnRing(pct);
-  document.getElementById('ctx-pct').textContent = Math.round(pct * 100) + '%';
+  var pctEl = document.getElementById('ctx-pct');
+  if (pctEl) pctEl.textContent = Math.round(pct * 100) + '%';
 
   var bar = document.getElementById('ctxBar');
-  bar.style.width = Math.round(pct * 100) + '%';
-  bar.className = 'ctx-bar-inner ' + _ctxLevelClass(pct);
-  document.getElementById('ctxBarLabel').textContent = Math.round(est).toLocaleString() + ' / ' + max.toLocaleString();
+  if (bar) { bar.style.width = Math.round(pct * 100) + '%'; bar.className = 'ctx-bar-inner ' + _ctxLevelClass(pct); }
+  var barLabel = document.getElementById('ctxBarLabel');
+  if (barLabel) barLabel.textContent = Math.round(est).toLocaleString() + ' / ' + max.toLocaleString();
 }
 
 /* ─── HITL Dialog with exponential backoff ─── */
@@ -1374,19 +1376,22 @@ async function sendMsg(isFollowUp) {
 
   function handleEvent(type, data) {
     switch (type) {
-      case 'thinking': updateStatus('thinking', (data.content||'').substring(0,80)); break;
-      case 'tool_call_start': updateStatus('tool', (data.tool_name||'工具')+' 执行中...'); break;
+      case 'thinking': updateStatus('thinking', (data.content||'').substring(0,80)); updateContextTokens(((data.content||'').length)*0.7); break;
+      case 'tool_call_start': updateStatus('tool', (data.tool_name||'工具')+' 执行中...'); updateContextTokens(30); break;
       case 'tool_executing': updateStatus('tool', data.message||'执行中...'); break;
       case 'tool_progress': appendTerminal(data.message||''); updateStatus('tool', data.message||''); break;
-      case 'tool_result': break;
-      case 'agent_switch': updateStatus('agent', '启动: '+(data.agent_name||'')); break;
+      case 'tool_result':
+        updateContextTokens((data.output||'').length * 0.7);
+        break;
+      case 'agent_switch': updateStatus('agent', '启动: '+(data.agent_name||'')); updateContextTokens(50); break;
       case 'text':
         if (!isAnswerStarted) { isAnswerStarted=true; clearTimeout(spinnerTimeout); updateStatus('answer','生成回答中...'); answerDiv.style.display=''; }
-        fullText+=data.content; renderAnswer(); break;
+        fullText+=data.content; updateContextTokens((data.content||'').length * 0.7); renderAnswer(); break;
       case 'token':
         if (!isAnswerStarted) { isAnswerStarted=true; clearTimeout(spinnerTimeout); updateStatus('answer','生成回答中...'); answerDiv.style.display=''; }
-        fullText+=data.content; renderAnswer(); break;
+        fullText+=data.content; updateContextTokens((data.content||'').length * 0.7); renderAnswer(); break;
       case 'context_status': renderContextPanel(data); break;
+      case 'context_usage': updateContextTokens(data.total || 0); break;
       case 'context_degraded': showBanner('⚠️ 历史会话加载失败，本次回答可能缺少上下文'); break;
       case 'citations':
         roundHistory.push({roundId:currentRoundId,query:currentQuery,cited:data.cited||[],uncited:data.uncited||[],historical:data.historical||[]});
