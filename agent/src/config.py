@@ -209,11 +209,10 @@ class Settings(BaseSettings):
 settings = Settings()
 
 # --- Model Switching Logic ---
+# v8.3.1: 全部切换 DeepSeek V4 Flash 正式版，V4 Pro 已移除
 _available_models: Dict[str, str] = {
-    "deepseek-v4-pro": "DeepSeek V4 Pro",
     "deepseek-v4-flash": "DeepSeek V4 Flash",
     "deepseek-chat": "DeepSeek V4 Flash (legacy)",
-    "deepseek-chat-pro": "DeepSeek V4 Pro (legacy)",
     "deepseek-reasoner": "DeepSeek V4 Flash thinking (legacy)",
 }
 _current_model = settings.MAIN_MODEL

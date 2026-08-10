@@ -22,8 +22,8 @@ academic_search:
   timeout_per_source: 5  # 单源超时秒数
 
 model:
-  main: "deepseek-chat"
-  fast: "deepseek-chat"
+  main: "deepseek-v4-flash"   # v8.3.1: 全部切换 Flash 正式版（V4 Pro 已移除）
+  fast: "deepseek-v4-flash"
   embedding: "intfloat/multilingual-e5-large"
   reranker: "BAAI/bge-reranker-v2-m3"
 
