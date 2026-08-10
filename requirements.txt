@@ -1,6 +1,8 @@
 # Core
 langchain-core>=0.3.0
 langchain-openai>=0.2.0
+langgraph>=0.2.0
+openai>=1.0.0
 pydantic>=2.0
 pydantic-settings>=2.0
 pyyaml>=6.0
@@ -29,18 +31,10 @@ qdrant-client>=1.9.0
 fastembed>=0.3.0
 onnxruntime>=1.16.0
 
+# Reranker (BAAI/bge-reranker-v2-m3, ONNX 导出需要)
+optimum>=1.16.0
+transformers>=4.36.0
+
 # Utilities
 rich>=13.7.0
 chardet>=5.0
-
-# Optional: bio/omics (requires Docker or special env)
-# scanpy>=1.9.0
-# anndata>=0.10.0
-# pydeseq2>=0.4.0
-# biopython>=1.83
-# pyDOE3>=1.0.0
-
-# Optional: ML/NLP (heavy)
-# torch>=2.0.0
-# transformers>=4.36.0
-# optimum>=1.16.0
