@@ -31,6 +31,31 @@ try:
                     break
         except Exception:
             pass
+    if ok:
+        # 应用日志写入 agent/logs/agent.log（非 stdout），等待 RAG 预热完成检查 idx_map（AG-11）
+        app_log = os.path.join(ROOT, "logs", "agent.log")
+        deadline = time.time() + 90
+        idx_ok = 0
+        idx_bad = 0
+        degraded = False
+        while time.time() < deadline:
+            time.sleep(2)
+            try:
+                log_text = open(app_log, encoding="utf-8", errors="replace").read()
+            except Exception:
+                log_text = ""
+            idx_ok = log_text.count("idx_map ok")
+            idx_bad = log_text.count("idx_map match rate LOW")
+            degraded = ("降级为 BM25" in log_text
+                        or "Failed to load Qdrant" in log_text
+                        or "批次: 0" in log_text)
+            if idx_ok >= 5 or degraded:
+                break
+        print(f"[RAG] idx_map ok: {idx_ok} 批次 | match LOW: {idx_bad} | BM25降级: {degraded}")
+        if idx_ok >= 5 and not degraded:
+            print("[OK] 向量检索就绪（5 批次全部加载）")
+        else:
+            print("[WARN] 向量检索异常 — 请检查 data/ 与是否有其他实例占用")
 finally:
     proc.terminate()
     try:

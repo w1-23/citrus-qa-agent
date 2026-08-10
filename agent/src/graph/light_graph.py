@@ -193,11 +193,15 @@ async def light_supervisor_node(state: AgentState) -> dict:
 
             # Emit tool_call_start events for all tools
             for tc in response.tool_calls:
-                tc_id = getattr(tc, "id", "")
-                tc_name = getattr(tc, "name", "?")
-                tc_args = {}
-                if hasattr(tc, "args") and tc.args:
-                    tc_args = dict(tc.args)
+                # tool_calls 元素为 dict（OpenAI 兼容格式），兼容对象形式取值
+                if isinstance(tc, dict):
+                    tc_id = tc.get("id", "")
+                    tc_name = tc.get("name", "?")
+                    tc_args = dict(tc.get("args") or {})
+                else:
+                    tc_id = getattr(tc, "id", "")
+                    tc_name = getattr(tc, "name", "?")
+                    tc_args = dict(getattr(tc, "args", None) or {})
                 logger.info(f"[LightGraph:supervisor] turn{turn}: call {tc_name}({str(tc_args)[:80]})")
                 try:
                     emit_tool_call_start(tc_name[:30], tc_args, tc_id)

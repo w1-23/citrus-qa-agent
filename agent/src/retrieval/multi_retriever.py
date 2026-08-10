@@ -86,9 +86,9 @@ class MultiBatchRetriever:
                 lock.unlink()
                 logger.info(f"[MultiBatchRetriever] cleaned stale lock: {lock}")
             except PermissionError:
-                logger.warning(
-                    f"[MultiBatchRetriever] cannot remove lock "
-                    f"(another process may still be running): {lock}"
+                logger.error(
+                    f"[MultiBatchRetriever] Qdrant 数据目录被另一实例占用: {lock} — "
+                    f"local 模式单实例限制，请先停止其他服务进程再启动"
                 )
             except Exception as e:
                 logger.debug(f"[MultiBatchRetriever] lock cleanup: {lock}: {e}")
@@ -120,6 +120,11 @@ class MultiBatchRetriever:
                         chunk["_global_idx"] = len(self.global_chunks)
                         self.global_chunks.append(chunk)
         logger.info(f"Loaded {len(self.batches)} batches, {len(self.global_chunks)} total chunks.")
+        if not self.batches:
+            logger.error(
+                "[MultiBatchRetriever] 所有批次 Qdrant 加载失败 — 向量检索不可用，仅 BM25 降级运行。"
+                "请检查: ① data/ 目录完整性 ② 是否有其他服务实例占用（local 模式单实例限制）"
+            )
         if self.global_chunks:
             self._enrich_all_metadata()
             logger.info("Building Global BM25 Index...")

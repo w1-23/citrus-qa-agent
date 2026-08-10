@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Citrus QA Agent v8.3</title>
+<title>Citrus QA Agent v8.3.1</title>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -847,7 +847,7 @@ dialog::backdrop {
 <header>
   <div class="logo-mark">C</div>
   <h1>Citrus QA Agent</h1>
-  <span class="version-badge">v8.3.0</span>
+  <span class="version-badge">v8.3.1</span>
   <div class="header-actions">
     <button class="ctx-circle-btn" id="ctxCircleBtn" onclick="toggleCtxDrawer()" title="上下文用量">
       <svg viewBox="0 0 36 36" width="22" height="22">
@@ -867,7 +867,7 @@ dialog::backdrop {
       <div class="message bot">
         <div class="avatar">◆</div>
         <div class="content">
-          您好，我是 Citrus QA Agent v8.3。<br>
+          您好，我是 Citrus QA Agent v8.3.1。<br>
           <span style="color:var(--text-muted);font-size:13px">本地 RAG 检索 · CrossRef 学术搜索 · 文献综述写作 · 实验设计 · 文件读写</span>
         </div>
       </div>
@@ -1000,18 +1000,14 @@ function setSendDisabled(val) {
 }
 
 var togglingMode = false;
-async function toggleMode() {
+function toggleMode() {
   if (togglingMode) return;
   togglingMode = true;
   var next = currentMode === 'expert' ? 'light' : 'expert';
-  try {
-    var resp = await fetch('/api/v1/flags/toggle?flag_name=light_mode&value=' + (next === 'light'), { method: 'POST' });
-    if (resp.ok) {
-      currentMode = next;
-      localStorage.setItem('citrus_mode', currentMode);
-      updateModeUI();
-    }
-  } catch (e) { console.warn('Mode toggle failed:', e); }
+  // v8.3.1: 模式由前端决定（请求体 light_mode），后端无自动升级；移除无效 flags 调用
+  currentMode = next;
+  localStorage.setItem('citrus_mode', currentMode);
+  updateModeUI();
   togglingMode = false;
 }
 
@@ -1234,7 +1230,7 @@ async function clearSession() {
   if (!confirm('确定清空当前会话？')) return;
   try {
     await fetch('/api/v1/session/' + sessionId + '/clear', { method: 'POST' });
-    chatContainer.innerHTML = '<div class="message bot"><div class="avatar">◆</div><div class="content">您好，我是 Citrus QA Agent v8.1。<br><span style="color:var(--text-muted);font-size:13px">本地 RAG 检索 · CrossRef 学术搜索 · 文献综述写作 · 实验设计 · 文件读写</span></div></div>';
+    chatContainer.innerHTML = '<div class="message bot"><div class="avatar">◆</div><div class="content">您好，我是 Citrus QA Agent v8.3.1。<br><span style="color:var(--text-muted);font-size:13px">本地 RAG 检索 · CrossRef 学术搜索 · 文献综述写作 · 实验设计 · 文件读写</span></div></div>';
     sidebarContent.innerHTML = '<div class="empty-sidebar">提交问题后文献将在此展示</div>';
     citationCount.textContent = '0';
     roundHistory = [];
@@ -1360,6 +1356,22 @@ async function sendMsg(isFollowUp) {
 
   function handleSendFollowUp(q) { userInput.value = q; sendMsg(true); }
 
+  function showBanner(msg) {
+    var b = document.getElementById('degraded-banner');
+    if (!b) {
+      b = document.createElement('div');
+      b.id = 'degraded-banner';
+      b.style.cssText = 'margin:8px auto;max-width:760px;padding:8px 12px;border-radius:6px;' +
+        'background:rgba(255,180,0,.12);border:1px solid rgba(255,180,0,.4);color:#d9a441;font-size:13px';
+      var sc = document.getElementById('chatContainer') || chatContainer;
+      sc.parentNode.insertBefore(b, sc);
+    }
+    b.textContent = msg;
+    b.style.display = '';
+    clearTimeout(showBanner._t);
+    showBanner._t = setTimeout(function () { b.style.display = 'none'; }, 8000);
+  }
+
   function handleEvent(type, data) {
     switch (type) {
       case 'thinking': updateStatus('thinking', (data.content||'').substring(0,80)); break;
@@ -1375,6 +1387,7 @@ async function sendMsg(isFollowUp) {
         if (!isAnswerStarted) { isAnswerStarted=true; clearTimeout(spinnerTimeout); updateStatus('answer','生成回答中...'); answerDiv.style.display=''; }
         fullText+=data.content; renderAnswer(); break;
       case 'context_status': renderContextPanel(data); break;
+      case 'context_degraded': showBanner('⚠️ 历史会话加载失败，本次回答可能缺少上下文'); break;
       case 'citations':
         roundHistory.push({roundId:currentRoundId,query:currentQuery,cited:data.cited||[],uncited:data.uncited||[],historical:data.historical||[]});
         renderRoundSidebar(); citationsDiv.style.display='';
@@ -1413,7 +1426,7 @@ async function sendMsg(isFollowUp) {
   currentAbortController = new AbortController();
 
   try {
-    var response = await fetch(API_URL, {method:'POST',headers:{'Content-Type':'application/json'},signal:currentAbortController.signal,body:JSON.stringify({session_id:sessionId,query:query,light_mode:currentMode==='light',plan_mode:planModeEnabled,is_follow_up:isFollowUp})});
+    var response = await fetch(API_URL, {method:'POST',headers:{'Content-Type':'application/json'},signal:currentAbortController.signal,body:JSON.stringify({session_id:sessionId,query:query,light_mode:currentMode==='light'})});
     if (!response.ok) { clearTimeout(spinnerTimeout);isCancelled=true;clearStatus();answerDiv.style.display='';answerDiv.innerHTML='<div style="color:var(--error);font-weight:500">⚠ 服务器错误 ('+response.status+')</div>';setSendDisabled(false);userInput.focus();return; }
     var reader=response.body.getReader(),decoder=new TextDecoder(),buffer='',curEvt='message';
     while(true){var chunk=await reader.read();if(chunk.done)break;buffer+=decoder.decode(chunk.value,{stream:true});var lines=buffer.split('\n');buffer=lines.pop();

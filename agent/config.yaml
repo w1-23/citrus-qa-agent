@@ -119,13 +119,9 @@ feature_flags:
   light_mode: false
   auto_write_report: false
 
-# ── Mixed Route (SIMPLE / COMPLEX routing) ──
-route:
-  enabled: true
-  simple_max_len: 25
-  simple_keywords: [读, 查, 绘, 画, 是多少, 是什么, 有哪些]
-  complex_keywords: [综述, 设计, 对比, 分析, 验证, 比较, 写的实验方案, 的论文]
-  llm_judge_on_uncertain: true
+# ── Mixed Route ──
+# v8.3.1: 已彻底删除服务端路由自动升级（用户手动切换 light/expert，前端 light_mode 决定模式）。
+# 保留本段注释作为设计记录，无任何配置项。
 
 # ── Circuit Breaker ──
 # v8.3.1: 阈值已统一收口到 context_budget 段，此处仅保留未使用的预留项。

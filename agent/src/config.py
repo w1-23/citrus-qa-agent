@@ -138,12 +138,6 @@ class Settings(BaseSettings):
     INTENT_TIMEOUT: int = Field(default_factory=lambda: _yaml_val("api", "intent_timeout", default=10))
     INTENT_MAX_TOKENS: int = Field(default_factory=lambda: _yaml_val("api", "intent_max_tokens", default=10))
 
-    # ── Mixed Route (v8.3.1: 服务端路由兜底，对齐 config.yaml route 段) ──
-    ROUTE_ENABLED: bool = Field(default_factory=lambda: _yaml_val("route", "enabled", default=True))
-    ROUTE_SIMPLE_MAX_LEN: int = Field(default_factory=lambda: _yaml_val("route", "simple_max_len", default=25))
-    ROUTE_SIMPLE_KEYWORDS: list = Field(default_factory=lambda: _yaml_val("route", "simple_keywords", default=[]))
-    ROUTE_COMPLEX_KEYWORDS: list = Field(default_factory=lambda: _yaml_val("route", "complex_keywords", default=[]))
-
     # 8. System Paths & Logging
     DATA_DIR: Path = Field(default_factory=lambda: PROJECT_ROOT / "data")
     LOG_DIR: str = Field(default_factory=lambda: _yaml_val("logging", "dir", default="logs"))

@@ -162,28 +162,20 @@ def test_ag11_idx_map():
     check("_verify_idx_map 抽样匹配率", "match rate" in src or "0.95" in src)
 
 
-def test_ag12_route():
-    print("[AG-12] 服务端路由兜底")
-    from src.api.main import _resolve_mode
-
-    class Req:
-        def __init__(self, q, light):
-            self.query = q
-            self.light_mode = light
-
-    mode, reason = _resolve_mode(Req("写一篇黄龙病综述", True))
-    check("light + 复杂关键词 → expert", mode == "expert" and reason == "complex_keyword",
-          f"{mode}/{reason}")
-    mode, reason = _resolve_mode(Req("为什么柑橘果实会变红，是什么机制导致的，涉及哪些基因和转录因子", True))
-    check("light + 长句 → expert", mode == "expert" and reason == "long_query",
-          f"{mode}/{reason}")
-    mode, reason = _resolve_mode(Req("黄龙病", True))
-    check("light + 短问 → light", mode == "light" and reason == "client_light",
-          f"{mode}/{reason}")
-    mode, reason = _resolve_mode(Req("读一下这个文件", True))
-    check("light + 简单关键词 → light", mode == "light", f"{mode}/{reason}")
-    mode, reason = _resolve_mode(Req("随便什么", False))
-    check("expert 请求保持 expert", mode == "expert" and reason == "client_expert")
+def test_ag12_route_removed():
+    print("[AG-12] 路由自动升级已彻底删除（用户手动切换）")
+    main_src = open(os.path.join(os.path.dirname(__file__), 'src', 'api', 'main.py'),
+                    encoding='utf-8').read()
+    cfg_src = open(os.path.join(os.path.dirname(__file__), 'src', 'config.py'),
+                   encoding='utf-8').read()
+    yaml_src = open(os.path.join(os.path.dirname(__file__), 'config.yaml'),
+                    encoding='utf-8').read()
+    check("main.py 无 _resolve_mode", "_resolve_mode" not in main_src)
+    check("main.py 无 ROUTE_ENABLED 引用", "ROUTE_ENABLED" not in main_src)
+    check("main.py mode 由 light_mode 直接决定",
+          'mode = "light" if req.light_mode else "expert"' in main_src)
+    check("config.py 无 ROUTE_* 字段", "ROUTE_" not in cfg_src)
+    check("config.yaml 无 route: 段", "route:" not in yaml_src)
 
 
 def test_ag14_degraded_event():
@@ -246,7 +238,7 @@ if __name__ == "__main__":
     test_ag9_atomic_write()
     test_ag10_limits()
     test_ag11_idx_map()
-    test_ag12_route()
+    test_ag12_route_removed()
     test_ag14_degraded_event()
     test_ag5_ltm()
     print(f"\n结果: {len(passed)} passed / {len(failed)} failed")
