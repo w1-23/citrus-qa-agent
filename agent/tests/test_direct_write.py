@@ -7,7 +7,7 @@ import asyncio
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.graph.expert_graph import _has_retrieval_markers, _classify_document
 
@@ -51,7 +51,7 @@ async def _classify_mock(resp_content, fail=False):
 
 def test_classify_fallback():
     print("[②] LLM 分类 _classify_document 保守回退")
-    src = open(os.path.join(os.path.dirname(__file__), 'src', 'graph', 'expert_graph.py'),
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'graph', 'expert_graph.py'),
                encoding='utf-8').read()
     check("存在 _classify_document", "_classify_document" in src)
     check("输出限制 max_tokens=5（单 token 分类）", "max_tokens=5" in src)
@@ -69,7 +69,7 @@ def test_classify_fallback():
 
 def test_branch_wiring():
     print("[分支接线] direct-write 双层条件")
-    src = open(os.path.join(os.path.dirname(__file__), 'src', 'graph', 'expert_graph.py'),
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'graph', 'expert_graph.py'),
                encoding='utf-8').read()
     check("分支含否定排除", "_has_retrieval_markers(context)" in src)
     check("分支含 LLM 确认", "await _classify_document(context)" in src)

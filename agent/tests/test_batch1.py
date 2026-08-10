@@ -3,7 +3,7 @@ import asyncio
 import sys
 import os
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.config import settings
 from src.core.context_budget import ContextBudget, ContextBudgetConfig, ContextBudgetLevel
@@ -34,7 +34,7 @@ def test_ag3_config_single_source():
     check("settings 读取 hard=0.93", abs(settings.CONTEXT_BUDGET_HARD_THRESHOLD - 0.93) < 1e-6,
           f"got {settings.CONTEXT_BUDGET_HARD_THRESHOLD}")
     import yaml
-    cfg = yaml.safe_load(open(os.path.join(os.path.dirname(__file__), 'config.yaml'), encoding='utf-8'))
+    cfg = yaml.safe_load(open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config.yaml'), encoding='utf-8'))
     cb = cfg['context_budget']
     check("config.yaml soft=0.60", abs(cb['soft_threshold'] - 0.60) < 1e-6)
     check("config.yaml hard=0.93", abs(cb['hard_threshold'] - 0.93) < 1e-6)
@@ -121,7 +121,7 @@ def test_ag2_file_semantics():
 def test_ag1_truncation_block():
     print("[AG-1] 截断分支逻辑（无 task 引用）")
     import ast
-    src = open(os.path.join(os.path.dirname(__file__), 'src', 'graph', 'expert_graph.py'),
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'graph', 'expert_graph.py'),
                encoding='utf-8').read()
     check("源码不再含 task.get('output_path')",
           "task.get('output_path'" not in src)

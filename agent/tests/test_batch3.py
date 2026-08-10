@@ -3,7 +3,7 @@
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.core.context_budget import _estimate_chars_tokens
 
@@ -42,7 +42,7 @@ def test_ag15_estimate():
 
 def test_ag16_cards():
     print("[AG-16] 策略卡片文案")
-    src = open(os.path.join(os.path.dirname(__file__), 'src', 'core', 'strategy_cards.py'),
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'core', 'strategy_cards.py'),
                encoding='utf-8').read()
     check("无 web_search/multi_search 残留", "web_search" not in src and "multi_search" not in src)
     check("含 academic_search 指引", "academic_search" in src)
@@ -50,7 +50,7 @@ def test_ag16_cards():
 
 def test_n2_tools():
     print("[N2] 工具 description 评审")
-    src = open(os.path.join(os.path.dirname(__file__), 'src', 'graph', 'expert_graph.py'),
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'graph', 'expert_graph.py'),
                encoding='utf-8').read()
     check("retrieve 含同义词重试指引", "synonyms" in src)
     check("write 含成文/素材说明", "finished document" in src and "raw material" in src)

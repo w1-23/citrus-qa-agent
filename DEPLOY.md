@@ -67,8 +67,9 @@ python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000
 ## 六、部署后验证（10 分钟）
 
 ```bash
-# 1. 检索链路（AG-11 修复验收）
-python verify_retrieval.py
+# 1. 检索链路（AG-11 修复验收，脚本归档于 agent/tests/）
+cd agent
+python tests/verify_retrieval.py
 # 期望: 3 个查询各返回 10 条、0 条指向 last chunk、末尾 PASS
 
 # 2. 启动日志检查（应出现 5 行 idx_map ok）

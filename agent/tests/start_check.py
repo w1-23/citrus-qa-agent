@@ -6,7 +6,7 @@ import time
 import urllib.request
 import os
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG = os.path.join(os.environ.get("TEMP", "/tmp"), "citrus_uvicorn_test.log")
 ERR = LOG + ".err"
 

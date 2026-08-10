@@ -31,7 +31,7 @@ python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000
 #    健康检查: http://localhost:8000/health
 ```
 
-**启动自检**（可选）：`python start_check.py` — 后台起服务、轮询 /health、自动关闭。
+**启动自检**（可选）：`python tests/start_check.py` — 后台起服务、轮询 /health、自动关闭。
 
 ---
 
@@ -110,15 +110,16 @@ route:                        # 服务端路由兜底（修复 AG-12）
 
 ---
 
-## 测试与回归
+## 测试与回归（脚本归档于 `agent/tests/`）
 
-| 脚本 | 覆盖 | 运行 |
+| 脚本 | 覆盖 | 运行（agent/ 下） |
 |---|---|---|
-| `test_batch1.py` | AG-1/2/3/6 修复回归（20 项） | `python test_batch1.py` |
-| `test_batch2.py` | AG-4/5/7/8/9/10/11/12/14 修复回归（36 项） | `python test_batch2.py` |
-| `test_batch3.py` | AG-15/16 + 预算回归（14 项） | `python test_batch3.py` |
-| `verify_retrieval.py` | AG-11 端到端检索验收（真实数据） | `python verify_retrieval.py` |
-| `start_check.py` | 服务启动 + /health 自检 | `python start_check.py` |
+| `tests/test_batch1.py` | AG-1/2/3/6 修复回归（20 项） | `python tests/test_batch1.py` |
+| `tests/test_batch2.py` | AG-4/5/7/8/9/10/11/12/14 修复回归（36 项） | `python tests/test_batch2.py` |
+| `tests/test_batch3.py` | AG-15/16 + 预算回归（14 项） | `python tests/test_batch3.py` |
+| `tests/test_direct_write.py` | direct-write 双层判定（12 项） | `python tests/test_direct_write.py` |
+| `tests/verify_retrieval.py` | AG-11 端到端检索验收（真实数据） | `python tests/verify_retrieval.py` |
+| `tests/start_check.py` | 服务启动 + /health + idx_map 自检 | `python tests/start_check.py` |
 
 全部无外部 API 依赖（仅 verify_retrieval 需本地模型缓存），改代码后三套全绿即可回归。
 
@@ -128,14 +129,14 @@ route:                        # 服务端路由兜底（修复 AG-12）
 
 ```
 agent/
-├── config.yaml / .env.example / index.html
+├── config.yaml / .env.example / index.html / pack_deploy.py
 ├── src/                    # 全部源码（graph/core/tools/retrieval/engine/guardrails/session/api）
 ├── data/                   # 检索语料（Qdrant 5 批次 119K chunks，不入库）
+├── tests/                  # 回归/验收脚本（test_batch1/2/3、test_direct_write、verify_retrieval、start_check）
 ├── MODEL_ROUTING.md        # 模型路由矩阵（节点→模型→温度→超时）
-├── start_check.py          # 启动自检
-└── test_batch{1,2,3}.py / verify_retrieval.py
+└── verify_retrieval.py     # （已归档至 tests/）
 AUDIT_2026-08-10.md         # 生产审计 + 修复状态（P0→P3 全记录）
-DEPLOY.md                   # 新服务器部署指南（含打包脚本 pack_deploy.py）
+DEPLOY.md                   # 新服务器部署指南
 readme2.md                  # v8.3.0 历史架构手册（部分信息已被本文件更新取代）
 TUNE_PARAMS.md              # 可调参数清单
 AGENT_CHANGES.md            # v8.3 代码变更对照

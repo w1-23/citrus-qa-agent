@@ -5,7 +5,7 @@ import os
 import sys
 import uuid
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.config import settings
 
@@ -35,11 +35,11 @@ def test_ag7_timeout_retry():
     print("[AG-7] 工具超时 + LLM 重试")
     check("settings 读取 TOOL_EXEC_TIMEOUT_SEC=60", settings.TOOL_EXEC_TIMEOUT_SEC == 60)
     import inspect
-    src = open(os.path.join(os.path.dirname(__file__), 'src', 'tools', 'registry.py'),
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'tools', 'registry.py'),
                encoding='utf-8').read()
     check("registry 含 asyncio.wait_for", "asyncio.wait_for" in src)
     check("registry 含 [ERR_TIMEOUT]", "[ERR_TIMEOUT]" in src)
-    runner = open(os.path.join(os.path.dirname(__file__), 'src', 'core', 'agent_runner.py'),
+    runner = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'core', 'agent_runner.py'),
                   encoding='utf-8').read()
     check("agent_runner 含 3 次重试", "range(3)" in runner and "retry" in runner)
     check("agent_runner 含 [AgentError]", "[AgentError]" in runner)
@@ -124,7 +124,7 @@ def test_ag10_limits():
     r2 = statistical_analysis.func(str(huge), "descriptive", '{"value_column": "a"}')
     check("超过文件大小 → [ERR_FILE_TOO_LARGE]", "[ERR_FILE_TOO_LARGE]" in r2, r2[:60])
 
-    src = open(os.path.join(os.path.dirname(__file__), 'src', 'tools', 'search.py'),
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'tools', 'search.py'),
                encoding='utf-8').read()
     check("pdf_read 含大小检查", "ERR_FILE_TOO_LARGE" in src)
 
@@ -155,7 +155,7 @@ def test_ag11_idx_map():
     check("miss 点被跳过（不回退 -1）", len(out) == 1)
     check("score 保留", abs(out[0][1] - 0.9) < 1e-6)
 
-    src = open(os.path.join(os.path.dirname(__file__), 'src', 'retrieval', 'multi_retriever.py'),
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'retrieval', 'multi_retriever.py'),
                encoding='utf-8').read()
     check("idx_map 键为 (paper_id, chunk_index)",
           'c.get("paper_id", "")' in src and 'c.get("chunk_index")' in src)
@@ -164,11 +164,11 @@ def test_ag11_idx_map():
 
 def test_ag12_route_removed():
     print("[AG-12] 路由自动升级已彻底删除（用户手动切换）")
-    main_src = open(os.path.join(os.path.dirname(__file__), 'src', 'api', 'main.py'),
+    main_src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'api', 'main.py'),
                     encoding='utf-8').read()
-    cfg_src = open(os.path.join(os.path.dirname(__file__), 'src', 'config.py'),
+    cfg_src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'config.py'),
                    encoding='utf-8').read()
-    yaml_src = open(os.path.join(os.path.dirname(__file__), 'config.yaml'),
+    yaml_src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config.yaml'),
                     encoding='utf-8').read()
     check("main.py 无 _resolve_mode", "_resolve_mode" not in main_src)
     check("main.py 无 ROUTE_ENABLED 引用", "ROUTE_ENABLED" not in main_src)
@@ -181,7 +181,7 @@ def test_ag12_route_removed():
 def test_ag14_degraded_event():
     print("[AG-14] context_degraded 事件")
     from src.core.context_manager import ContextManager
-    src = open(os.path.join(os.path.dirname(__file__), 'src', 'core', 'context_manager.py'),
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'core', 'context_manager.py'),
                encoding='utf-8').read()
     check("load 失败 emit context_degraded", "context_degraded" in src)
 
@@ -217,16 +217,16 @@ def test_ag5_ltm():
     check("迁移后含新列", len(rows[0]) >= 6, str(len(rows[0])))
     conn.close()
 
-    src = open(os.path.join(os.path.dirname(__file__), 'src', 'guardrails', 'memory.py'),
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'guardrails', 'memory.py'),
                encoding='utf-8').read()
     check("save 含 owner_session/source_query 参数", "owner_session" in src and "source_query" in src)
     check("recall 含衰减", "0.95" in src)
     check("recall 输出含来源标注", "来源" in src)
     check("recall 含 max_chars 截断", "max_chars" in src)
-    g1 = open(os.path.join(os.path.dirname(__file__), 'src', 'graph', 'expert_graph.py'),
+    g1 = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'graph', 'expert_graph.py'),
               encoding='utf-8').read()
     check("save 节点 to_thread 异步化", "asyncio.to_thread(memory_store.extract_key_facts" in g1)
-    c = open(os.path.join(os.path.dirname(__file__), 'src', 'prompts', 'system', 'constraints.md'),
+    c = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'prompts', 'system', 'constraints.md'),
              encoding='utf-8').read()
     check("constraints 含冲突规则", "跨会话记忆规则" in c)
 
