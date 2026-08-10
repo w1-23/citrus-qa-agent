@@ -24,8 +24,8 @@ class ContextBudgetLevel(Enum):
 @dataclass
 class ContextBudgetConfig:
     max_tokens: int = 1000000
-    soft_threshold: float = 0.90
-    hard_threshold: float = 0.95
+    soft_threshold: float = 0.60
+    hard_threshold: float = 0.93
     summarize_ratio: float = 0.70
     keep_recent_turns: int = 2
     compact_max_tokens: int = 800

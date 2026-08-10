@@ -128,10 +128,9 @@ route:
   llm_judge_on_uncertain: true
 
 # ── Circuit Breaker ──
+# v8.3.1: 阈值已统一收口到 context_budget 段，此处仅保留未使用的预留项。
 circuit_breaker:
   subtask_max_tool_calls: 8
-  context_soft_threshold: 90   # % → trigger compaction
-  context_hard_threshold: 95   # % → force kill subtask
 
 api:
   qdrant_timeout: 60             # Qdrant 客户端连接超时秒数
@@ -189,12 +188,13 @@ sandbox:
     - exec_*
     - write_*
 
-# ── Context Budget v8.1.1 ──
+# ── Context Budget v8.3.1（配置单向化：图内统一读此段，勿再硬编码）──
 context_budget:
   enabled: true
-  max_tokens: 1000000
-  soft_threshold: 0.90
-  hard_threshold: 0.95
+  max_tokens: 1000000           # 对齐 DeepSeek V4 Flash 实际窗口(1M)
+  soft_threshold: 0.60          # 早期压缩：约 60% 窗口(~600K tokens, 60-150 轮长会话)触发摘要，
+                                #   将每轮输入 token 拉回常数级，控延迟与成本。压缩 LLM 用 main 模型
+  hard_threshold: 0.93          # 硬截断兜底
   summarize_ratio: 0.70
   keep_recent_turns: 2
   compact_max_tokens: 800

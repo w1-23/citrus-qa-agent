@@ -274,8 +274,8 @@ async def _execute_tool_call(tc: dict, tc_id: str = "") -> dict:
             save_path = task["output_path"]
             save_msg = write_local_file.func(save_path, context, "write")
             logger.info(f"[ExpertGraph] direct write (context={len(context)}chars): {save_msg}")
-            result = {"agent": "write-agent", "result": save_msg, "artifacts": {},
-                      "tools_called": 0}
+            result = {"agent": "write-agent", "result": f"已保存到 {save_path}", "artifacts": {},
+                      "tools_called": 0, "file_saved": True}
         else:
             result = await run_agent(
                 agent_name, task, context=context,
@@ -289,7 +289,8 @@ async def _execute_tool_call(tc: dict, tc_id: str = "") -> dict:
     if agent_name == "write-agent":
         output_path = task.get("output_path", "")
         answer_text = result.get("result", "")
-        if output_path and answer_text and len(answer_text) > 50:
+        file_saved = result.get("file_saved", False)
+        if output_path and answer_text and len(answer_text) > 50 and not file_saved:
             try:
                 from src.tools.file_ops import write_local_file
                 save_msg = write_local_file.func(output_path, answer_text)
@@ -324,9 +325,9 @@ async def expert_load_node(state: AgentState) -> dict:
         from src.guardrails.memory import memory_store
 
         budget_config = ContextBudgetConfig(
-            max_tokens=1000000,
-            soft_threshold=0.85,
-            hard_threshold=0.93,
+            max_tokens=settings.CONTEXT_BUDGET_MAX_TOKENS,
+            soft_threshold=settings.CONTEXT_BUDGET_SOFT_THRESHOLD,
+            hard_threshold=settings.CONTEXT_BUDGET_HARD_THRESHOLD,
         )
         budget = ContextBudget(budget_config)
 
@@ -543,7 +544,11 @@ async def supervisor_node(state: AgentState) -> dict:
                 result_text = sub_result.get("result", "") or ""
                 truncated = result_text[:cap]
                 if len(result_text) > cap:
-                    truncated += f"\n\n[... 已截断, 完整内容已保存至 {task.get('output_path', '文件')} ...]"
+                    truncated += "\n\n[... 已截断 ...]"
+                    logger.warning(
+                        f"[ExpertGraph] truncated {agent_display} result "
+                        f"{len(result_text)} chars > cap {cap}"
+                    )
                 tool_msg_content = f"[{agent_display} result]\n{truncated}"
                 messages.append(ToolMessage(
                     content=tool_msg_content,

@@ -29,11 +29,8 @@ def write_local_file(path: str, content: str, mode: Literal["write", "append"] =
 
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if mode == "write" and target_path.exists():
-            # 防御: 文件已存在 → 强制追加，防止 LLM 误覆盖
-            existing = target_path.read_text(encoding="utf-8")
-            content = existing + "\n\n" + content
-            actual_mode = "append (forced: file existed)"
+        if mode == "write":
+            actual_mode = "write"
         elif mode == "append" and target_path.exists():
             existing = target_path.read_text(encoding="utf-8")
             content = existing + "\n\n" + content

@@ -52,10 +52,11 @@ class ContextManager:
         self._memory = memory_store
         self._budget = budget
         self._fast_llm = None
+        self._compact_llm = None
         if budget:
             from src.guardrails.history_compactor import compact_messages
             async def _compact(msgs):
-                return await compact_messages(msgs, fast_llm=self._get_fast_llm())
+                return await compact_messages(msgs, fast_llm=self._get_compact_llm())
             budget.set_compact_fn(_compact)
 
     def _get_fast_llm(self):
@@ -69,6 +70,19 @@ class ContextManager:
                 timeout=12,
             )
         return self._fast_llm
+
+    def _get_compact_llm(self):
+        """压缩用 main 模型：触发频率低，摘要质量优先于成本 (v8.3.1)."""
+        if self._compact_llm is None:
+            from langchain_openai import ChatOpenAI
+            self._compact_llm = ChatOpenAI(
+                model=settings.MAIN_MODEL,
+                api_key=settings.RESOLVED_MAIN_API_KEY,
+                base_url=settings.MAIN_BASE_URL,
+                temperature=0,
+                timeout=30,
+            )
+        return self._compact_llm
 
     async def load(
         self,
@@ -103,6 +117,12 @@ class ContextManager:
                         f"[ContextManager] budget level={result.level.value}, "
                         f"summary={len(result.summary or '')} chars"
                     )
+                    # 压缩结果持久化 (AG-6): 事务内替换历史，避免每轮重复压缩
+                    if self._session:
+                        try:
+                            await self._session.replace_history(session_id, result.messages)
+                        except Exception as e:
+                            logger.warning(f"[ContextManager] persist compaction failed: {e}")
             except Exception as e:
                 logger.warning(f"[ContextManager] budget check failed: {e}")
 

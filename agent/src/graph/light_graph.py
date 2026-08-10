@@ -64,9 +64,9 @@ async def load_context_node(state: AgentState) -> dict:
         from src.guardrails.memory import memory_store
 
         budget_config = ContextBudgetConfig(
-            max_tokens=1000000,
-            soft_threshold=0.85,
-            hard_threshold=0.93,
+            max_tokens=settings.CONTEXT_BUDGET_MAX_TOKENS,
+            soft_threshold=settings.CONTEXT_BUDGET_SOFT_THRESHOLD,
+            hard_threshold=settings.CONTEXT_BUDGET_HARD_THRESHOLD,
         )
         budget = ContextBudget(budget_config)
 

@@ -120,6 +120,12 @@ class Settings(BaseSettings):
     COMPACT_MAX_TOKENS: int = Field(default_factory=lambda: _yaml_val("context_budget", "compact_max_tokens", default=800))
     FALLBACK_CONTENT_MAX_CHARS: int = Field(default_factory=lambda: _yaml_val("chat", "fallback_content_max_chars", default=300))
 
+    # Context Budget (v8.3.1: 配置单向化，图内不再硬编码)
+    CONTEXT_BUDGET_ENABLED: bool = Field(default_factory=lambda: _yaml_val("context_budget", "enabled", default=True))
+    CONTEXT_BUDGET_MAX_TOKENS: int = Field(default_factory=lambda: _yaml_val("context_budget", "max_tokens", default=1000000))
+    CONTEXT_BUDGET_SOFT_THRESHOLD: float = Field(default_factory=lambda: _yaml_val("context_budget", "soft_threshold", default=0.60))
+    CONTEXT_BUDGET_HARD_THRESHOLD: float = Field(default_factory=lambda: _yaml_val("context_budget", "hard_threshold", default=0.93))
+
     # 5. Tools Parameters
     MAX_TOOL_CALLS: int = Field(default_factory=lambda: _yaml_val("tools", "max_tool_calls", default=4))
 

@@ -108,6 +108,7 @@ async def run_agent(
     max_turns = _get_max_turns(agent_name)
     tool_count = 0
     collected_artifacts = {"main_results": [], "web_results": []}
+    file_saved = False
     t_start = time.perf_counter()
 
     result_content = ""
@@ -187,6 +188,10 @@ async def run_agent(
             tc = response.tool_calls[idx] if idx < len(response.tool_calls) else None
             tc_id = getattr(tc, "id", None) or str(uuid.uuid4()) if tc else str(uuid.uuid4())
             tc_name = getattr(tc, "name", "") if tc else "tool"
+            if agent_name == "write-agent":
+                tr_content = str(getattr(tr, "content", ""))
+                if tc_name == "write_local_file" and tr_content.startswith("Success:"):
+                    file_saved = True
             try:
                 result_text = str(getattr(tr, "content", ""))[:100000]
                 result_count = len(collected_artifacts["main_results"]) + len(collected_artifacts["web_results"])
@@ -261,6 +266,7 @@ async def run_agent(
         "artifacts": collected_artifacts,
         "tools_called": tool_count,
         "turns": max_turns,
+        "file_saved": file_saved,
     }
 
 

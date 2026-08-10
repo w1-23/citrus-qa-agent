@@ -178,49 +178,78 @@ class SessionManager:
         except Exception as e:
             logger.error(f"[SessionManager] save failed: {e}")
 
+    def _serialize_message(self, msg: BaseMessage) -> tuple:
+        """Extract (msg_type, content, tool_call_id, tool_calls_json, name) from a message."""
+        msg_type = ""
+        content = ""
+        tool_call_id = None
+        tool_calls_json = None
+        name = None
+
+        if hasattr(msg, "type"):
+            msg_type = msg.type
+        elif hasattr(msg, "role"):
+            msg_type = msg.role
+
+        if hasattr(msg, "content") and msg.content:
+            c = msg.content
+            if isinstance(c, list):
+                content = json.dumps(c, ensure_ascii=False)
+            else:
+                content = str(c)
+
+        if hasattr(msg, "tool_call_id"):
+            tool_call_id = msg.tool_call_id
+
+        if hasattr(msg, "tool_calls") and msg.tool_calls:
+            try:
+                tool_calls_json = json.dumps([
+                    {"id": tc.get("id", ""), "name": tc.get("name", ""),
+                     "args": tc.get("args", {})}
+                    for tc in msg.tool_calls
+                ], ensure_ascii=False)
+            except Exception:
+                pass
+
+        if hasattr(msg, "name"):
+            name = msg.name
+
+        return (msg_type, content, tool_call_id, tool_calls_json, name)
+
     def _save_messages_sync(self, session_id: str, messages: List[BaseMessage]):
         import sqlite3
         with sqlite3.connect(self.db_path) as conn:
             for msg in messages:
-                msg_type = ""
-                content = ""
-                tool_call_id = None
-                tool_calls_json = None
-                name = None
-
-                if hasattr(msg, "type"):
-                    msg_type = msg.type
-                elif hasattr(msg, "role"):
-                    msg_type = msg.role
-
-                if hasattr(msg, "content") and msg.content:
-                    c = msg.content
-                    if isinstance(c, list):
-                        content = json.dumps(c, ensure_ascii=False)
-                    else:
-                        content = str(c)
-
-                if hasattr(msg, "tool_call_id"):
-                    tool_call_id = msg.tool_call_id
-
-                if hasattr(msg, "tool_calls") and msg.tool_calls:
-                    try:
-                        tool_calls_json = json.dumps([
-                            {"id": tc.get("id", ""), "name": tc.get("name", ""),
-                             "args": tc.get("args", {})}
-                            for tc in msg.tool_calls
-                        ], ensure_ascii=False)
-                    except Exception:
-                        pass
-
-                if hasattr(msg, "name"):
-                    name = msg.name
-
                 conn.execute(
                     "INSERT INTO messages "
                     "(session_id, msg_type, content, tool_call_id, tool_calls_json, name) "
                     "VALUES (?, ?, ?, ?, ?, ?)",
-                    (session_id, msg_type, content, tool_call_id, tool_calls_json, name),
+                    (session_id, *self._serialize_message(msg)),
+                )
+            conn.execute(
+                "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
+                (datetime.now().isoformat(), session_id),
+            )
+            conn.commit()
+
+    async def replace_history(self, session_id: str, messages: List[BaseMessage]) -> None:
+        """原子替换会话历史（压缩/截断后持久化，v8.3.1）。事务内 DELETE+INSERT，失败不改动原数据。"""
+        try:
+            await asyncio.to_thread(self._replace_history_sync, session_id, messages)
+            logger.info(f"[SessionManager] history replaced: {len(messages)} msgs for {session_id[:8]}")
+        except Exception as e:
+            logger.error(f"[SessionManager] replace_history failed: {e}")
+
+    def _replace_history_sync(self, session_id: str, messages: List[BaseMessage]):
+        import sqlite3
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+            for msg in messages:
+                conn.execute(
+                    "INSERT INTO messages "
+                    "(session_id, msg_type, content, tool_call_id, tool_calls_json, name) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (session_id, *self._serialize_message(msg)),
                 )
             conn.execute(
                 "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
