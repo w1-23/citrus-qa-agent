@@ -39,6 +39,21 @@ class BudgetResult:
     summary: str | None = None
 
 
+def _estimate_chars_tokens(text: str) -> int:
+    """混合语言 token 估算 (AG-15)。
+
+    对齐 opencode 的字符估算思路（len/4，面向英文代码），本项目适配中英混合：
+      - 中文/日文/韩文 CJK: ~1.2 token/字（DeepSeek BPE 实测区间 1.0-1.5）
+      - 其他（英文/数字/符号）: 4 字符/token（与 opencode 一致）
+    无外部 tokenizer 依赖，偏差目标 <15%。
+    """
+    if not text:
+        return 0
+    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    other = len(text) - cjk
+    return max(int(cjk * 1.2 + other / 4), 1)
+
+
 class ContextBudget:
     def __init__(self, config: ContextBudgetConfig | None = None) -> None:
         self.config = config or ContextBudgetConfig()
@@ -61,7 +76,7 @@ class ContextBudget:
                             content += str(block.get("text", ""))
                 else:
                     content = str(c) if c else ""
-            total += max(len(content) // 1.5, 1)
+            total += _estimate_chars_tokens(content)
 
             tcs = getattr(msg, "tool_calls", None)
             if tcs:

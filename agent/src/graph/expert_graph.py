@@ -39,7 +39,9 @@ _AGENT_TOOLS = [
             "name": "call_retrieve_agent",
             "description": "Search academic literature for citrus research. "
                            "Use for factual queries, mechanisms, comparisons, reviews. "
-                           "Query must be English keywords (5-15 words).",
+                           "Query must be English keywords (5-15 words), NOT a full sentence. "
+                           "If first search is insufficient, call again with synonyms or "
+                           "narrower terms (up to 3 different angles).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -64,7 +66,9 @@ _AGENT_TOOLS = [
                            "'save', 'write', 'preserve', 'store' any content to a file — "
                            "even simple content like 'save 111 to test.md'. "
                            "Also use for academic reviews, reports, or structured answers. "
-                           "For complex writing, ensure sufficient literature has been retrieved first.",
+                           "For complex writing, ensure sufficient literature has been retrieved first. "
+                           "context can be a finished document (will be saved directly) or "
+                           "raw material to synthesize.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -74,7 +78,7 @@ _AGENT_TOOLS = [
                     },
                     "context": {
                         "type": "string",
-                        "description": "Previous retrieval results to base writing on",
+                        "description": "Previous retrieval results or document content to base writing on",
                     },
                     "output_path": {
                         "type": "string",

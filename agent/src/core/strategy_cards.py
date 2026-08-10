@@ -10,11 +10,11 @@ logger = logging.getLogger(__name__)
 _CARDS: List[dict] = [
     # ═══════════════ 检索策略 (retrieval) ═══════════════
     {"id": "retrieval_001", "type": "retrieval", "name": "多源并行检索",
-     "description": "同时使用RAG+Web+Academic三源检索",
-     "prompt": "使用citrus_rag_search、web_search、multi_search同时检索，不串行等待。检索英文关键词。"},
+     "description": "同时使用RAG+Academic多源检索",
+     "prompt": "使用citrus_rag_search、academic_search同时检索，不串行等待。检索英文关键词。"},
     {"id": "retrieval_002", "type": "retrieval", "name": "高引优先检索",
      "description": "优先检索高引用论文(Nature/Science/Cell/PNAS)",
-     "prompt": "检索时优先使用web_search查找高影响因子期刊(Nature/Science/Cell/PNAS/Plant Cell)的最新文献。"},
+     "prompt": "检索时优先使用academic_search查找高影响因子期刊(Nature/Science/Cell/PNAS/Plant Cell)的最新文献。"},
     {"id": "retrieval_003", "type": "retrieval", "name": "时效优先检索",
      "description": "优先获取近3年文献",
      "prompt": "检索时添加年份限定词(recent/2022-2025)，优先获取近3年最新文献。如无结果再放宽年限。"},
@@ -32,13 +32,13 @@ _CARDS: List[dict] = [
      "prompt": "在多篇文献中，优先选取text_preview字段最长、包含具体方法和数据的文献返回。"},
     {"id": "retrieval_008", "type": "retrieval", "name": "PubMed专业检索",
      "description": "生物医学问题优先走PubMed",
-     "prompt": "涉及基因、蛋白、疾病、药物等生物医学问题时，优先使用multi_search的PubMed源。"},
+     "prompt": "涉及基因、蛋白、疾病、药物等生物医学问题时，优先使用academic_search的PubMed源。"},
     {"id": "retrieval_009", "type": "retrieval", "name": "跨领域检索",
      "description": "柑橘问题也可查拟南芥/番茄文献作机制参考",
      "prompt": "如果柑橘相关文献不足，可补充检索拟南芥(Arabidopsis)和番茄(tomato)中的同源机制文献作为参考(标记为'跨物种参考')。"},
     {"id": "retrieval_010", "type": "retrieval", "name": "RAG优先降级",
-     "description": "RAG无结果→自动降级到web_search",
-     "prompt": "先用citrus_rag_search检索本地文献库。如果返回<span3篇或无具体数据，自动降级到web_search和multi_search补充。"},
+     "description": "RAG无结果→自动降级到学术检索",
+     "prompt": "先用citrus_rag_search检索本地文献库。如果返回<span3篇或无具体数据，自动降级到academic_search补充。"},
 
     # ═══════════════ 规划策略 (planning) ═══════════════
     {"id": "planning_001", "type": "planning", "name": "综述型规划",

@@ -52,14 +52,14 @@ def test_ag3_early_compaction():
     r = asyncio.get_event_loop().run_until_complete(budget.check(short))
     check("20 轮不触发", r.level == ContextBudgetLevel.NORMAL, f"level={r.level.value}")
 
-    long = build_history(400)   # ~1.2M chars ≈ 800K tokens → ratio ~80% → SUMMARIZE
+    long = build_history(200)   # 200 轮 ≈ 72 万 tokens (新混合估算) → ratio ~72% → SUMMARIZE
     r2 = asyncio.get_event_loop().run_until_complete(budget.check(long))
-    check("400 轮触发 SUMMARIZE", r2.level == ContextBudgetLevel.SUMMARIZE,
+    check("200 轮触发 SUMMARIZE", r2.level == ContextBudgetLevel.SUMMARIZE,
           f"level={r2.level.value}, tokens={budget.estimate_tokens(long)}")
     check("压缩后消息数显著下降", len(r2.messages) < len(long) * 0.35,
           f"{len(r2.messages)} < {len(long)*0.35:.0f}")
 
-    huge = build_history(900)   # ~2.7M chars → ratio > 93% → TRUNCATE
+    huge = build_history(900)   # ~3.2M chars → ratio > 93% → TRUNCATE
     r3 = asyncio.get_event_loop().run_until_complete(budget.check(huge))
     check("900 轮触发 TRUNCATE", r3.level == ContextBudgetLevel.TRUNCATE,
           f"level={r3.level.value}")
