@@ -1,0 +1,287 @@
+# GSRA: Graph-Structured Retrieval Agent 配置文件
+# 优先级: 环境变量 > YAML > pydantic-settings 默认值
+
+retrieval:
+  top_k_vector: 40          # 向量检索每批取回数量
+  top_k_bm25: 40            # BM25 检索取回数量
+  top_k_final: 10           # Rerank 后最终保留数量
+  rrf_k: 60                 # RRF 融合常数
+  rrf_weights:
+    orig_dense: 1.0          # original_query 向量检索权重
+    hyde_dense: 1.0          # HyDE 假想答案向量检索权重
+    bm25: 1.0                # BM25 词法检索权重
+  rerank_threshold: 0.25    # Sigmoid 概率绝对底线阈值
+  dynamic_threshold_ratio: 0.60  # 动态阈值 = top_score * ratio
+  web_relevance_threshold: 0.3   # Web 语义过滤阈值（BGE reranker 分数，0=不相关 1=完美匹配）
+  rag_hyde_enabled: true         # HyDE: 本地RAG检索前生成英文假想答案提升召回
+
+# 学术搜索配置（CrossRef/PubMed/Semantic Scholar/OpenAlex）
+# 根据网络状况选择性启用。大陆网络仅 CrossRef+PubMed 稳定。
+academic_search:
+  enabled_sources: ["crossref"]
+  timeout_per_source: 5  # 单源超时秒数
+
+model:
+  main: "deepseek-chat"
+  fast: "deepseek-chat"
+  embedding: "intfloat/multilingual-e5-large"
+  reranker: "BAAI/bge-reranker-v2-m3"
+
+embedder:
+  force_cpu: false          # 强制 CPU（调试用）
+  # offline_mode: true     # 默认离线(大陆推荐)。改为 false 或设 HF_HUB_OFFLINE=0 可连 HuggingFace 检查更新
+
+onnx:
+  provider_priority:
+    - "DmlExecutionProvider"
+    - "CUDAExecutionProvider"
+    - "CPUExecutionProvider"
+
+# ── Compute Scheduler ──
+compute:
+  prefer_device: "auto"       # auto / directml / cuda / cpu
+  fallback_to_cpu: true
+  dml_device_id: 0
+  cuda_device_id: 0
+
+react:
+  max_steps: 5
+
+logging:
+  level: "INFO"
+  dir: "logs"
+
+chat:
+  temperature_main: 0.2
+    # 主模型（deepseek-chat）生成温度。值越大回答越随机。
+    # 当前 0.2 偏保守，适合科研回答需事实准确性。可提至 0.3 让综合论述更流畅。
+  temperature_fast: 0.0
+    # 快模型生成温度，用于意图分类、历史压缩、查询翻译等辅助任务。
+    # 0.0 = 确定性最高，避免这些辅助任务引入随机偏差。
+  max_tokens: 4096
+    # 每次 LLM 生成的最大 token 数。涵盖了主回答的输出长度上限。
+    # 注意：仍受模型上下文窗口和已消耗 token 的双重限制。
+  history_compact_threshold: 3
+    # 在 graph.py 的 check_history 节点中：当 state["messages"] 中 human 消息数 > 此值，
+    # 路由到 compact_history 节点执行历史压缩。
+    # 3 轮对话经验值：太早压缩丢失上下文，太晚压缩浪费 token。
+    # 设为 0 则每轮都压缩（激进节约 token）；设为 99 则永不压缩。
+  compact_threshold_messages: 6
+    # 在 history_compactor.compact() 中：传入的过滤后历史列表长度 > 此值才真正调用 LLM 压缩。
+    # 与 history_compact_threshold 的关系：后者是路由条件（粗粒度），此值是执行条件（细粒度）。
+    # 例如 history_compact_threshold=3 路由到 compact，但过滤后只有 5 条消息则跳过压缩。
+    # 6 = 3轮对话（3条human + 3条assistant，过滤掉tool_call消息后通常4~5条）。
+  recent_messages_window: 4
+    # 短期工作记忆窗口大小。控制 context_builder / query_expansion / stateless_rag_service 中
+    # 截取最近几条对话作为 LLM 的短时上下文。值越大给模型更多上下文但增加 token 消耗。
+    # 4 条 = 最近 2 轮对话（2问2答）。
+  recent_content_max_chars: 800
+    # context_builder.build_messages() 组装近期对话时，每条 assistant 消息最多截取的字数。
+    # 控制短期记忆注入 prompt 的大小。超过部分被截断，不包含 [x] 引用编号。
+    # 800 字约等于 1 段详细回答，过长会增加无用上下文。
+  expansion_content_max_chars: 400
+    # query_expansion.generate_options() 查询扩展时，每条历史消息最多截取的字数。
+    # 查询扩展不需要完整回答内容，只需要理解话题上下文，所以比 recent_content_max_chars 更短。
+  compact_content_max_chars: 400
+    # history_compactor.compact() 构造压缩输入时，每条历史消息最多截取的字数。
+    # 控制送入压缩 LLM 的每条消息长度。值越大保留更多细节但增加压缩 API 的成本和延迟。
+    # 400 字约 = 1 段核心结论 + 1 个关键数值，超过部分在压缩阶段会被丢弃。
+    # 与 compact_max_tokens 配合：每条截断 400 × 6条 = 2400 输入，输出约 500 tokens 摘要。
+    # 若单条回答特别长（如包含表格、多段引用），此值可适当提高至 600。
+  compact_max_tokens: 800
+    # 压缩器 LLM 调用时 output 的 max_tokens 上限。控制摘要输出的精细度。
+    # 500 tokens ≈ 1500 中文字符，实际模型输出通常 300~500 字，压缩率约 70~80%。
+    # 提高此值 → 摘要保留更多细节（降低信息丢失风险），但压缩后仍然注入后续 prompt，
+    #   占用上下文窗口，变相增加 token 成本。
+    # 降低此值 → 摘要更精简，节省 token，但可能丢失关键实体或数值。
+    # 建议：若科研讨论涉及精确数值（如 "p<0.05, 浓度 0.5μM"），800 更稳妥。
+  compact_timeout: 10
+    # 压缩器 LLM API 调用的超时秒数。超时后触发生成的 fallback（保留最近 N 条原始消息）。
+    # 网络不稳定时可适当提高，避免因超时导致每次 fallback 跳过压缩。
+  fallback_messages_window: 4
+    # 压缩 LLM API 调用失败时，fallback 保留的最近消息条数。
+    # 4 = 保留最近 2 轮对话的原始内容作为摘要，至少保证下一次 LLM 有基础上下文。
+  fallback_content_max_chars: 300
+    # fallback 场景下每条消息截取的字数。比 compact_content_max_chars 更短，
+    # 因为 fallback 是原始文本直接注入，没有经过压缩提炼，需要更严格的长度控制。
+
+graph:
+  recursion_limit: 25            # main.py
+
+feature_flags:
+  plan_mode: true
+  web_search: true
+  advanced_compression: true
+  concurrent_tools: true
+  hook_system: true
+  memory_enhanced: true
+  skill_hot_reload: false
+  light_mode: false
+  auto_write_report: false
+
+# ── Mixed Route (SIMPLE / COMPLEX routing) ──
+route:
+  enabled: true
+  simple_max_len: 25
+  simple_keywords: [读, 查, 绘, 画, 是多少, 是什么, 有哪些]
+  complex_keywords: [综述, 设计, 对比, 分析, 验证, 比较, 写的实验方案, 的论文]
+  llm_judge_on_uncertain: true
+
+# ── Circuit Breaker ──
+circuit_breaker:
+  subtask_max_tool_calls: 8
+  context_soft_threshold: 90   # % → trigger compaction
+  context_hard_threshold: 95   # % → force kill subtask
+
+api:
+  qdrant_timeout: 60             # Qdrant 客户端连接超时秒数
+  llm_timeout: 15                # LLM API 调用超时秒数（查询扩展等）
+  intent_timeout: 10             # 意图分类 API 超时秒数
+  intent_max_tokens: 10          # 意图分类输出最大 token（分类名仅需 1~2 token）
+
+# ── Agent / Sub-agent ──
+agent:
+  agents_dir: "src/prompts/agents"
+  workspace_dir: "workspace"     # 文件读写工作目录
+  max_turns: 3                   # 子 agent 默认最大对话轮次
+  timeout_sec: 30                # 子 agent 单次 LLM 调用超时
+  tool_result_caps:              # 子Agent结果回传supervisor的分档截断(字符)
+    write-agent: 1000            #   write-agent 只回传保存摘要
+    retrieve-agent: 15000        #   检索结果摘要
+    analyze-agent: 10000         #   分析结论
+    default: 100000              #   read_local_file/pdf_read 保留大值
+
+# ── File I/O ──
+file_io:
+  read_max_size_mb: 50           # 单次读取文件大小上限（MB）
+  write_max_size_mb: 10          # 单次写入文件大小上限（MB）
+
+# ── Statistics ──
+statistics:
+  alpha: 0.05                    # 统计显著性阈值
+  max_sample_size: 100000        # 单次分析最大样本量
+
+# ── Bio Databases ──
+bio_db:
+  cache_ttl: 3600                # 数据库查询缓存 TTL（秒）
+  entrez_email: "citrus-agent@localhost"  # NCBI Entrez 必填邮箱
+  entrez_tool: "CitrusQAAgent"           # NCBI Entrez 工具名
+  kegg_api_url: "https://rest.kegg.jp"           # KEGG API
+  uniprot_api_url: "https://rest.uniprot.org"    # UniProt API
+  string_api_url: "https://string-db.org/api"    # STRING API
+
+# ── HITL ──
+hitl:
+  enabled: true
+  auto_approve: true        # true = 测试模式自动通过（生产环境请改为 false）
+  skip_sandbox: false       # false = 工具调用先过沙箱
+  timeout_sec: 30           # 等待人工确认超时（30 秒后自动拒绝）
+
+# ── Sandbox ──
+sandbox:
+  enabled: true
+  allowed_patterns:
+    - read_*
+    - search_*
+    - list_*
+  dangerous_patterns:
+    - delete_*
+    - exec_*
+    - write_*
+
+# ── Context Budget v8.1.1 ──
+context_budget:
+  enabled: true
+  max_tokens: 1000000
+  soft_threshold: 0.90
+  hard_threshold: 0.95
+  summarize_ratio: 0.70
+  keep_recent_turns: 2
+  compact_max_tokens: 800
+
+# ── Fast Guard v8.1.1 ──
+guard:
+  enabled: true
+  max_query_length: 12
+
+# ── Supervisor v8.1.1 ──
+supervisor:
+  max_turns: 8
+  parallel_tool_calls: false
+
+# ── Subagents v8.1.1 ──
+subagents:
+  retrieve-agent:
+    max_turns: 3
+  write-agent:
+    max_turns: 6
+  analyze-agent:
+    max_turns: 2
+
+# ── Light Mode v8.1.1 ──
+light:
+  react_fallback_max_turns: 2
+
+# ── Web Search (Serper.dev) ──
+web_search:
+  provider: serper
+  max_results: 5
+  domain_whitelist:
+    policy:
+      - site:gov.cn
+      - site:moa.gov.cn
+      - site:mof.gov.cn
+      - site:ndrc.gov.cn
+    encyclopedia:
+      - site:baike.baidu.com
+      - site:zh.wikipedia.org
+    academic:
+      - site:cnki.net
+      - site:wanfangdata.com
+
+# ── Tool Tags (Agent tool 标签系统) ──
+tool_tags:
+  rag: [citrus_rag_search]
+  analysis_stat: [statistical_analysis, experimental_design]
+  file_io: [read_local_file, pdf_read]
+  web: [academic_search]
+  encyclopedia: [encyclopedia_search]
+  agent: [call_specialist]
+  orchestrator_tools: [call_specialist]
+
+# ── Tool Registry (YAML 注册替代代码注册) ──
+tools:
+  max_tool_calls: 4
+  registrations:
+    - name: citrus_rag_search
+      category: rag
+      readonly: true
+      concurrency_key: rag
+    - name: academic_search
+      category: web
+      readonly: true
+      concurrency_key: web
+    - name: encyclopedia_search
+      category: encyclopedia
+      readonly: true
+      concurrency_key: web
+    - name: pdf_read
+      category: analysis
+      readonly: true
+      concurrency_key: analysis
+    - name: call_specialist
+      category: agent
+      readonly: true
+      concurrency_key: agent
+    - name: read_local_file
+      category: file
+      readonly: true
+      concurrency_key: file
+    - name: statistical_analysis
+      category: analysis
+      readonly: true
+      concurrency_key: analysis
+    - name: experimental_design
+      category: analysis
+      readonly: true
+      concurrency_key: analysis

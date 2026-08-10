@@ -1,0 +1,25 @@
+"""AgentState TypedDict — v8.1.1 streamlined."""
+from typing import Annotated, Optional, TypedDict
+
+from langgraph.graph.message import add_messages
+from langchain_core.messages import BaseMessage
+
+
+class AgentState(TypedDict, total=False):
+    messages: Annotated[list[BaseMessage], add_messages]
+    query: str
+    session_id: str
+    mode: str
+
+    answer: str
+    gen_time_ms: float
+
+    history_summary: Optional[str]
+    long_term_memory: Optional[str]
+    search_suggestions: list[str]
+    format_hint: Optional[str]
+
+    retrieval_context: Optional[str]
+    references_data: Optional[dict]
+
+    _trace: Optional[dict]

@@ -1,0 +1,29 @@
+# 密钥与配置（禁止入库）
+.env
+*.env
+*.env.*
+
+# 运行时状态与用户数据
+agent/state/
+agent/logs/
+agent/workspace/
+agent/data/
+agent/.hf_cache/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 模型缓存
+.hf_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 临时
+*.tmp
+.DS_Store
