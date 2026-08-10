@@ -188,7 +188,9 @@ def _build_full_retrieval_context(main_results: list, web_results: list) -> str:
             f"    URL: {wr.get('url', wr.get('link', 'N/A'))}\n"
             f"    Snippet: {str(wr.get('snippet', wr.get('content', '')))[:300]}"
         )
-    return "\n\n".join(parts) if parts else ""
+    body = "\n\n".join(parts) if parts else ""
+    # v8.3.1: 明确标记检索结果性质，防止被 _looks_like_document 误判为"已成文文档"
+    return f"检索结果:\n{body}" if body else ""
 
 
 def _normalize_output_path(path: str) -> str:
@@ -212,10 +214,30 @@ def _normalize_output_path(path: str) -> str:
 
 
 def _looks_like_document(text: str) -> bool:
-    """Document structure heuristic: has heading/section markers, no raw-material features."""
-    positive = ["# ", "## ", "### ", "摘要", "引言", "结论", "参考文献", "References", "关键词"]
-    negative = ["检索结果:", "以下是相关文献:", "来源:", "chunk_id:", "confidence:"]
-    has_pos = any(m in text for m in positive)
+    """Document structure heuristic: has heading/section markers, no raw-material features.
+
+    v8.3.1 修复: 用户指令常含"标题/摘要/引言/关键词"等结构性词，检索结果列表含
+    DOI/Authors 批量字段——原启发式把"用户指令+检索列表"误判为已成文文档，
+    导致 direct write 跳过 write-agent。新增强负特征（检索列表特征优先判定）。
+    """
+    if not text or len(text) < 200:
+        return False
+    import re
+    # 强负特征: 文献检索列表特征 → 直接判非文档（即使含标题词）
+    if len(re.findall(r"DOI:\s*10\.\d{4,}", text)) >= 3:
+        return False
+    # 编号条目 + 缩进字段行（[1] 标题\n    Authors:/Year:/Abstract:...）— 检索列表特征；
+    # 真文档参考文献的 "[1] 内容"（无缩进字段行）不受影响
+    if re.search(r"^\s*\[\d+\]\s+\S.*\n\s+(?:Authors|Year|Abstract|URL|Snippet):", text, re.M):
+        return False
+    if re.search(r"^\s*\[\s*Web-\d+\s*\]", text, re.M):
+        return False
+    negative = [
+        "检索结果:", "以下是相关文献:", "来源:", "chunk_id:", "confidence:",
+        "=== 检索结果 ===", "Authors:", "Abstract:",
+    ]
+    has_pos = any(m in text for m in
+                  ["# ", "## ", "### ", "摘要", "引言", "结论", "参考文献", "References", "关键词"])
     has_neg = any(m in text for m in negative)
     return has_pos and not has_neg
 
@@ -274,6 +296,7 @@ async def _execute_tool_call(tc: dict, tc_id: str = "") -> dict:
         # Direct-write shortcut: context is a finished document (structure markers, no raw material)
         if (agent_name == "write-agent" and len(context) > 2000
                 and task.get("output_path") and _looks_like_document(context)):
+            logger.info(f"[ExpertGraph] direct write: context_head={context[:120]!r} ...")
             from src.tools.file_ops import write_local_file
             save_path = task["output_path"]
             save_msg = write_local_file.func(save_path, context, "write")
