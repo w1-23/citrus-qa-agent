@@ -213,33 +213,58 @@ def _normalize_output_path(path: str) -> str:
     return path
 
 
-def _looks_like_document(text: str) -> bool:
-    """Document structure heuristic: has heading/section markers, no raw-material features.
+def _has_retrieval_markers(text: str) -> bool:
+    """快速否定排除（v8.3.1）：检索/素材列表特征明确 → 一定不是成文文档。
 
-    v8.3.1 修复: 用户指令常含"标题/摘要/引言/关键词"等结构性词，检索结果列表含
-    DOI/Authors 批量字段——原启发式把"用户指令+检索列表"误判为已成文文档，
-    导致 direct write 跳过 write-agent。新增强负特征（检索列表特征优先判定）。
+    只做"排除"，不做"确认"——确认权交给 _classify_document（LLM 语义判断）。
+    替代旧 _looks_like_document 的 positive/negative 双向启发式（关键词无法理解语义，
+    曾把"用户指令+检索列表"误判为已成文文档导致 write-agent 被跳过）。
     """
-    if not text or len(text) < 200:
-        return False
     import re
-    # 强负特征: 文献检索列表特征 → 直接判非文档（即使含标题词）
     if len(re.findall(r"DOI:\s*10\.\d{4,}", text)) >= 3:
-        return False
-    # 编号条目 + 缩进字段行（[1] 标题\n    Authors:/Year:/Abstract:...）— 检索列表特征；
-    # 真文档参考文献的 "[1] 内容"（无缩进字段行）不受影响
+        return True
     if re.search(r"^\s*\[\d+\]\s+\S.*\n\s+(?:Authors|Year|Abstract|URL|Snippet):", text, re.M):
-        return False
+        return True
     if re.search(r"^\s*\[\s*Web-\d+\s*\]", text, re.M):
+        return True
+    return any(m in text for m in ["检索结果:", "以下是相关文献:", "=== 检索结果 ==="])
+
+
+async def _classify_document(text: str) -> bool:
+    """LLM 语义判断 context 是否为已成文文档（v8.3.1 替代关键词启发式）。
+
+    Returns:
+        True = 可直接保存；False / 调用失败 = 需 write-agent 撰写（保守回退）。
+    """
+    try:
+        from openai import OpenAI
+        client = OpenAI(
+            api_key=settings.RESOLVED_FAST_API_KEY,
+            base_url=settings.RESOLVED_FAST_BASE_URL,
+            timeout=10,
+        )
+        resp = client.chat.completions.create(
+            model=settings.FAST_MODEL,
+            messages=[
+                {"role": "system", "content": (
+                    "Classify the given text as exactly ONE word:\n"
+                    "document - a complete, finished piece of writing (has title, sections, "
+                    "conclusion; reads like a paper, article or report)\n"
+                    "material - raw material, search results, instructions, notes, or anything "
+                    "that still requires writing or synthesis\n"
+                    "Output only the word."
+                )},
+                {"role": "user", "content": text[:3000]},
+            ],
+            temperature=0,
+            max_tokens=5,
+        )
+        word = (resp.choices[0].message.content or "").strip().lower()
+        logger.info(f"[ExpertGraph] document classify: {word} (context={len(text)}chars)")
+        return word == "document"
+    except Exception as e:
+        logger.warning(f"[ExpertGraph] document classify failed, conservative fallback: {e}")
         return False
-    negative = [
-        "检索结果:", "以下是相关文献:", "来源:", "chunk_id:", "confidence:",
-        "=== 检索结果 ===", "Authors:", "Abstract:",
-    ]
-    has_pos = any(m in text for m in
-                  ["# ", "## ", "### ", "摘要", "引言", "结论", "参考文献", "References", "关键词"])
-    has_neg = any(m in text for m in negative)
-    return has_pos and not has_neg
 
 
 async def _execute_tool_call(tc: dict, tc_id: str = "") -> dict:
@@ -293,9 +318,12 @@ async def _execute_tool_call(tc: dict, tc_id: str = "") -> dict:
         pass
     try:
         t_agent = time.perf_counter()
-        # Direct-write shortcut: context is a finished document (structure markers, no raw material)
+        # Direct-write shortcut (v8.3.1): 启发式只做否定排除（检索特征明确 → 必非文档），
+        # 确认权交给 LLM 语义分类（_classify_document），失败/不确定 → 走 write-agent 保守回退
         if (agent_name == "write-agent" and len(context) > 2000
-                and task.get("output_path") and _looks_like_document(context)):
+                and task.get("output_path")
+                and not _has_retrieval_markers(context)
+                and await _classify_document(context)):
             logger.info(f"[ExpertGraph] direct write: context_head={context[:120]!r} ...")
             from src.tools.file_ops import write_local_file
             save_path = task["output_path"]
