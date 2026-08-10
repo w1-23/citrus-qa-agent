@@ -685,12 +685,14 @@ async def expert_save_node(state: AgentState) -> dict:
                 for kw in ("###", "结论", "摘要", "引言", "核心结论", "局限与边界")
             )
             if is_substantial:
-                facts = memory_store.extract_key_facts(query, answer)
+                facts = await asyncio.to_thread(memory_store.extract_key_facts, query, answer)
                 for f in facts:
                     memory_store.save_long_term_fact(
                         f.get("key", ""),
                         f.get("value", ""),
                         f.get("confidence", 0.5),
+                        owner_session=session_id,
+                        source_query=query,
                     )
     except Exception as e:
         logger.debug(f"[ExpertGraph:save] LTM skip: {e}")

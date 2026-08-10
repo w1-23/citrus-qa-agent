@@ -506,6 +506,12 @@ def pdf_read(file_path: str, cross_reference: bool = True) -> tuple[str, dict]:
     if not os.path.exists(resolved_path):
         return f"文件不存在: {resolved_path}", {"pdf_data": None}
 
+    # AG-10: PDF 文件大小上限（与 read_local_file 一致）
+    size_mb = os.path.getsize(resolved_path) / (1024 * 1024)
+    if size_mb > settings.FILE_READ_MAX_SIZE_MB:
+        return (f"[ERR_FILE_TOO_LARGE] 文件过大: {size_mb:.1f}MB "
+                f"> {settings.FILE_READ_MAX_SIZE_MB}MB 限制", {"pdf_data": None})
+
     try:
         doc = fitz.open(resolved_path)
         meta = doc.metadata or {}

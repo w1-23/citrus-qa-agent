@@ -144,6 +144,7 @@ agent:
   workspace_dir: "workspace"     # 文件读写工作目录
   max_turns: 3                   # 子 agent 默认最大对话轮次
   timeout_sec: 30                # 子 agent 单次 LLM 调用超时
+  tool_exec_timeout_sec: 60      # 单个工具执行整体超时（超时返回 [ERR_TIMEOUT]）
   tool_result_caps:              # 子Agent结果回传supervisor的分档截断(字符)
     write-agent: 1000            #   write-agent 只回传保存摘要
     retrieve-agent: 15000        #   检索结果摘要

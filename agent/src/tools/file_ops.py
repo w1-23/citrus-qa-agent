@@ -1,4 +1,6 @@
 """File operations — sandboxed file write"""
+import os
+import threading
 from pathlib import Path
 from typing import Literal
 from langchain_core.tools import tool
@@ -7,6 +9,19 @@ from src.config import PROJECT_ROOT
 
 _WORKSPACE_ROOT = (PROJECT_ROOT / "workspace" / "output").resolve()
 _WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
+
+# 进程内按路径分桶的写锁，防止同文件并发 read-modify-write 丢失更新 (AG-9)
+_write_locks: dict = {}
+_write_locks_guard = threading.Lock()
+
+
+def _get_write_lock(path: str) -> threading.Lock:
+    with _write_locks_guard:
+        lock = _write_locks.get(path)
+        if lock is None:
+            lock = threading.Lock()
+            _write_locks[path] = lock
+        return lock
 
 
 @tool
@@ -29,16 +44,21 @@ def write_local_file(path: str, content: str, mode: Literal["write", "append"] =
 
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if mode == "write":
-            actual_mode = "write"
-        elif mode == "append" and target_path.exists():
-            existing = target_path.read_text(encoding="utf-8")
-            content = existing + "\n\n" + content
-            actual_mode = "append"
-        else:
-            actual_mode = "write"
+        lock = _get_write_lock(str(target_path))
+        with lock:
+            if mode == "write":
+                actual_mode = "write"
+            elif mode == "append" and target_path.exists():
+                existing = target_path.read_text(encoding="utf-8")
+                content = existing + "\n\n" + content
+                actual_mode = "append"
+            else:
+                actual_mode = "write"
 
-        target_path.write_text(content, encoding="utf-8")
+            # 原子写: 先写临时文件再 os.replace，避免崩溃产生半截文件
+            tmp_path = target_path.with_suffix(target_path.suffix + ".tmp")
+            tmp_path.write_text(content, encoding="utf-8")
+            os.replace(tmp_path, target_path)
 
         total_chars = len(content)
         size_kb = target_path.stat().st_size / 1024

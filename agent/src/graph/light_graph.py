@@ -329,12 +329,14 @@ async def save_context_node(state: AgentState) -> dict:
     try:
         from src.guardrails.memory import memory_store
         if len(answer) > 500:
-            facts = memory_store.extract_key_facts(query, answer)
+            facts = await asyncio.to_thread(memory_store.extract_key_facts, query, answer)
             for f in facts:
                 memory_store.save_long_term_fact(
                     f.get("key", ""),
                     f.get("value", ""),
                     f.get("confidence", 0.5),
+                    owner_session=session_id,
+                    source_query=query,
                 )
     except Exception as e:
         logger.debug(f"[LightGraph:save] LTM skip: {e}")

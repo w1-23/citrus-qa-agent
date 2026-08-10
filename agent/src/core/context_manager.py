@@ -106,6 +106,12 @@ class ContextManager:
                 )
             except Exception as e:
                 logger.warning(f"[ContextManager] load history failed: {e}")
+                # AG-14: 历史加载失败不再静默 — 推送 context_degraded 供前端警示
+                try:
+                    from src.core.progress_bus import emit_encoded
+                    emit_encoded("context_degraded", {"reason": "history_unavailable"})
+                except Exception:
+                    pass
 
         if self._budget and ctx.history_messages:
             try:

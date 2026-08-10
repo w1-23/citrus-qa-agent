@@ -125,7 +125,36 @@ class MultiBatchRetriever:
             logger.info("Building Global BM25 Index...")
             texts = [f"{c.get('section_name','')} {c.get('text','')}" for c in self.global_chunks]
             self.bm25.fit(texts)
-            self._idx_map = { (c["_batch"], c.get("chunk_index")): c["_global_idx"] for c in self.global_chunks }
+            # AG-11 修正: chunk_index 为论文内编号, 全局唯一键 = (paper_id, chunk_index)
+            self._idx_map = {
+                (c.get("paper_id", ""), c.get("chunk_index")): c["_global_idx"]
+                for c in self.global_chunks
+            }
+            self._verify_idx_map()
+
+    def _verify_idx_map(self):
+        """AG-11: 映射完整性自检 — 抽样 qdrant 点，按 payload (paper_id, chunk_index) 匹配率告警。"""
+        import random
+        for batch_name, (client, coll_name) in self.batches.items():
+            try:
+                pts, _ = client.scroll(collection_name=coll_name, limit=200, with_payload=True)
+                if not pts:
+                    continue
+                matched = sum(
+                    1 for p in pts
+                    if ((p.payload or {}).get("paper_id", ""), (p.payload or {}).get("chunk_index"))
+                    in self._idx_map
+                )
+                rate = matched / len(pts)
+                if rate < 0.95:
+                    logger.warning(
+                        f"[Retriever] idx_map match rate LOW: batch={batch_name} "
+                        f"{matched}/{len(pts)} ({rate:.1%}) — 检索将跳过未映射 chunk"
+                    )
+                else:
+                    logger.info(f"[Retriever] idx_map ok: batch={batch_name} {matched}/{len(pts)} ({rate:.1%})")
+            except Exception as e:
+                logger.warning(f"[Retriever] idx_map self-check failed for {batch_name}: {e}")
 
     def _enrich_all_metadata(self):
         """Extract title/authors/year from chunk text since external pipeline didn't store them."""
@@ -208,8 +237,16 @@ class MultiBatchRetriever:
                        query_vec: List[float], limit: int) -> List[Tuple[int, float]]:
         try:
             res = client.query_points(collection_name=coll_name, query=query_vec, limit=limit)
-            return [(self.global_chunks[self._idx_map.get((batch_name, p.id), -1)]["_global_idx"], p.score)
-                    for p in res.points]
+            out = []
+            for p in res.points:
+                # AG-11 修正: point id 为随机整数, 必须用 payload 的 (paper_id, chunk_index) 定位
+                pl = p.payload or {}
+                g = self._idx_map.get((pl.get("paper_id", ""), pl.get("chunk_index")))
+                if g is None:
+                    logger.warning(f"[Retriever] unmapped point {p.id} in {batch_name} — skipped")
+                    continue
+                out.append((self.global_chunks[g]["_global_idx"], p.score))
+            return out
         except Exception as e:
             logger.error(f"Qdrant search failed for {batch_name}: {e}")
             return []

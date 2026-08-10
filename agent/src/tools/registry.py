@@ -125,6 +125,8 @@ async def _run_single_tool(tool: BaseTool, tool_call: dict) -> ToolMessage:
     if reject_reason:
         return ToolMessage(content=reject_reason, tool_call_id=tool_call["id"], name=tool_name, artifact={})
 
+    exec_timeout = getattr(settings, "TOOL_EXEC_TIMEOUT_SEC", 60) or 60
+
     # 注意：对于 response_format="content_and_artifact" 的工具，tool.ainvoke()
     # 会丢弃 artifact 只返回 content 字符串。
     # 必须直接调用底层函数才能获取完整的 (content, artifact) 元组。
@@ -133,9 +135,17 @@ async def _run_single_tool(tool: BaseTool, tool_call: dict) -> ToolMessage:
 
     if response_format == "content_and_artifact" and raw_func is not None:
         try:
-            content, artifact = await asyncio.get_running_loop().run_in_executor(
-                None, lambda: raw_func(**args)
+            content, artifact = await asyncio.wait_for(
+                asyncio.get_running_loop().run_in_executor(
+                    None, lambda: raw_func(**args)
+                ),
+                timeout=exec_timeout,
             )
+        except asyncio.TimeoutError:
+            logger.error(f"[PartitionedNode] 工具 {tool.name} 执行超时(>{exec_timeout}s)")
+            return ToolMessage(
+                content=f"[ERR_TIMEOUT] 工具 {tool.name} 执行超过 {exec_timeout}s，已中断。可稍后重试或换更小范围。",
+                tool_call_id=tool_call["id"], name=tool.name, artifact={})
         except Exception as e:
             logger.error(f"[PartitionedNode] 工具 {tool.name} 执行失败: {e}")
             error_msg = _classify_error(e)
@@ -145,7 +155,12 @@ async def _run_single_tool(tool: BaseTool, tool_call: dict) -> ToolMessage:
         return ToolMessage(content=content, artifact=artifact, tool_call_id=tool_call["id"], name=tool_name)
     else:
         try:
-            result = await tool.ainvoke(args)
+            result = await asyncio.wait_for(tool.ainvoke(args), timeout=exec_timeout)
+        except asyncio.TimeoutError:
+            logger.error(f"[PartitionedNode] 工具 {tool.name} 执行超时(>{exec_timeout}s)")
+            return ToolMessage(
+                content=f"[ERR_TIMEOUT] 工具 {tool.name} 执行超过 {exec_timeout}s，已中断。可稍后重试或换更小范围。",
+                tool_call_id=tool_call["id"], name=tool.name, artifact={})
         except Exception as e:
             logger.error(f"[PartitionedNode] 工具 {tool.name} 执行失败: {e}")
             error_msg = _classify_error(e)

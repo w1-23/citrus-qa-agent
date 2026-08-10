@@ -34,6 +34,22 @@ from src.core.progress_bus import (
 )
 
 
+def _truncate_context_blocks(context: str, max_chars: int = 24000) -> str:
+    """按完整条目截断检索证据，避免把单篇文献切尾 (AG-8)."""
+    if len(context) <= max_chars:
+        return context
+    blocks = context.split("\n\n")
+    out, total = [], 0
+    for b in blocks:
+        if total + len(b) + 2 > max_chars:
+            break
+        out.append(b)
+        total += len(b) + 2
+    if not out:
+        return context[:max_chars]
+    return "\n\n".join(out)
+
+
 async def run_agent(
     agent_name: str,
     task: dict,
@@ -85,7 +101,7 @@ async def run_agent(
         )
     if context:
         human_content += (
-            f"<context>\n{context[:24000]}\n</context>\n\n"
+            f"<context>\n{_truncate_context_blocks(context)}\n</context>\n\n"
         )
     human_content += "Please complete the task. Output the final result when done."
 
@@ -109,16 +125,26 @@ async def run_agent(
     tool_count = 0
     collected_artifacts = {"main_results": [], "web_results": []}
     file_saved = False
+    llm_error: str = ""
     t_start = time.perf_counter()
 
     result_content = ""
 
     for turn in range(max_turns):
         t_llm = time.perf_counter()
-        try:
-            response = await llm_with_tools.ainvoke(messages)
-        except Exception as e:
-            logger.error(f"[AgentRunner] {agent_name} LLM error: {e}")
+        response = None
+        for attempt in range(3):
+            try:
+                response = await llm_with_tools.ainvoke(messages)
+                break
+            except Exception as e:
+                llm_error = str(e)
+                if attempt < 2:
+                    logger.warning(f"[AgentRunner] {agent_name} LLM retry {attempt+1}/3: {e}")
+                    await asyncio.sleep(2)
+                else:
+                    logger.error(f"[AgentRunner] {agent_name} LLM error (retries exhausted): {e}")
+        if response is None:
             break
 
         dt_llm = (time.perf_counter() - t_llm) * 1000
@@ -192,6 +218,13 @@ async def run_agent(
                 tr_content = str(getattr(tr, "content", ""))
                 if tc_name == "write_local_file" and tr_content.startswith("Success:"):
                     file_saved = True
+            # AG-8: 子 Agent 内工具结果分档截断（与 supervisor 的 TOOL_RESULT_CAPS 一致）
+            caps = getattr(settings, "TOOL_RESULT_CAPS", {}) or {}
+            cap = caps.get(agent_name, caps.get("default", 100000))
+            full_content = str(getattr(tr, "content", ""))
+            if len(full_content) > cap:
+                tr.content = full_content[:cap] + "\n\n[... 已截断 ...]"
+                logger.info(f"[AgentRunner] truncated tool result ({len(full_content)} chars > cap {cap})")
             try:
                 result_text = str(getattr(tr, "content", ""))[:100000]
                 result_count = len(collected_artifacts["main_results"]) + len(collected_artifacts["web_results"])
@@ -262,7 +295,7 @@ async def run_agent(
 
     return {
         "agent": agent_name,
-        "result": result_content or "(no output)",
+        "result": result_content or (f"[AgentError] {agent_name} LLM 调用失败(重试耗尽): {llm_error}" if llm_error else "(no output)"),
         "artifacts": collected_artifacts,
         "tools_called": tool_count,
         "turns": max_turns,

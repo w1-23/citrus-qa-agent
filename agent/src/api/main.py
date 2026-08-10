@@ -50,6 +50,21 @@ def _is_fast_guard_hit(query: str) -> bool:
     return cleaned in FAST_GUARD_PATTERNS
 
 
+def _resolve_mode(req: ChatRequest) -> tuple[str, str]:
+    """AG-12: 服务端路由兜底。light 模式下命中复杂关键词或长 query → 强制 expert。"""
+    if not req.light_mode:
+        return "expert", "client_expert"
+    query = (req.query or "").strip()
+    if settings.ROUTE_ENABLED:
+        complex_kw = settings.ROUTE_COMPLEX_KEYWORDS or []
+        if any(kw and kw in query for kw in complex_kw):
+            return "expert", "complex_keyword"
+        # 长句优先判定: 即使是"是什么/有哪些"句式, 长问句语义往往复杂
+        if len(query) > settings.ROUTE_SIMPLE_MAX_LEN:
+            return "expert", "long_query"
+    return "light", "client_light"
+
+
 def _fast_guard_reply(query: str) -> str:
     return (
         "你好！我是柑橘科研助手。\n\n"
@@ -99,8 +114,10 @@ class ChatRequest(BaseModel):
 @app.post("/api/v2/chat")
 async def chat_v2(req: ChatRequest):
     query = req.query
-    sid = req.session_id or str(uuid.uuid4())
-    mode = "light" if req.light_mode else "expert"
+    sid = await session_manager.get_or_create_session(req.session_id)
+    mode, route_reason = _resolve_mode(req)
+    if route_reason != "client_light":
+        logger.info(f"[API v2] route={mode} reason={route_reason}")
 
     # Fast Guard: pure greeting -> direct reply, no graph, no RAG
     if _is_fast_guard_hit(query):

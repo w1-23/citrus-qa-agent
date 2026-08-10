@@ -113,8 +113,17 @@ class MemoryStore:
 
     # ─── Long-term Memory (Cross-session) ───
 
-    def save_long_term_fact(self, fact_key: str, fact_value: str, confidence: float = 0.5) -> None:
-        """跨会话长期事实存储（不绑定 session_id）"""
+    def _ensure_ltm_schema(self, conn) -> None:
+        """AG-5: 迁移 long_term_memory 表，补齐 owner_session / source_query 列。"""
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(long_term_memory)")}
+        if "owner_session" not in cols:
+            conn.execute("ALTER TABLE long_term_memory ADD COLUMN owner_session TEXT DEFAULT ''")
+        if "source_query" not in cols:
+            conn.execute("ALTER TABLE long_term_memory ADD COLUMN source_query TEXT DEFAULT ''")
+
+    def save_long_term_fact(self, fact_key: str, fact_value: str, confidence: float = 0.5,
+                            owner_session: str = "", source_query: str = "") -> None:
+        """跨会话长期事实存储（AG-5: 记录来源会话与查询，供召回时标注溯源）。"""
         with self._mem_lock:
             try:
                 import sqlite3
@@ -128,27 +137,34 @@ class MemoryStore:
                             fact_key TEXT PRIMARY KEY,
                             fact_value TEXT,
                             confidence REAL DEFAULT 0.5,
-                            updated_at TEXT
+                            updated_at TEXT,
+                            owner_session TEXT DEFAULT '',
+                            source_query TEXT DEFAULT ''
                         )"""
                     )
+                    self._ensure_ltm_schema(conn)
                     conn.execute(
-                        """INSERT OR REPLACE INTO long_term_memory (fact_key, fact_value, confidence, updated_at)
-                           VALUES (?, ?, ?, ?)""",
-                        (fact_key, fact_value, confidence, datetime.now().isoformat()),
+                        """INSERT OR REPLACE INTO long_term_memory
+                           (fact_key, fact_value, confidence, updated_at, owner_session, source_query)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (fact_key, fact_value, confidence, datetime.now().isoformat(),
+                         owner_session, source_query),
                     )
                     conn.commit()
             except Exception as e:
                 logger.debug(f"[Memory] 保存长期事实失败: {e}")
 
-    def recall_long_term_memory(self, query: str, top_k: int = 5) -> str:
-        """语义向量检索跨会话长期记忆 (fallback 到关键词)"""
+    def recall_long_term_memory(self, query: str, top_k: int = 5,
+                                owner_session: str = "", max_chars: int = 1500) -> str:
+        """语义向量检索跨会话长期记忆 (fallback 到关键词)。
+        AG-5: 置信度按时间衰减(0.95/天)，输出带来源与更新时间标注，超 max_chars 截断。"""
         try:
-            return self._recall_semantic(query, top_k)
+            return self._recall_semantic(query, top_k, owner_session, max_chars)
         except Exception as e:
             logger.debug(f"[Memory] 语义召回失败, 回退关键词: {e}")
-            return self._recall_keyword_fallback(query, top_k)
+            return self._recall_keyword_fallback(query, top_k, owner_session, max_chars)
 
-    def _recall_semantic(self, query: str, top_k: int) -> str:
+    def _recall_semantic(self, query: str, top_k: int, owner_session: str, max_chars: int) -> str:
         import numpy as np
         import sqlite3
         from pathlib import Path
@@ -159,8 +175,10 @@ class MemoryStore:
             return ""
         with sqlite3.connect(str(db_path)) as conn:
             conn.row_factory = sqlite3.Row
+            self._ensure_ltm_schema(conn)
             rows = conn.execute(
-                "SELECT fact_key, fact_value, confidence, updated_at FROM long_term_memory ORDER BY updated_at DESC LIMIT 500"
+                "SELECT fact_key, fact_value, confidence, updated_at, owner_session, source_query "
+                "FROM long_term_memory ORDER BY updated_at DESC LIMIT 500"
             ).fetchall()
         if not rows:
             return ""
@@ -177,20 +195,33 @@ class MemoryStore:
 
         top_indices = np.argsort(scores)[::-1][:top_k]
         parts = []
+        now = datetime.now()
         for i in top_indices:
             score = float(scores[i])
             if score < 0.30:
                 continue
             row = rows[i]
+            conf = float(row["confidence"])
+            ts = row["updated_at"] or ""
+            try:
+                days = max((now - datetime.fromisoformat(ts)).days, 0)
+            except Exception:
+                days = 0
+            eff_conf = conf * (0.95 ** days)  # AG-5: 时间衰减
+            if eff_conf < 0.30:
+                continue
+            src = (row["source_query"] or "")[:20]
             parts.append(
-                f"- [{row['confidence']:.1f}] {row['fact_value']} "
-                f"(更新: {row['updated_at'][:10]})"
+                f"- [{eff_conf:.1f}] {row['fact_value']} "
+                f"(更新: {ts[:10]} 来源: {src or 'N/A'})"
             )
         if not parts:
             return ""
-        return "## 跨会话记忆\n以下为历史会话中提取的相关事实：\n" + "\n".join(parts)
+        text = ("## 跨会话记忆\n以下为历史会话中提取的相关事实（可能过期，"
+                "若与本次检索证据冲突，以本次检索证据为准）：\n" + "\n".join(parts))
+        return text[:max_chars]
 
-    def _recall_keyword_fallback(self, query: str, top_k: int) -> str:
+    def _recall_keyword_fallback(self, query: str, top_k: int, owner_session: str, max_chars: int) -> str:
         try:
             import sqlite3
             from pathlib import Path
@@ -200,23 +231,37 @@ class MemoryStore:
                 return ""
             with sqlite3.connect(str(db_path)) as conn:
                 conn.row_factory = sqlite3.Row
+                self._ensure_ltm_schema(conn)
                 rows = conn.execute(
-                    "SELECT fact_key, fact_value, confidence, updated_at FROM long_term_memory ORDER BY updated_at DESC LIMIT 200"
+                    "SELECT fact_key, fact_value, confidence, updated_at, owner_session, source_query "
+                    "FROM long_term_memory ORDER BY updated_at DESC LIMIT 200"
                 ).fetchall()
             query_tokens = set(re.findall(r'[\w\u4e00-\u9fff]{2,}', query.lower()))
             scored = []
+            now = datetime.now()
             for row in rows:
                 key_tokens = set(re.findall(r'[\w\u4e00-\u9fff]{2,}', row["fact_key"].lower()))
                 overlap = len(query_tokens & key_tokens)
                 if overlap > 0:
-                    scored.append((overlap * row["confidence"], row["fact_value"], row["confidence"], row["updated_at"]))
+                    conf = float(row["confidence"])
+                    ts = row["updated_at"] or ""
+                    try:
+                        days = max((now - datetime.fromisoformat(ts)).days, 0)
+                    except Exception:
+                        days = 0
+                    eff_conf = conf * (0.95 ** days)
+                    if eff_conf >= 0.30:
+                        scored.append((overlap * eff_conf, row["fact_value"], eff_conf, ts,
+                                       row["source_query"] or ""))
             scored.sort(key=lambda x: x[0], reverse=True)
             if not scored:
                 return ""
             parts = []
-            for score, value, conf, ts in scored[:top_k]:
-                parts.append(f"- [{conf:.1f}] {value} (更新: {ts[:10]})")
-            return "## 跨会话记忆\n以下为历史会话中提取的相关事实：\n" + "\n".join(parts)
+            for score, value, conf, ts, src in scored[:top_k]:
+                parts.append(f"- [{conf:.1f}] {value} (更新: {ts[:10]} 来源: {src[:20] or 'N/A'})")
+            text = ("## 跨会话记忆\n以下为历史会话中提取的相关事实（可能过期，"
+                    "若与本次检索证据冲突，以本次检索证据为准）：\n" + "\n".join(parts))
+            return text[:max_chars]
         except Exception:
             return ""
 
