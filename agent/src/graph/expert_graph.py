@@ -549,7 +549,23 @@ async def supervisor_node(state: AgentState) -> dict:
                 except Exception:
                     pass
 
-            for tc in response.tool_calls:
+            # 检索预算控制 (v8.3.1): 单轮最多 2 个 call_retrieve_agent，超出以 ToolMessage 告知 LLM（不静默丢弃）
+            retrieve_calls = [tc for tc in response.tool_calls
+                              if _make_tool_call(tc)["name"] == "call_retrieve_agent"]
+            excess_ids = set()
+            if len(retrieve_calls) > 2:
+                for excess_tc in retrieve_calls[2:]:
+                    excess_ids.add(id(excess_tc))
+                    messages.append(ToolMessage(
+                        content="[BUDGET_LIMIT] 检索预算已达上限(2次/轮)，本次调用被跳过。"
+                                "请基于已有检索结果继续，或合并查询到下一次调用。",
+                        tool_call_id=getattr(excess_tc, "id", "unknown"),
+                        name="call_retrieve_agent",
+                    ))
+                    logger.info("[ExpertGraph] BUDGET_LIMIT: 跳过超额 retrieve 调用")
+            executed_calls = [tc for tc in response.tool_calls if id(tc) not in excess_ids]
+
+            for tc in executed_calls:
                 tc_dict = _make_tool_call(tc)
                 tc_id = getattr(tc, "id", str(uuid.uuid4()))
                 if tc_dict["name"] == "call_write_agent":

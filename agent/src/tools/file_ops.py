@@ -62,6 +62,9 @@ def write_local_file(path: str, content: str, mode: Literal["write", "append"] =
 
         total_chars = len(content)
         size_kb = target_path.stat().st_size / 1024
-        return f"Success: {actual_mode} to {normalized}. Total file size now: {total_chars} chars ({size_kb:.1f} KB)."
+        # v8.3.1: 回显内容预览，帮助 LLM 判断已写入内容（防分块重写）
+        preview = content[:200].replace("\n", " ")
+        return (f"Success: {actual_mode} to {normalized}. Total file size now: "
+                f"{total_chars} chars ({size_kb:.1f} KB).\n内容预览: {preview}")
     except Exception as e:
         return f"Error writing file: {e}"

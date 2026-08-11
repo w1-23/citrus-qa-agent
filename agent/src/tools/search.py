@@ -929,6 +929,12 @@ def academic_search(query: str, limit_per_source: int = 3, focus: str = "auto", 
         dropped_count = len(deduped) - len(citrus_filtered)
         if dropped_count > 0:
             logger.info(f"[MultiSearch] citrus filter: kept {len(citrus_filtered)}, dropped {dropped_count}")
+        if not citrus_filtered and deduped:
+            # v8.3.1 性能优化: 全丢时保留 top 3 并标注，避免"0 结果 → LLM 换词重试 → 再 0 结果"空转循环
+            citrus_filtered = deduped[:3]
+            for r in citrus_filtered:
+                r["title"] = f"【非柑橘相关，仅供参考】{r.get('title', '')}"
+            logger.info(f"[MultiSearch] citrus filter: 全部丢弃 → min_keep=3 保留（非柑橘标注）")
         deduped = citrus_filtered
 
     deduped.sort(key=lambda x: x.get("citations", 0), reverse=True)

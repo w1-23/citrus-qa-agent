@@ -62,6 +62,12 @@ python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000
     └─ ⑤ SSE 流式返回（thinking/tool_*/text/citations/done）
 ```
 
+**性能预算（v8.3.1，防空转/防截断）**：
+- supervisor 单轮最多 **2 个** `call_retrieve_agent`；retrieve-agent 单轮最多 **2 个**工具——超出以 `[BUDGET_LIMIT]` ToolMessage 告知 LLM（不静默丢弃）
+- `academic_search` citrus 过滤全丢时 **min_keep=3** 保留并标注「非柑橘」，打断"0 结果→换词→再 0 结果"空转循环
+- write-agent 单轮输出上限 **12000 tokens**（约 1-2 章节）+ prompt 强制分块续写（禁止单轮生成全文），避免 32768 硬截断浪费
+- `write_local_file` 返回**内容预览**（前 200 字符），帮助 LLM 判断已写内容、防分块重写
+
 ### 检索管线（v8.3.1 关键修复）
 
 ```

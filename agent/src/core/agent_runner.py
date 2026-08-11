@@ -110,7 +110,9 @@ async def run_agent(
         HumanMessage(content=human_content),
     ]
 
-    max_t = 32768 if agent_name == "write-agent" else settings.MAX_TOKENS
+    # v8.3.1: write-agent 单轮输出上限 12000（约 1-2 章节），防止 32768 硬截断浪费；
+    # 配合 prompt"每轮 1-2 章节、后续 append 续写"，6 轮上限覆盖完整综述
+    max_t = 12000 if agent_name == "write-agent" else settings.MAX_TOKENS
     llm_base = ChatOpenAI(
         model=get_deepseek_model(),
         api_key=settings.RESOLVED_MAIN_API_KEY,
@@ -182,8 +184,22 @@ async def run_agent(
             except Exception:
                 pass
 
+        # 检索预算控制 (v8.3.1): retrieve-agent 单轮最多 2 个工具，超出以 ToolMessage 告知 LLM
+        tool_calls_to_run = list(response.tool_calls)
+        if agent_name == "retrieve-agent" and len(tool_calls_to_run) > 2:
+            for excess_tc in tool_calls_to_run[2:]:
+                excess_id = excess_tc.get("id", "unknown") if isinstance(excess_tc, dict) else getattr(excess_tc, "id", "unknown")
+                excess_name = excess_tc.get("name", "?") if isinstance(excess_tc, dict) else getattr(excess_tc, "name", "?")
+                messages.append(ToolMessage(
+                    content="[BUDGET_LIMIT] 检索预算已达上限(2个工具/轮)，本次调用被跳过。请基于已有结果继续。",
+                    tool_call_id=excess_id,
+                    name=excess_name,
+                ))
+                logger.info(f"[AgentRunner] BUDGET_LIMIT: 跳过超额工具 {excess_name}")
+            tool_calls_to_run = tool_calls_to_run[:2]
+
         # Emit structured tool events for each tool call
-        for tc in response.tool_calls:
+        for tc in tool_calls_to_run:
             tc_dict = _make_tool_call_dict(tc)
             tc_id = getattr(tc, "id", None) or str(uuid.uuid4())
             tc_name = tc_dict.get("name", "?")
@@ -196,10 +212,10 @@ async def run_agent(
         t_tool = time.perf_counter()
         try:
             tn = PartitionedToolNode(tools)
-            tool_results = await tn.execute_tools(list(response.tool_calls))
+            tool_results = await tn.execute_tools(tool_calls_to_run)
         except Exception as e:
             logger.error(f"[AgentRunner] {agent_name} tool exec failed: {e}")
-            for tc in response.tool_calls:
+            for tc in tool_calls_to_run:
                 tc_id = getattr(tc, "id", None) or str(uuid.uuid4())
                 tc_name = getattr(tc, "name", "")
                 try:
@@ -222,7 +238,7 @@ async def run_agent(
                     art.get("web_results", [])
                 )
 
-            tc = response.tool_calls[idx] if idx < len(response.tool_calls) else None
+            tc = tool_calls_to_run[idx] if idx < len(tool_calls_to_run) else None
             # tool_calls 元素为 dict（OpenAI 兼容格式），兼容对象形式取值
             if isinstance(tc, dict):
                 tc_id = tc.get("id", None) or str(uuid.uuid4())
