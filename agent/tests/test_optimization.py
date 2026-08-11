@@ -36,14 +36,25 @@ def test_min_keep():
 
 
 def test_budget_limit():
-    print("[②] 检索预算")
+    print("[②] 检索预算（配置驱动）")
     expert = open(os.path.join(BASE, 'src', 'graph', 'expert_graph.py'), encoding='utf-8').read()
     runner = open(os.path.join(BASE, 'src', 'core', 'agent_runner.py'), encoding='utf-8').read()
+    cfg = open(os.path.join(BASE, 'config.yaml'), encoding='utf-8').read()
     check("supervisor 含 BUDGET_LIMIT", "BUDGET_LIMIT" in expert)
-    check("supervisor 限 2 个 retrieve", "len(retrieve_calls) > 2" in expert)
-    check("agent_runner 限 2 工具/轮", 'tool_calls_to_run[:2]' in runner)
-    check("agent_runner 含 BUDGET_LIMIT 告知", "BUDGET_LIMIT" in runner)
+    check("supervisor 用配置预算", "SEARCH_BUDGET_PER_SUPERVISOR_TURN" in expert)
+    check("agent_runner 用配置预算", "SEARCH_BUDGET_PER_RETRIEVE_TURN" in runner)
+    check("config.yaml 含两个预算键", "search_budget_per_supervisor_turn" in cfg
+          and "search_budget_per_retrieve_turn" in cfg)
+    check("无硬编码 2（用 budget 变量）", "retrieve_calls[budget:]" in expert
+          and "tool_calls_to_run[budget:]" in runner)
     check("被拒调用回传 ToolMessage", 'tool_call_id=excess_id' in runner)
+
+    # 行为模拟: 预算从 settings 读取
+    import sys as _s
+    _s.path.insert(0, BASE)
+    from src.config import settings
+    check("settings 读取预算=2", settings.SEARCH_BUDGET_PER_SUPERVISOR_TURN == 2
+          and settings.SEARCH_BUDGET_PER_RETRIEVE_TURN == 2)
 
 
 def test_write_token():

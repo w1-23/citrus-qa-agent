@@ -184,19 +184,20 @@ async def run_agent(
             except Exception:
                 pass
 
-        # 检索预算控制 (v8.3.1): retrieve-agent 单轮最多 2 个工具，超出以 ToolMessage 告知 LLM
+        # 检索预算控制 (v8.3.1): retrieve-agent 单轮最多 N 个工具（config 可调），超出以 ToolMessage 告知 LLM
+        budget = getattr(settings, "SEARCH_BUDGET_PER_RETRIEVE_TURN", 2) or 2
         tool_calls_to_run = list(response.tool_calls)
-        if agent_name == "retrieve-agent" and len(tool_calls_to_run) > 2:
-            for excess_tc in tool_calls_to_run[2:]:
+        if agent_name == "retrieve-agent" and len(tool_calls_to_run) > budget:
+            for excess_tc in tool_calls_to_run[budget:]:
                 excess_id = excess_tc.get("id", "unknown") if isinstance(excess_tc, dict) else getattr(excess_tc, "id", "unknown")
                 excess_name = excess_tc.get("name", "?") if isinstance(excess_tc, dict) else getattr(excess_tc, "name", "?")
                 messages.append(ToolMessage(
-                    content="[BUDGET_LIMIT] 检索预算已达上限(2个工具/轮)，本次调用被跳过。请基于已有结果继续。",
+                    content=f"[BUDGET_LIMIT] 检索预算已达上限({budget}个工具/轮)，本次调用被跳过。请基于已有结果继续。",
                     tool_call_id=excess_id,
                     name=excess_name,
                 ))
                 logger.info(f"[AgentRunner] BUDGET_LIMIT: 跳过超额工具 {excess_name}")
-            tool_calls_to_run = tool_calls_to_run[:2]
+            tool_calls_to_run = tool_calls_to_run[:budget]
 
         # Emit structured tool events for each tool call
         for tc in tool_calls_to_run:
