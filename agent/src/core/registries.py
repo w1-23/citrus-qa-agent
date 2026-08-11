@@ -1,15 +1,5 @@
-"""Agent / Skill registries — v8.3.0 simplified."""
+"""Agent / Skill registries — v8.3.1 simplified."""
 from typing import List, Dict
-
-LIGHT_MODE_ALLOWED: set = {
-    "citrus_rag_search",
-    "read_local_file",
-    "write_local_file",
-}
-
-EXPERT_MODE_ALLOWED: set = LIGHT_MODE_ALLOWED | {
-    "academic_search",
-}
 
 AGENT_REGISTRY: Dict = {
     "retrieve-agent": {

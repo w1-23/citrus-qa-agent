@@ -27,7 +27,7 @@ from src.core.progress_bus import (
 )
 
 LIGHT_MAX_TURNS = 2
-LIGHT_TOOL_NAMES = ("citrus_rag_search",)
+LIGHT_TOOL_NAMES = ("citrus_rag_search", "read_local_file")
 
 
 def _build_light_llm(bind_tools=None):

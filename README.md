@@ -54,9 +54,9 @@ python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000
     │    ├─ supervisor: ReAct 循环（expert ≤4 轮 / light ≤2 轮）
     │    │    ├─ LLM 调用 3 次重试（修复 AG-7）
     │    │    ├─ 工具执行 asyncio.wait_for 60s 超时（修复 AG-7）
-    │    │    ├─ 子Agent 工具结果按 TOOL_RESULT_CAPS 分档截断（修复 AG-8）
     │    │    ├─ 工具失败 → [ERR_*]/[AgentError] 回传 LLM 可感知（修复 AG-14）
-    │    │    └─ write-agent: file_saved 标记防双写（修复 AG-2）
+    │    │    └─ 职责矩阵（v8.3.1）：保存现成内容 → supervisor 直写 write_local_file；
+    │    │       撰写/创作新内容 → call_write_agent；无任何第三方兜底写入
     │    └─ save: 会话落库 + LTM 事实提取（to_thread 异步，修复 AG-5）
     │
     └─ ⑤ SSE 流式返回（thinking/tool_*/text/citations/done）

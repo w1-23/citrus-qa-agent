@@ -62,10 +62,12 @@ _AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "call_write_agent",
-            "description": "Write or save content to a file. MUST call this when user asks to "
-                           "'save', 'write', 'preserve', 'store' any content to a file — "
-                           "even simple content like 'save 111 to test.md'. "
-                           "Also use for academic reviews, reports, or structured answers. "
+            "description": "Write, compose, or synthesize NEW content (reviews, reports, structured "
+                           "answers) from material and save it to a file. MUST call this when the user "
+                           "asks to WRITE/COMPOSE/DRAFT content like a review, report or article — "
+                           "even simple content like 'write 111 to test.md' when it requires writing. "
+                           "Do NOT use when the content ALREADY EXISTS in the conversation "
+                           "(e.g. 'save this answer'): use write_local_file directly instead. "
                            "For complex writing, ensure sufficient literature has been retrieved first. "
                            "context can be a finished document (will be saved directly) or "
                            "raw material to synthesize.",
@@ -161,6 +163,37 @@ _AGENT_TOOLS = [
                     },
                 },
                 "required": ["file_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_local_file",
+            "description": "Directly save EXISTING finished content to a file (workspace/output only). "
+                           "Use when the user asks to save/preserve text that ALREADY EXISTS in the "
+                           "conversation (e.g. save this answer, save this paragraph) — content is "
+                           "written verbatim WITHOUT rewriting. "
+                           "Do NOT use for writing new content: when the user asks to WRITE, COMPOSE, "
+                           "or synthesize a review/report/article from material, use call_write_agent instead.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File path relative to workspace/output/ (e.g. 'notes/answer.md')",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The exact finished content to save (verbatim, no rewriting)",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["write", "append"],
+                        "description": "'write' overwrites, 'append' appends (default write)",
+                    },
+                },
+                "required": ["path", "content"],
             },
         },
     },
@@ -330,7 +363,7 @@ async def _execute_tool_call(tc: dict, tc_id: str = "") -> dict:
             save_msg = write_local_file.func(save_path, context, "write")
             logger.info(f"[ExpertGraph] direct write (context={len(context)}chars): {save_msg}")
             result = {"agent": "write-agent", "result": f"已保存到 {save_path}", "artifacts": {},
-                      "tools_called": 0, "file_saved": True}
+                      "tools_called": 0}
         else:
             result = await run_agent(
                 agent_name, task, context=context,
@@ -340,19 +373,6 @@ async def _execute_tool_call(tc: dict, tc_id: str = "") -> dict:
     except Exception as e:
         logger.error(f"[ExpertGraph] sub-agent {agent_name} failed: {e}")
         return {"agent": agent_name, "result": f"[Error: {e}]", "artifacts": {}}
-
-    if agent_name == "write-agent":
-        output_path = task.get("output_path", "")
-        answer_text = result.get("result", "")
-        file_saved = result.get("file_saved", False)
-        if output_path and answer_text and len(answer_text) > 50 and not file_saved:
-            try:
-                from src.tools.file_ops import write_local_file
-                save_msg = write_local_file.func(output_path, answer_text)
-                logger.info(f"[ExpertGraph] forced save: {save_msg}")
-                result["result"] = f"[已保存到 {output_path}]\n\n{answer_text}"
-            except Exception as e:
-                logger.warning(f"[ExpertGraph] forced save failed: {e}")
 
     logger.info(
         f"[ExpertGraph] {agent_name} -> {len(result.get('result', ''))} chars, "
@@ -583,6 +603,26 @@ async def supervisor_node(state: AgentState) -> dict:
                     try:
                         emit_tool_result("pdf_read", str(content)[:100000], tc_id,
                                          summary=f"文献提取完成 ({len(str(content))} 字符)")
+                    except Exception:
+                        pass
+                elif tc_dict["name"] == "write_local_file":
+                    # supervisor 直写：保存对话中现成的完成内容（原样写入，不经过 write-agent）
+                    try:
+                        mark_tool_start(tc_id, "write_local_file")
+                    except Exception:
+                        pass
+                    from src.tools.file_ops import write_local_file
+                    args = tc_dict.get("args", {})
+                    path = str(args.get("path", "")).strip()
+                    content = str(args.get("content", ""))
+                    mode = str(args.get("mode", "write") or "write")
+                    save_msg = await asyncio.to_thread(
+                        write_local_file.func, path, content, mode,
+                    )
+                    sub_result = {"agent": "write_local_file", "result": save_msg, "artifacts": {}}
+                    try:
+                        emit_tool_result("write_local_file", save_msg[:100000], tc_id,
+                                         summary=f"保存完成 ({len(content)} 字符)")
                     except Exception:
                         pass
                 else:

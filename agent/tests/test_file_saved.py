@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
-"""agent_runner file_saved dict/getattr bug 回归（v8.3.1）
-真实事故: tool_calls 元素为 dict，getattr(tc,"name") 恒 "" → file_saved 恒 False
-→ supervisor forced save 覆盖 write-agent 已写入的完整综述。
+"""职责矩阵重构回归（v8.3.1）:
+  ① forced save / file_saved 信号已彻底删除（无第三方补偿写入）
+  ② supervisor 持有 write_local_file 直写工具（保存现成内容）
+  ③ retrieve-agent 3 轮 / light 绑定 read_local_file
 """
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 passed, failed = [], []
 
@@ -16,41 +19,67 @@ def check(name, cond, detail=""):
     print(f"  {'PASS' if cond else 'FAIL'}  {name}  {detail}")
 
 
-def test_file_saved_dict_bug():
-    print("[file_saved] dict tool_calls 场景")
-    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                            'src', 'core', 'agent_runner.py'), encoding='utf-8').read()
-    check("tc 兼容 dict 取值 (isinstance 分支)",
-          "isinstance(tc, dict)" in src and 'tc.get("name", "")' in src)
-    check("write-agent 判定仍用 tc_name == 'write_local_file'",
-          'tc_name == "write_local_file"' in src)
-
-    # 模拟判定逻辑: dict 场景 tc_name 应能取到
-    tc = {"id": "call_1", "name": "write_local_file", "args": {"path": "a.md", "content": "x"}}
-    tc_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
-    check("dict 场景 tc_name 取到 write_local_file", tc_name == "write_local_file", tc_name)
-
-    # 模拟 write_local_file 成功返回
-    tr_content = "Success: write to a.md. Total file size now: 100 chars (0.1 KB)."
-    file_saved = (tc_name == "write_local_file" and tr_content.startswith("Success:"))
-    check("file_saved 判定成功", file_saved is True)
+def test_no_fallback():
+    print("[职责] 无兜底写入 / 无布尔信号")
+    expert = open(os.path.join(BASE, 'src', 'graph', 'expert_graph.py'), encoding='utf-8').read()
+    runner = open(os.path.join(BASE, 'src', 'core', 'agent_runner.py'), encoding='utf-8').read()
+    check("expert_graph 无 forced save", "forced save" not in expert and "forced_save" not in expert)
+    check("expert_graph 无 file_saved", "file_saved" not in expert)
+    check("agent_runner 无 file_saved", "file_saved" not in runner)
 
 
-def test_encyclopedia_removed():
-    print("[encyclopedia] 已删除")
-    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    search_src = open(os.path.join(base, 'src', 'tools', 'search.py'), encoding='utf-8').read()
-    init_src = open(os.path.join(base, 'src', 'tools', '__init__.py'), encoding='utf-8').read()
-    cfg = open(os.path.join(base, 'config.yaml'), encoding='utf-8').read()
-    check("search.py 无 encyclopedia_search 定义", "def encyclopedia_search" not in search_src)
-    check("__init__.py 无导入", "encyclopedia_search" not in init_src)
-    check("config.yaml 无残留", "encyclopedia" not in cfg)
-    check("注册表数量 7", "read_local_file, write_local_file" in init_src)
+def test_supervisor_direct_write():
+    print("[职责] supervisor 直写工具")
+    expert = open(os.path.join(BASE, 'src', 'graph', 'expert_graph.py'), encoding='utf-8').read()
+    check("_AGENT_TOOLS 含 write_local_file", '"name": "write_local_file"' in expert)
+    check("处理分支存在", 'tc_dict["name"] == "write_local_file"' in expert)
+    check("描述含'原样保存/verbatim'", "verbatim" in expert and "call_write_agent instead" in expert)
+    check("write_local_file 分支执行写盘", "write_local_file.func, path, content, mode" in expert)
+
+
+def test_retrieve_turns():
+    print("[职责] retrieve-agent 3 轮")
+    runner = open(os.path.join(BASE, 'src', 'core', 'agent_runner.py'), encoding='utf-8').read()
+    check("_get_max_turns retrieve=3", '"retrieve-agent": 3' in runner)
+    prom = open(os.path.join(BASE, 'src', 'prompts', 'agents', 'retrieve-agent.md'), encoding='utf-8').read()
+    check("prompt 含轮次语义", "最多 3 轮" in prom and "同一轮内" in prom)
+
+
+def test_light_read():
+    print("[职责] light 绑定 read_local_file")
+    light = open(os.path.join(BASE, 'src', 'graph', 'light_graph.py'), encoding='utf-8').read()
+    check("LIGHT_TOOL_NAMES 含 read_local_file",
+          'LIGHT_TOOL_NAMES = ("citrus_rag_search", "read_local_file")' in light)
+    rules = open(os.path.join(BASE, 'src', 'prompts', 'system', 'light_rules.md'), encoding='utf-8').read()
+    check("light_rules 边界更新", "读取单个本地文件" in rules)
+
+
+def test_dead_code_removed():
+    print("[职责] 死代码已删")
+    init_src = open(os.path.join(BASE, 'src', 'tools', '__init__.py'), encoding='utf-8').read()
+    reg = open(os.path.join(BASE, 'src', 'core', 'registries.py'), encoding='utf-8').read()
+    check("tools/__init__ 无 get_tools_for_mode", "get_tools_for_mode" not in init_src)
+    check("tools/__init__ 无 get_all_tools", "get_all_tools" not in init_src)
+    check("registries 无 MODE_ALLOWED", "MODE_ALLOWED" not in reg)
+
+
+def test_prompt_boundaries():
+    print("[职责] prompt 双向边界")
+    guide = open(os.path.join(BASE, 'src', 'prompts', 'system', 'decision_guide.md'), encoding='utf-8').read()
+    writer = open(os.path.join(BASE, 'src', 'prompts', 'agents', 'write-agent.md'), encoding='utf-8').read()
+    check("decision_guide 含 write_local_file 直写指引", "直接调 write_local_file" in guide)
+    check("decision_guide 含 call_write_agent 撰写指引", "调 **call_write_agent**" in guide)
+    check("write-agent 含原样保存指令", "原样写入" in writer and "不要改写" in writer)
+    check("write-agent 自检含补写", "mode=\"append\"" in writer)
 
 
 if __name__ == "__main__":
-    test_file_saved_dict_bug()
-    test_encyclopedia_removed()
+    test_no_fallback()
+    test_supervisor_direct_write()
+    test_retrieve_turns()
+    test_light_read()
+    test_dead_code_removed()
+    test_prompt_boundaries()
     print(f"\n结果: {len(passed)} passed / {len(failed)} failed")
     if failed:
         print("失败项:", failed)

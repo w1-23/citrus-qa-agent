@@ -124,7 +124,6 @@ async def run_agent(
     max_turns = _get_max_turns(agent_name)
     tool_count = 0
     collected_artifacts = {"main_results": [], "web_results": []}
-    file_saved = False
     llm_error: str = ""
     t_start = time.perf_counter()
 
@@ -224,17 +223,13 @@ async def run_agent(
                 )
 
             tc = response.tool_calls[idx] if idx < len(response.tool_calls) else None
-            # v8.3.1 修复: tool_calls 元素为 dict（OpenAI 兼容格式），getattr 取不到 name → file_saved 恒 False
+            # tool_calls 元素为 dict（OpenAI 兼容格式），兼容对象形式取值
             if isinstance(tc, dict):
                 tc_id = tc.get("id", None) or str(uuid.uuid4())
                 tc_name = tc.get("name", "")
             else:
                 tc_id = getattr(tc, "id", None) or str(uuid.uuid4())
                 tc_name = getattr(tc, "name", "")
-            if agent_name == "write-agent":
-                tr_content = str(getattr(tr, "content", ""))
-                if tc_name == "write_local_file" and tr_content.startswith("Success:"):
-                    file_saved = True
             # AG-8: 子 Agent 内工具结果分档截断（与 supervisor 的 TOOL_RESULT_CAPS 一致）
             caps = getattr(settings, "TOOL_RESULT_CAPS", {}) or {}
             cap = caps.get(agent_name, caps.get("default", 100000))
@@ -316,7 +311,6 @@ async def run_agent(
         "artifacts": collected_artifacts,
         "tools_called": tool_count,
         "turns": max_turns,
-        "file_saved": file_saved,
     }
 
 
@@ -348,7 +342,7 @@ def _resolve_tool_names(agent_name: str) -> list[str]:
 
 def _get_max_turns(agent_name: str) -> int:
     mapping = {
-        "retrieve-agent": 1,
+        "retrieve-agent": 3,   # v8.3.1: 1→3，支持多轮换关键词迭代检索（对齐 config subagents 声明）
         "write-agent": 6,
         "analyze-agent": 2,
     }

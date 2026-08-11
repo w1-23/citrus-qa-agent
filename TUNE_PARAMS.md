@@ -63,7 +63,7 @@
 |------|--------|------|---------|
 | `SUPERVISOR_MAX_TURNS` | 4 | `expert_graph.py:33` | Expert 最大轮次 |
 | `LIGHT_MAX_TURNS` | 2 | `light_graph.py:29` | Light 最大轮次 |
-| `retrieve-agent max_turns` | 1 | `agent_runner.py:294` | 低频可提至 2 |
+| `retrieve-agent max_turns` | 3 | `agent_runner.py` | v8.3.1: 1→3 支持多轮迭代换关键词；结果足够时 LLM 提前收尾，实际通常 1-2 轮 |
 | `write-agent max_turns` | 6 | `agent_runner.py:295` | 通常 1-2 轮够了 |
 | `analyze-agent max_turns` | 2 | `agent_runner.py:296` | 分析 Agent |
 | `max_tool_calls` | 4 | `config.yaml` | 每轮最大并发工具数 |
