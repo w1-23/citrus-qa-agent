@@ -45,21 +45,22 @@ def get_tools_by_category(category: str) -> list[str]:
 
 
 def _classify_error(e: Exception) -> str:
+    """统一错误回传 (v8.3.1): [ERR_类别] 原因 + 建议策略，让 LLM 对症下药。"""
     if isinstance(e, ImportError):
         pkg = getattr(e, "name", str(e))
-        return f"[ERR_MISSING_DEP] 缺少依赖库: {pkg}。请运行 pip install {pkg}"
+        return f"[ERR_MISSING_DEP] 缺少依赖库: {pkg}。建议: pip install {pkg} 后重试"
     if isinstance(e, FileNotFoundError):
-        return f"[ERR_FILE_NOT_FOUND] 文件不存在: {e.filename}"
+        return f"[ERR_FILE_NOT_FOUND] 文件不存在: {e.filename}。建议: 检查路径拼写与文件位置"
     if isinstance(e, PermissionError):
-        return f"[ERR_HITL_REJECT] 权限不足: {e}"
+        return f"[ERR_HITL_REJECT] 权限不足: {e}。建议: 检查文件权限或改用工作区内路径"
     if isinstance(e, (asyncio.TimeoutError, TimeoutError)):
-        return f"[ERR_NETWORK] 请求超时: {e}"
+        return f"[ERR_NETWORK] 请求超时: {e}。建议: 稍后重试或改用本地源"
     msg = str(e)
     if "timeout" in msg.lower() or "connection" in msg.lower():
-        return f"[ERR_NETWORK] 网络错误: {e}"
+        return f"[ERR_NETWORK] 网络错误: {e}。建议: 稍后重试或改用本地源"
     if "parse" in msg.lower() or "decode" in msg.lower() or "json" in msg.lower():
-        return f"[ERR_PARSE] 数据解析错误: {e}"
-    return f"[ERR_PARSE] 工具执行异常: {e}"
+        return f"[ERR_PARSE] 数据解析错误: {e}。建议: 检查输入参数格式"
+    return f"[ERR_PARSE] 工具执行异常: {e}。建议: 检查参数是否合理"
 
 
 def _offload_large_result(result: str, tool_name: str) -> str:

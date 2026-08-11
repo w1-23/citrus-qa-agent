@@ -142,8 +142,6 @@ agent:
   max_turns: 3                   # 子 agent 默认最大对话轮次
   timeout_sec: 30                # 子 agent 单次 LLM 调用超时
   tool_exec_timeout_sec: 60      # 单个工具执行整体超时（超时返回 [ERR_TIMEOUT]）
-  search_budget_per_supervisor_turn: 2   # supervisor 单轮最多 call_retrieve_agent 次数（超出 BUDGET_LIMIT 告知）
-  search_budget_per_retrieve_turn: 2     # retrieve-agent 单轮最多工具调用数（超出 BUDGET_LIMIT 告知）
   tool_result_caps:              # 子Agent结果回传supervisor的分档截断(字符)
     write-agent: 1000            #   write-agent 只回传保存摘要
     retrieve-agent: 15000        #   检索结果摘要

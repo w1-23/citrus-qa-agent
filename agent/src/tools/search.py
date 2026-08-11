@@ -271,7 +271,18 @@ def citrus_rag_search(query: str) -> tuple[str, dict]:
         elapsed = (time.perf_counter() - t0) * 1000
 
         if not results:
-            content = _format_tool_result("citrus_rag_search", query, "未检索到相关文献。", status="empty", elapsed_ms=elapsed)
+            # v8.3.1 统一回传协议: 空结果附归因 + 建议，让 LLM 对症下药而非盲目换词
+            reason = getattr(rag, "last_empty_reason", "no_match")
+            if reason == "threshold_blocked":
+                note = ("原因: 检索到候选文献但相关性阈值拦截全部（关键词可能过宽泛）。\n"
+                        "建议: 换更特异的柑橘术语（品种/病害/基因名）或同义词。")
+            else:
+                note = ("原因: 本地柑橘文献库未收录该主题。\n"
+                        "建议: 改用 academic_search 学术源补充，或接受模型知识并标注 [模型知识]。")
+            content = _format_tool_result(
+                "citrus_rag_search", query, f"未检索到相关文献。\n{note}",
+                status="empty", elapsed_ms=elapsed,
+            )
         else:
             raw = format_rag_context(results, "main")
             content = _format_tool_result(
@@ -882,6 +893,7 @@ def academic_search(query: str, limit_per_source: int = 3, focus: str = "auto", 
 
     all_results = []
     source_times = {}
+    source_errors = {}   # v8.3.1: 收集各源失败原因，空结果时回传 LLM
 
     enabled_sources = getattr(settings, 'ACADEMIC_SOURCES', None) or ["crossref"]
     active_sources = {name: fn for name, fn in _SOURCES.items() if name in enabled_sources}
@@ -910,6 +922,7 @@ def academic_search(query: str, limit_per_source: int = 3, focus: str = "auto", 
             except Exception as e:
                 dt_src = (time.perf_counter() - t_src) * 1000
                 source_times[name] = dt_src
+                source_errors[name] = str(e)[:120]
                 logger.warning(f"[MultiSearch] {name} 异常 ({dt_src:.0f}ms): {e}")
 
     deduped = _deduplicate(all_results)
@@ -952,6 +965,16 @@ def academic_search(query: str, limit_per_source: int = 3, focus: str = "auto", 
     logger.info(f"[MultiSearch] total: {len(deduped)} results, {time_str} (total {dt_total:.0f}ms)")
 
     text_result = f"## 学术论文检索结果\n检索词: {query}\n共 {len(deduped)} 条结果 (去重后) | 来源: {', '.join(f'{k}={v}' for k, v in source_counts.items())}\n\n"
+
+    # v8.3.1 统一回传协议: 空结果附归因 + 建议
+    if not deduped:
+        if source_errors:
+            text_result += ("[ERR_NETWORK] 学术源请求失败: "
+                            + ", ".join(f"{k}({v[:60]})" for k, v in source_errors.items())
+                            + "\n建议: 网络问题重试无意义，请优先依赖本地 RAG（citrus_rag_search）。\n\n")
+        else:
+            text_result += ("原因: 学术源未检索到匹配文献。\n"
+                            "建议: 换更特异的英文关键词，或依赖本地 RAG（citrus_rag_search）。\n\n")
 
     for i, paper in enumerate(deduped[:15], 1):
 

@@ -35,26 +35,44 @@ def test_min_keep():
     check("柑橘条目被识别", _is_citrus_related("Citrus sinensis genome assembly") is True)
 
 
-def test_budget_limit():
-    print("[②] 检索预算（配置驱动）")
+def test_budget_removed():
+    print("[②] BUDGET_LIMIT 已删除（回滚硬阈值）")
     expert = open(os.path.join(BASE, 'src', 'graph', 'expert_graph.py'), encoding='utf-8').read()
     runner = open(os.path.join(BASE, 'src', 'core', 'agent_runner.py'), encoding='utf-8').read()
     cfg = open(os.path.join(BASE, 'config.yaml'), encoding='utf-8').read()
-    check("supervisor 含 BUDGET_LIMIT", "BUDGET_LIMIT" in expert)
-    check("supervisor 用配置预算", "SEARCH_BUDGET_PER_SUPERVISOR_TURN" in expert)
-    check("agent_runner 用配置预算", "SEARCH_BUDGET_PER_RETRIEVE_TURN" in runner)
-    check("config.yaml 含两个预算键", "search_budget_per_supervisor_turn" in cfg
-          and "search_budget_per_retrieve_turn" in cfg)
-    check("无硬编码 2（用 budget 变量）", "retrieve_calls[budget:]" in expert
-          and "tool_calls_to_run[budget:]" in runner)
-    check("被拒调用回传 ToolMessage", 'tool_call_id=excess_id' in runner)
+    cfgpy = open(os.path.join(BASE, 'src', 'config.py'), encoding='utf-8').read()
+    check("expert_graph 无 BUDGET_LIMIT", "BUDGET_LIMIT" not in expert)
+    check("agent_runner 无 BUDGET_LIMIT", "BUDGET_LIMIT" not in runner)
+    check("config.yaml 无预算键", "search_budget_per_" not in cfg)
+    check("config.py 无预算字段", "SEARCH_BUDGET" not in cfgpy)
+    check("agent_runner 恢复直接执行", "execute_tools(list(response.tool_calls))" in runner)
 
-    # 行为模拟: 预算从 settings 读取
+
+def test_reason_feedback():
+    print("[统一协议] 原因回传（状态+原因+建议）")
+    ret = open(os.path.join(BASE, 'src', 'retrieval', 'multi_retriever.py'), encoding='utf-8').read()
+    search = open(os.path.join(BASE, 'src', 'tools', 'search.py'), encoding='utf-8').read()
+    reg = open(os.path.join(BASE, 'src', 'tools', 'registry.py'), encoding='utf-8').read()
+    check("multi_retriever 含 last_empty_reason", "last_empty_reason" in ret)
+    check("阈值拦截归因 threshold_blocked", "threshold_blocked" in ret and "threshold_blocked" in search)
+    check("无匹配归因 no_match", '"no_match"' in ret or "'no_match'" in ret)
+    check("RAG 空结果附建议(换特异词)", "换更特异的柑橘术语" in search)
+    check("RAG 空结果附建议(换源)", "academic_search 学术源补充" in search)
+    check("academic 网络失败回传", "[ERR_NETWORK] 学术源请求失败" in search and "source_errors" in search)
+    check("academic 空结果附建议", "换更特异的英文关键词" in search)
+    check("_classify_error 补建议策略", "建议: " in reg and "pip install" in reg)
+    check("write-agent 归因要求", "结果归因要求" in open(os.path.join(BASE, 'src', 'prompts', 'agents', 'write-agent.md'), encoding='utf-8').read())
+    check("analyze-agent 归因要求", "结果归因" in open(os.path.join(BASE, 'src', 'prompts', 'agents', 'analyze-agent.md'), encoding='utf-8').read())
+
+    # 行为模拟: 归因文本生成
     import sys as _s
     _s.path.insert(0, BASE)
-    from src.config import settings
-    check("settings 读取预算=2", settings.SEARCH_BUDGET_PER_SUPERVISOR_TURN == 2
-          and settings.SEARCH_BUDGET_PER_RETRIEVE_TURN == 2)
+    from src.tools.registry import _classify_error
+    import asyncio
+    msg = _classify_error(FileNotFoundError("x.md"))
+    check("FILE_NOT_FOUND 含建议", "检查路径" in msg)
+    msg2 = _classify_error(asyncio.TimeoutError())
+    check("TIMEOUT 含建议", "本地源" in msg2)
 
 
 def test_write_token():
@@ -92,7 +110,8 @@ def test_write_preview():
 
 if __name__ == "__main__":
     test_min_keep()
-    test_budget_limit()
+    test_budget_removed()
+    test_reason_feedback()
     test_write_token()
     test_write_preview()
     print(f"\n结果: {len(passed)} passed / {len(failed)} failed")

@@ -63,10 +63,17 @@ python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000
 ```
 
 **性能预算（v8.3.1，防空转/防截断）**：
-- supervisor 单轮最多 **2 个** `call_retrieve_agent`；retrieve-agent 单轮最多 **2 个**工具——超出以 `[BUDGET_LIMIT]` ToolMessage 告知 LLM（不静默丢弃）
 - `academic_search` citrus 过滤全丢时 **min_keep=3** 保留并标注「非柑橘」，打断"0 结果→换词→再 0 结果"空转循环
 - write-agent 单轮输出上限 **12000 tokens**（约 1-2 章节）+ prompt 强制分块续写（禁止单轮生成全文），避免 32768 硬截断浪费
 - `write_local_file` 返回**内容预览**（前 200 字符），帮助 LLM 判断已写内容、防分块重写
+- 检索由 LLM 自主决定次数（无硬阈值），靠 min_keep + 原因回传自然收敛
+
+**统一回传协议（v8.3.1，状态+原因+建议）**：
+- 所有工具空结果/失败时附**归因 + 建议策略**，让 LLM 对症下药而非盲目重试：
+  - RAG 空结果 → `THRESHOLD_BLOCKED`（候选被阈值拦，建议换特异词）/ `NO_MATCH`（本地库无收录，建议换源或模型知识）
+  - academic 空结果 → `[ERR_NETWORK]`（网络失败，建议依赖本地 RAG）/ 无匹配（建议换关键词）
+  - 通用错误 → `[ERR_类别]` 每条含操作建议（`_classify_error`，如 FILE_NOT_FOUND→检查路径、TIMEOUT→改用本地源）
+- Agent 输出要求强化：write/analyze 必须说明结果归因与信息缺口（哪些有文献支持、哪些方向未检索到）
 
 ### 检索管线（v8.3.1 关键修复）
 

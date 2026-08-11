@@ -45,6 +45,7 @@ class MultiBatchRetriever:
             self.global_chunks: List[Dict] = []
             self.bm25 = BM25Plus()
             self._idx_map = {}
+            self.last_empty_reason: str = ""   # v8.3.1: 空结果归因（threshold_blocked / no_match），供工具回传 LLM
 
             try:
                 self._load_data()
@@ -292,6 +293,7 @@ class MultiBatchRetriever:
         reranked = self.reranker.rerank(primary_query, candidates, top_k=settings.TOP_K_FINAL)
         dt_rerank = (time.time() - t_rerank) * 1000
         if not reranked:
+            self.last_empty_reason = "no_match"
             return []
         top_score = reranked[0].get("rerank_score", 0)
         dynamic_thresh = top_score * settings.DYNAMIC_THRESHOLD_RATIO
@@ -299,6 +301,7 @@ class MultiBatchRetriever:
         passed = [c for c in reranked if c.get("rerank_score", 0) >= final_threshold]
         if not passed:
             logger.warning(f"动态阈值 {final_threshold:.4f} 拦截所有结果，触发模型知识兜底")
+            self.last_empty_reason = "threshold_blocked"
             return []
         total_ms = (time.time() - _t0) * 1000
         logger.info(f"[Retriever] rerank={dt_rerank:.0f}ms total={total_ms:.0f}ms | top_score={top_score:.4f} threshold={final_threshold:.4f} | passed={len(passed)}/{len(reranked)}")

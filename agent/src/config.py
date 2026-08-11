@@ -151,8 +151,6 @@ class Settings(BaseSettings):
     AGENT_MAX_TURNS: int = Field(default_factory=lambda: _yaml_val("agent", "max_turns", default=3))
     AGENT_TIMEOUT_SEC: int = Field(default_factory=lambda: _yaml_val("agent", "timeout_sec", default=30))
     TOOL_EXEC_TIMEOUT_SEC: int = Field(default_factory=lambda: _yaml_val("agent", "tool_exec_timeout_sec", default=60))
-    SEARCH_BUDGET_PER_SUPERVISOR_TURN: int = Field(default_factory=lambda: _yaml_val("agent", "search_budget_per_supervisor_turn", default=2))
-    SEARCH_BUDGET_PER_RETRIEVE_TURN: int = Field(default_factory=lambda: _yaml_val("agent", "search_budget_per_retrieve_turn", default=2))
     TOOL_RESULT_CAPS: dict = Field(default_factory=lambda: _yaml_val("agent", "tool_result_caps", default={}))
 
     # ── File I/O ──
