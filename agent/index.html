@@ -1101,7 +1101,11 @@ function renderContextPanel(data) {
     itemsHtml += '</div>';
   }
   var itemsEl = document.getElementById('ctxItems');
-  if (itemsEl) itemsEl.innerHTML = itemsHtml;
+  if (itemsEl) {
+    // P3-3: 明细为按初始估算的比例切分（占比可视化），标注说明避免误读为真实测量
+    itemsHtml = '<div class="ctx-item-hint" style="font-size:10px;color:var(--text-muted);opacity:.75;margin-bottom:4px">明细为占比估算，顶部为实际用量</div>' + itemsHtml;
+    itemsEl.innerHTML = itemsHtml;
+  }
 
   var soft = data.soft_threshold || 0.85;
   var hard = data.hard_threshold || 0.93;
@@ -1154,6 +1158,15 @@ function updateContextTokens(extraTokens) {
   if (bar) { bar.style.width = Math.round(pct * 100) + '%'; bar.className = 'ctx-bar-inner ' + _ctxLevelClass(pct); }
   var barLabel = document.getElementById('ctxBarLabel');
   if (barLabel) barLabel.textContent = Math.round(est).toLocaleString() + ' / ' + max.toLocaleString();
+
+  // P3-1: 同步"剩余 tokens / 压缩阈值"文本（此前只更新顶部 bar，剩余文本停在初始 est 造成 15% vs 99% 矛盾）
+  var sumEl = document.getElementById('ctxSummary');
+  if (sumEl) {
+    var soft = _ctxData.soft_threshold || 0.85;
+    var hard = _ctxData.hard_threshold || 0.93;
+    sumEl.innerHTML = '剩余 <b>' + Math.max(max - est, 0).toLocaleString() + '</b> tokens' +
+      '  ·  ' + '压缩 <b>' + Math.round(soft * 100) + '%</b> / ' + Math.round(hard * 100) + '%';
+  }
 }
 
 /* ─── HITL Dialog with exponential backoff ─── */
@@ -1236,6 +1249,11 @@ async function clearSession() {
     sidebarContent.innerHTML = '<div class="empty-sidebar">提交问题后文献将在此展示</div>';
     citationCount.textContent = '0';
     roundHistory = [];
+    // P3-2: 重置上下文面板（清空后不再残留旧会话数字）
+    _ctxData = null;
+    _totalTokensUsed = 0;
+    renderContextPanel({ estimated_tokens: 0, max_tokens: 1000000, history_msgs: 0,
+                         soft_threshold: 0.60, hard_threshold: 0.93 });
   } catch (e) { alert('清空失败: ' + e.message); }
 }
 
