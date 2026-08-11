@@ -220,30 +220,12 @@ subagents:
 light:
   react_fallback_max_turns: 2
 
-# ── Web Search (Serper.dev) ──
-web_search:
-  provider: serper
-  max_results: 5
-  domain_whitelist:
-    policy:
-      - site:gov.cn
-      - site:moa.gov.cn
-      - site:mof.gov.cn
-      - site:ndrc.gov.cn
-    encyclopedia:
-      - site:baike.baidu.com
-      - site:zh.wikipedia.org
-    academic:
-      - site:cnki.net
-      - site:wanfangdata.com
-
 # ── Tool Tags (Agent tool 标签系统) ──
 tool_tags:
   rag: [citrus_rag_search]
   analysis_stat: [statistical_analysis, experimental_design]
   file_io: [read_local_file, pdf_read]
   web: [academic_search]
-  encyclopedia: [encyclopedia_search]
   agent: [call_specialist]
   orchestrator_tools: [call_specialist]
 
@@ -257,10 +239,6 @@ tools:
       concurrency_key: rag
     - name: academic_search
       category: web
-      readonly: true
-      concurrency_key: web
-    - name: encyclopedia_search
-      category: encyclopedia
       readonly: true
       concurrency_key: web
     - name: pdf_read

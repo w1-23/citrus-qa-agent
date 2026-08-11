@@ -121,7 +121,7 @@ async def load_context_node(state: AgentState) -> dict:
 async def light_supervisor_node(state: AgentState) -> dict:
     """LLM autonomous routing supervisor.
 
-    Binds citrus_rag_search / academic_search / encyclopedia_search.
+    Binds citrus_rag_search.
     LLM receives light-mode system prompt and decides whether to call tools.
     Max 3 turns, timeout 60s per LLM call.
     """

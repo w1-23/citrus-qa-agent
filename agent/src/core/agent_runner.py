@@ -224,8 +224,13 @@ async def run_agent(
                 )
 
             tc = response.tool_calls[idx] if idx < len(response.tool_calls) else None
-            tc_id = getattr(tc, "id", None) or str(uuid.uuid4()) if tc else str(uuid.uuid4())
-            tc_name = getattr(tc, "name", "") if tc else "tool"
+            # v8.3.1 修复: tool_calls 元素为 dict（OpenAI 兼容格式），getattr 取不到 name → file_saved 恒 False
+            if isinstance(tc, dict):
+                tc_id = tc.get("id", None) or str(uuid.uuid4())
+                tc_name = tc.get("name", "")
+            else:
+                tc_id = getattr(tc, "id", None) or str(uuid.uuid4())
+                tc_name = getattr(tc, "name", "")
             if agent_name == "write-agent":
                 tr_content = str(getattr(tr, "content", ""))
                 if tc_name == "write_local_file" and tr_content.startswith("Success:"):
