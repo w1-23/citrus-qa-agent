@@ -90,7 +90,8 @@ def test_write_preview():
     fops = open(os.path.join(BASE, 'src', 'tools', 'file_ops.py'), encoding='utf-8').read()
     prom = open(os.path.join(BASE, 'src', 'prompts', 'agents', 'write-agent.md'), encoding='utf-8').read()
     check("write 返回含内容预览", "内容预览" in fops)
-    check("预览截断 200 字符", "content[:200]" in fops)
+    check("预览截断 200 字符", "preview_src[:200]" in fops or "content[:200]" in fops)
+    check("append 预览显示新增块", "new_content if actual_mode" in fops)
     check("假引用已删除", "read_local_file" not in prom)
 
     # 行为模拟: write 返回格式

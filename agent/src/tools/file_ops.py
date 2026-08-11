@@ -44,6 +44,7 @@ def write_local_file(path: str, content: str, mode: Literal["write", "append"] =
 
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
+        new_content = content  # 本轮新增内容（append 合并前），用于预览
         lock = _get_write_lock(str(target_path))
         with lock:
             if mode == "write":
@@ -62,8 +63,10 @@ def write_local_file(path: str, content: str, mode: Literal["write", "append"] =
 
         total_chars = len(content)
         size_kb = target_path.stat().st_size / 1024
-        # v8.3.1: 回显内容预览，帮助 LLM 判断已写入内容（防分块重写）
-        preview = content[:200].replace("\n", " ")
+        # v8.3.1: 内容预览——append 时显示【本轮新增块】而非文件开头，
+        # 否则 LLM 每轮看到相同预览，无法确认本轮写了什么（防重写失效）
+        preview_src = new_content if actual_mode == "append" else content
+        preview = preview_src[:200].replace("\n", " ")
         return (f"Success: {actual_mode} to {normalized}. Total file size now: "
                 f"{total_chars} chars ({size_kb:.1f} KB).\n内容预览: {preview}")
     except Exception as e:
