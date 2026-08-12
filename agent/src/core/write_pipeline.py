@@ -287,10 +287,11 @@ def _build_section_prompt(plan: dict, idx: int, section: dict, running_context: 
 async def run_stage2_execute(llm, plan: dict, material_pack: list[dict],
                              output_path: str, task_id: str = "",
                              resume_completed: Optional[list] = None) -> dict:
-    """Stage 2: 逐章生成并写盘。返回 {chapters, total_chars, missing_sections}。"""
+    """Stage 2: 逐章生成并写盘。返回 {chapters, total_chars, missing_sections, truncated_sections}。"""
     sections = plan.get("sections", [])
     if not sections:
-        return {"chapters": 0, "total_chars": 0, "missing_sections": []}
+        return {"chapters": 0, "total_chars": 0, "missing_sections": [],
+                "truncated_sections": []}
 
     from src.core.progress_bus import emit_encoded
     from src.tools.file_ops import write_local_file
@@ -299,7 +300,10 @@ async def run_stage2_execute(llm, plan: dict, material_pack: list[dict],
     resume_completed = resume_completed or []
     running_context = ""
     missing = []
+    truncated = []
     total_chars = 0
+    # 与 validate_plan 同一公式的单章安全容量（防 API 截断）
+    max_per_section = int(settings.PIPELINE_SECTION_MAX_TOKENS / 1.2 * 0.9)
 
     for idx, section in enumerate(sections):
         if idx in resume_completed:
@@ -326,6 +330,29 @@ async def run_stage2_execute(llm, plan: dict, material_pack: list[dict],
             continue
 
         body, summary = extract_summary(resp_content)
+        # v8.3.3 运行时容量兜底: 实际输出超单章安全容量 → 精简重写一次防截断
+        if len(body) > max_per_section:
+            logger.warning(f"[WritePipeline] section {idx+1} {len(body)} chars > "
+                           f"{max_per_section}, condensed retry")
+            try:
+                condensed_prompt = prompt + (
+                    f"\n\n【上一版输出 {len(body)} 字，超过安全容量 {max_per_section} 字（API 会截断）。"
+                    f"请压缩到 {max_per_section} 字以内：保留核心内容与要点、删除冗余修饰与重复表述，"
+                    f"并照常输出 <summary> 标签。】")
+                resp = await asyncio.wait_for(
+                    llm.ainvoke([SystemMessage(content=condensed_prompt)]),
+                    timeout=settings.PIPELINE_SECTION_TIMEOUT)
+                condensed, summary2 = extract_summary((resp.content or "").strip())
+                if condensed and len(condensed) <= max_per_section:
+                    body, summary = condensed, summary2 or summary
+                    logger.info(f"[WritePipeline] section {idx+1} condensed ok: {len(body)} chars")
+                else:
+                    logger.warning(f"[WritePipeline] section {idx+1} still {len(condensed)} chars "
+                                   f"after condensed retry, writing as-is")
+                    truncated.append(section.get("heading", f"第{idx+1}章"))
+            except Exception as e:
+                logger.warning(f"[WritePipeline] section {idx+1} condensed retry failed: {e}")
+                truncated.append(section.get("heading", f"第{idx+1}章"))
         # 标题契约: 缺失则自动补
         if not SECTION_HEADING_RE.search(body):
             body = f"## {section.get('heading', '')}\n\n{body}"
@@ -357,7 +384,8 @@ async def run_stage2_execute(llm, plan: dict, material_pack: list[dict],
             pass
 
     return {"chapters": len(sections) - len(missing) - len(resume_completed),
-            "total_chars": total_chars, "missing_sections": missing}
+            "total_chars": total_chars, "missing_sections": missing,
+            "truncated_sections": truncated}
 
 
 # ─────────────────────────────────────────────
@@ -470,7 +498,7 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
         llm_factory: 可注入（测试用），默认构造 main 模型 ChatOpenAI
     Returns:
         {"result": str, "mode": str, "chapters": int, "total_chars": int,
-         "missing_sections": list, "material_gap": bool}
+         "missing_sections": list, "truncated_sections": list, "material_gap": bool}
     """
     from src.core.progress_bus import emit_encoded
 
@@ -520,8 +548,10 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
         pass
 
     # 断点续传: 同 session+path 的未完成任务 → 复用已完成的 Plan
+    # (fix: plan 必须前置初始化，否则非续传路径引用未绑定变量 → UnboundLocalError)
     resume_completed = []
     task_id = ""
+    plan = None
     try:
         if settings.PIPELINE_RESUME_ENABLED and output_path:
             from src.core.write_pipeline_state import find_resumable_task
@@ -535,7 +565,10 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
     except Exception as e:
         logger.warning(f"[WritePipeline] resume check failed: {e}")
 
-    plan, plan_text = await run_stage1_plan(llm, material_pack, target_chars) if plan is None else (plan, "")
+    if plan is None:
+        plan, plan_text = await run_stage1_plan(llm, material_pack, target_chars)
+    else:
+        plan_text = ""
     if plan is None:
         # ReAct 回退（带大纲文本）
         return {"result": f"[plan_failed] 大纲生成失败，已回退常规写作。\n{plan_text[:500]}",
@@ -569,10 +602,15 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
                f"{exec_result['chapters']} 章）")
     if exec_result["missing_sections"]:
         summary += f"\n⚠️ 缺章: {', '.join(exec_result['missing_sections'])}（生成失败）"
+    if exec_result.get("truncated_sections"):
+        summary += (f"\n⚠️ 章节超容量有截断风险: "
+                    f"{', '.join(exec_result['truncated_sections'])}（精简重试后仍超限）")
     if gap:
         summary += f"\n⚠️ 材料不足（{len(material_pack)} 篇），部分章节可能缺少文献支撑"
     summary += f"\n\n摘要: {plan.get('abstract_draft', '')}"
 
     return {"result": summary, "mode": "plan_execute",
             "chapters": exec_result["chapters"], "total_chars": exec_result["total_chars"],
-            "missing_sections": exec_result["missing_sections"], "material_gap": gap}
+            "missing_sections": exec_result["missing_sections"],
+            "truncated_sections": exec_result.get("truncated_sections", []),
+            "material_gap": gap}

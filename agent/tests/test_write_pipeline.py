@@ -168,6 +168,110 @@ def test_modify():
     check("不存在 → -1", wp._locate_section(sections, "9 不存在") == -1)
 
 
+def test_entry_pipeline():
+    import json
+    from src.core.write_pipeline_state import start_task, mark_section_done
+    print("[入口] run_write_pipeline 四路 + 续传 + 回退")
+    plan_obj = {"title": "T", "abstract_draft": "A", "keywords": ["k"],
+                "total_target_chars": 0,
+                "sections": [{"heading": "s1", "points": ["p"], "target_chars": 800,
+                              "refs": ["DOI:1"]},
+                             {"heading": "s2", "points": ["p"], "target_chars": 800,
+                              "refs": ["DOI:1"]}]}
+    plan_json = json.dumps(plan_obj, ensure_ascii=False)
+
+    # 1) plan_execute 首次运行（无续传）→ P0 UnboundLocalError 回归
+    fname = f"test_entry_{uuid.uuid4().hex[:6]}.md"
+    llm = FakeLLM([plan_json,
+                   "## s1\n第一张内容。<summary>s1</summary>",
+                   "## s2\n第二章内容。<summary>s2</summary>"])
+    r = run(wp.run_write_pipeline({"goal": "写一篇柑橘综述", "output_path": fname},
+                                  [{"doi": "1", "title": "X"}],
+                                  llm_factory=lambda: llm, session_id="t-entry"))
+    check("首次运行 plan_execute 不崩(UnboundLocalError 回归)", r["mode"] == "plan_execute"
+          and not r["missing_sections"], f"mode={r['mode']} missing={r['missing_sections']}")
+    check("文件已落盘", (PROJECT_ROOT / "workspace" / "output" / fname).exists())
+
+    # 2) react 快筛 → 结构化返回
+    r2 = run(wp.run_write_pipeline({"goal": "先写个引言", "output_path": ""}, [],
+                                   llm_factory=lambda: llm))
+    check("react → 结构化返回", r2["mode"] == "react", f"mode={r2['mode']}")
+
+    # 3) direct_write 快筛 → 结构化返回
+    r3 = run(wp.run_write_pipeline({"goal": "把这个回答保存到 a.md", "output_path": ""}, [],
+                                   llm_factory=lambda: llm))
+    check("direct_write → 结构化返回", r3["mode"] == "direct_write", f"mode={r3['mode']}")
+
+    # 4) plan 全部失败 → react_fallback 带大纲
+    llm4 = FakeLLM(["not json", "still not json", "nope"])
+    r4 = run(wp.run_write_pipeline({"goal": "写一篇综述", "output_path": ""}, [],
+                                   llm_factory=lambda: llm4))
+    check("plan 失败 → react_fallback", r4["mode"] == "react_fallback"
+          and "回退" in r4["result"], f"mode={r4['mode']}")
+
+    # 5) modify: 已有文件重写章节
+    fname2 = f"test_entry2_{uuid.uuid4().hex[:6]}.md"
+    t2 = PROJECT_ROOT / "workspace" / "output" / fname2
+    t2.write_text("# T\n\n## 1 引言\n旧引言\n\n## 2 正文\n旧正文\n", encoding="utf-8")
+    llm5 = FakeLLM(["## 2 正文\n新正文内容"])
+    r5 = run(wp.run_write_pipeline({"goal": "重写第二章", "output_path": fname2}, [],
+                                   llm_factory=lambda: llm5))
+    check("modify 重写章节", r5["mode"] == "modify" and "已重写" in r5["result"],
+          f"mode={r5['mode']} result={r5['result'][:40]}")
+    check("文件内容已替换", "新正文内容" in t2.read_text(encoding="utf-8"))
+    t2.unlink()
+
+    # 6) 断点续传: 复用 Plan、跳过已完成章节（仅剩 1 章 → 只调 1 次 LLM）
+    fname3 = f"test_entry3_{uuid.uuid4().hex[:6]}.md"
+    tid = start_task("t-resume", fname3, plan_obj)
+    mark_section_done(tid, 0)
+    llm6 = FakeLLM(["## s2\n续传后的第二章。<summary>s2b</summary>"])
+    r6 = run(wp.run_write_pipeline({"goal": "写一篇柑橘综述", "output_path": fname3},
+                                   [{"doi": "1", "title": "X"}],
+                                   llm_factory=lambda: llm6, session_id="t-resume"))
+    check("续传: 复用 Plan 不重调 stage1", llm6.calls == 1, f"calls={llm6.calls}")
+    check("续传: 缺章补齐", r6["mode"] == "plan_execute" and not r6["missing_sections"],
+          f"mode={r6['mode']} missing={r6['missing_sections']}")
+
+    target = PROJECT_ROOT / "workspace" / "output" / fname
+    target3 = PROJECT_ROOT / "workspace" / "output" / fname3
+    if target.exists():
+        target.unlink()
+    if target3.exists():
+        target3.unlink()
+
+
+def test_runtime_capacity():
+    print("[Stage2] 运行时单章容量兜底")
+    plan = {"title": "T", "abstract_draft": "A", "keywords": [],
+            "sections": [{"heading": "1 A", "points": [], "target_chars": 800, "refs": []}]}
+    old = settings.PIPELINE_SECTION_MAX_TOKENS
+    settings.PIPELINE_SECTION_MAX_TOKENS = 2400  # → max_per_section = 1800
+    try:
+        llm = FakeLLM(["## 1 A\n" + "字" * 2000, "## 1 A\n精简版内容"])
+        fname = f"test_cap_{uuid.uuid4().hex[:6]}.md"
+        r = run(wp.run_stage2_execute(llm, plan, [], fname))
+        target = PROJECT_ROOT / "workspace" / "output" / fname
+        content = target.read_text(encoding="utf-8") if target.exists() else ""
+        check("超容量 → 触发精简重试", llm.calls == 2, f"calls={llm.calls}")
+        check("精简后内容落盘", "精简版内容" in content and len(content) < 2000)
+        check("不标记 truncated", r["truncated_sections"] == [], str(r.get("truncated_sections")))
+        if target.exists():
+            target.unlink()
+
+        llm2 = FakeLLM(["## 1 A\n" + "字" * 2000, "## 1 A\n" + "字" * 1900])
+        fname2 = f"test_cap2_{uuid.uuid4().hex[:6]}.md"
+        r2 = run(wp.run_stage2_execute(llm2, plan, [], fname2))
+        t2 = PROJECT_ROOT / "workspace" / "output" / fname2
+        check("仍超限 → truncated 标记", r2["truncated_sections"] == ["1 A"],
+              str(r2.get("truncated_sections")))
+        check("仍超限 → 内容仍写盘", t2.exists())
+        if t2.exists():
+            t2.unlink()
+    finally:
+        settings.PIPELINE_SECTION_MAX_TOKENS = old
+
+
 def json_doc(obj):
     import json
     return json.dumps(obj, ensure_ascii=False)
@@ -181,6 +285,8 @@ if __name__ == "__main__":
     test_missing_section()
     test_summary_extract()
     test_modify()
+    test_entry_pipeline()
+    test_runtime_capacity()
     print(f"\n结果: {len(passed)} passed / {len(failed)} failed")
     if failed:
         print("失败项:", failed)
