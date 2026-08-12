@@ -1,66 +1,78 @@
-﻿# Citrus QA Agent 变更记录
+﻿# Citrus QA Agent 工程护栏（AGENT_CHANGES）
 
-> 本文件为项目变更日志（UTF-8）。历史版本（v8.1.1–v8.3.2）的逐文件对照内容因编码事故（GBK 误转 UTF-8）已不可恢复，此处以架构级变更摘要替代；代码级细节以 git 历史为准。
-
----
-
-## v8.3.3（2026-08-12）— 写作流水线修复 + 安全加固
-
-### P0 修复
-- **综述写作首跑必崩**：`write_pipeline.run_write_pipeline` 的 `plan` 变量仅在断点续传命中时初始化，非续传路径触发 `UnboundLocalError`（实测日志 `[Error: cannot access local variable 'plan']`）→ 前置初始化 + 显式分支。
-- **运行时单章容量兜底**：Plan 校验期的 3000 字上限在 Execute 期无对应检测，API 截断无法感知 → 实际输出超限时触发一次"精简重写"，仍超限则写盘并标记 `truncated_sections`。
-
-### Plan-Execute 完整性（对齐 Orchestrator-Workers 惯例）
-- **断点续传原子化**：`pipeline_tasks` 读-改-写包 `BEGIN IMMEDIATE` 事务 + WAL + busy_timeout；修复 `cleanup_stale_tasks` 无日期过滤（原实现会清掉全部任务）。
-- **写后 read-back 校验**：每章写盘后回读确认章节落盘（`write_local_file` 失败返回错误字符串不抛异常，原实现静默当成功）；标题容错匹配。
-- **引用完整性校验**：正文 `[n]` 编号 vs 参考文献区编号比对，缺失/未用文献在结果中提示。
-- **react_fallback 落盘回退**：Plan 失败时带大纲一次性生成全文并写盘（原只回传 500 字提示，supervisor 收到后无实质产出）。
-- react 分支改为结构化交接（原为误导性文本）。
-
-### 安全与健壮性
-- **沙箱 fail-closed**：删除对不存在的 `engine.sandbox` 的 ImportError 吞错，内置模式检查（危险工具类拒绝，注册表只读/分析类放行），异常时拒绝执行。
-- **绝对路径读白名单**：`read_local_file` / `statistical_analysis` 仅允许项目根目录内（可配 `file_io.read_extra_roots` 扩展）。
-- **前端 XSS**：marked 渲染前转义（`renderMarkdownSafe`）+ 引用卡片/状态栏字段转义。
-- **SSE 错误脱敏**：前端只收"内部错误"提示，完整异常进日志。
-- **CORS**：移除 `*` + credentials 非法组合。
-
-### 工程化
-- **context_usage 增量推送**：`emit_usage_delta`（按 session+source），前端改为累加 delta（原累加单次调用累计值，多轮重复计数）。
-- **per-request 事件队列**：contextvars 绑定，SSE 并发会话互不串扰（原全局队列 + 每请求 reset 清他人事件）。
-- **request_id 追踪**：contextvar 贯穿请求链路，日志注入 `req=` 字段。
-- **配置接线**：supervisor/light/subagents 轮次上限、recursion_limit 全部读取 config.yaml（原硬编码且与配置脱节）；启动时 `validate_config()` 自检。
-- **死代码清理**：删除 `CircuitBreaker`（零引用）、`ToolCallAccumulator`（unused）、死配置字段（`MAX_TOOL_CALLS`/`LLM_TIMEOUT`/`INTENT_*`/`AGENT_MAX_TURNS`/`PIPELINE_DEFAULT_TARGET_CHARS` 等）。
-- **部署包**：zip 纳入根 `requirements.txt` 与 `verify_retrieval.py`（原缺失导致 DEPLOY.md 步骤不可执行）。
-- **版本号统一**：/health、app、HTML、CLI → 8.3.3。
-
-### 测试
-- `test_write_pipeline.py` 33 → 65 项：入口级（四路+续传+回退）、state 原子操作、read-back、引用校验、容量兜底。
-- 全量回归 199 项全绿（batch1 20 / batch2 37 / batch3 14 / direct_write 12 / file_saved 19 / optimization 32 / write_pipeline 65）。
+> **任何会话（人或 agent）改动本仓库前，必须先读本文件**。
+> 任何改动不得违反 INV-01~08；每条不变量都有对应回归测试（见第三节映射表）。
+> 历史变更摘要见文末。
 
 ---
 
-## v8.3.2（2026-08-11）— Write Pipeline Plan-Execute
+## 1. 不变量清单（任何情况下必须成立）
 
-- 写任务四路路由（`classify_write_task`）：direct_write / react / plan_execute / modify。
-- 结构化 Plan（write-plan.md，严格 JSON）+ 动态校验（指定字数严格 / 自主模式宽松）+ 单章容量上限（≤3000 字防截断）+ 重试 + ReAct 回退。
-- 逐章独立 LLM 生成（write-section.md + `<summary>` running_context），材料按 refs 语义分配，缺章降级占位。
-- 断点续传（pipeline_tasks 表）、SSE 进度事件（plan_ready / section_start / section_done）、modify 定向修改（章节定位/替换/追加）。
+| 编号 | 不变量 | 病史 |
+|---|---|---|
+| **INV-01 协议配对** | 每个发往模型的 AIMessage.tool_calls 的 id，必须在其后恰好有一个 ToolMessage 响应（预算跳过/熔断/异常路径同样成立）；id 提取兼容 dict/对象两种形态，且同一 tool_call 的 id 三处（协议 ToolMessage / 计时器 / SSE）复用单一来源 | F3（400 错误） |
+| **INV-02 生命周期有界** | 所有 agent 循环在 轮数上限+每轮工具预算 内运行；收敛判定由代码裁决（retrieve-agent 去重文献 ≥6 强制收尾），模型意愿不得绕过；强制收尾一律用无工具 LLM | F4（跑满轮次） |
+| **INV-03 检索降级** | 检索失败必有 fallback 链（向量→BM25→直答）+ 归因提示；批次不可用可见（启动 ERROR 汇总 + 空结果归因联动 + 运行期失败累计），绝不静默空手 | F2（锁争抢） |
+| **INV-04 上下文传播** | 工具执行的任何路径（sync executor / async / to_thread）都继承请求 contextvar（进度队列 + request_id）；工具计时器 mark_tool_start/end 严格配对，不配对 → 心跳事件风暴 | F1 + F7（心跳） |
+| **INV-05 输出路由** | 子代理输出有格式约束与 cap（证据保真，检索证据清单含具体结论）；深度/综述类问题走结构化链（write-agent 或强制结构），禁止散文直答 | F5/F6 |
+| **INV-06 可观测回归** | 事件词汇表前端可消费（status/budget_skip/circuit_breaker 必须显示）；ERROR 有启动汇总；request_id 贯穿请求链路；每条 INV 有回归测试 | 全部 |
+| **INV-07 状态显式化** | 模型决策所需的运行时状态（轮次/已调工具数/预算剩余/去重文献数/已用关键词）以 `<agent_status>` 注入上下文末尾；禁止依赖模型从长历史自行"数" | F8（一轮 4 检索） |
+| **INV-08 失败熔断与输入隔离** | 连续工具失败 ≥3 熔断强制收尾（含占位响应保证配对）；上下文截断必须透明标记（模型不得误以为看全）；不可信数据（检索/上游）与指令显式隔离 | F9 + 提示注入面 |
 
-## v8.3.1（2026-08-11）— 生产就绪度修复（16 项）
+## 2. 症状库（症状 → 根因 → 修复 → 测试）
 
-- 职责矩阵重构：删 forced save / file_saved 信号（零补偿写入）；supervisor 直写 `write_local_file`；retrieve-agent 3 轮 + 轮次语义；light 加 `read_local_file`。
-- 综述被覆盖根因：`agent_runner` file_saved 判定 dict/getattr bug；删 encyclopedia_search 死工具。
-- 统一回传协议：RAG 空结果归因（THRESHOLD_BLOCKED / NO_MATCH + 建议）、academic 网络失败 `[ERR_NETWORK]`、`_classify_error` 全补操作建议。
-- 性能：min_keep=3 打断空转、write-agent 12000 分块防截断、write 返回内容预览防重写。
-- 上下文 token 面板实时更新（context_usage 真实用量推送）；检索性能优化与防截断。
-- 内容预览缺陷修复（append 显示本轮新增块）；`simulate_flow.py` 模拟验证。
+| # | 症状 | 根因 | 修复 | 测试 |
+|---|---|---|---|---|
+| F1 | 工具进度事件前端缺失 | run_in_executor 线程不继承 contextvar → emit 落全局队列 | `_invoke_tool_with_ctx`（sync 工具 ctx.run 注入） | AG-17 |
+| F2 | 多实例争抢 Qdrant 锁、失败噪音、空结果无归因 | `_clean_stale_locks` 无条件删锁、batch 失败静默 | 锁冲突批次跳过 + 启动 ERROR 汇总 + 瞬时重试 + 空结果归因联动 | AG-20 |
+| F3 | 预算截断后 OpenAI 400 "tool_calls must be followed by tool messages" | 被砍 tool_call 无 ToolMessage 响应；getattr 对 dict 拿不到 id | 占位 ToolMessage + `_tc_id` 兼容 dict/对象 | AG-19 |
+| F4 | retrieve-agent 每次跑满 3 轮（max turns forcing final） | 收敛依赖 LLM 自觉，无代码裁决 | 去重文献 ≥6 强制收尾（`_count_unique_docs`） | AG-18/23 |
+| F5 | 41 篇文献只换 2400 字，证据丢失 | 两级摘要压缩 + cap 15000 | 证据清单格式（核心结论与证据点）+ cap 40000 | AG-22 |
+| F6 | 深度问题散文直答 | 路由规则缺失 | decision_guide 深度问题策略（逐证据引用+结构） | AG-22 |
+| F7 | `tool_executing` 事件风暴（千级） | 同一 tool_call 两次独立提取 id，dict 形态 UUID 失配 → 计时器泄漏 | id 单一来源（tc_ids 映射复用） | AG-21 |
+| F8 | supervisor 一轮内串行 4 个 retrieve-agent | 模型从长历史数不清已调次数 | `<agent_status>` 状态栏注入（轮次/预算/文献数/关键词） | 复测项 5 |
+| F9 | 上下文 >24000 字符静默截断，模型"看全了"错觉 | `_truncate_context_blocks` 无标记 | 截断追加"[已截断 N/M]"标记 | AG-25 |
 
-## v8.3.0（2026-07-26）— 结构化 SSE + 上下文管理
+## 3. INV → 测试映射表
 
-- 结构化事件（thinking / tool_call_start / tool_executing / tool_result / text）。
-- ContextManager / ContextBudget（1M 窗口，soft 0.60 / hard 0.93 压缩截断）。
-- 长期记忆（LTM）事实提取 + 置信度衰减；Fast Guard 问候语短路。
+| 不变量 | 回归测试 | 位置 |
+|---|---|---|
+| INV-01 | AG-19 协议配对（dict/对象 id 提取 + 占位响应） | tests/test_batch2.py |
+| INV-02 | AG-18 预算接线 + AG-23 收敛行为（mock 循环） | tests/test_batch2.py |
+| INV-03 | AG-20 锁冲突降级归因 | tests/test_batch2.py |
+| INV-04 | AG-17 线程 contextvar 传播 + AG-21 计时器配对（中途非空/结束为空双断言） | tests/test_batch2.py |
+| INV-05 | AG-22 证据清单格式 + cap + 深度规则 | tests/test_batch2.py |
+| INV-06 | 前端 status 显式化（人工复测）+ request_id（日志断言） | index.html / 复测清单 |
+| INV-07 | 状态栏注入（源码断言 + 复测项 5） | expert_graph.py |
+| INV-08 | AG-24 熔断逻辑 + AG-25 截断透明纯函数 | tests/test_batch2.py |
 
-## v8.1.1（基线）
+**全量基线**：232 项（batch1 20 / batch2 70 / batch3 14 / direct_write 12 / file_saved 19 / optimization 32 / write_pipeline 65）。每次改动必须全量回归保持全绿。
 
-- 双图（Light/Expert）+ HyDE+RRF 混合检索 + 学术搜索（CrossRef/PubMed）+ 实验设计/统计分析工具。
+## 4. 分层规矩
+
+1. **协议层问题必须代码硬修**：配对（INV-01）、计时器（INV-04）、截断（INV-08）、熔断（INV-08）、预算/收敛（INV-02）——**禁止用提示词绕过协议 bug**（如靠 prompt 让模型"别超预算"）。
+2. **prompt 只管路由与风格**：深度问题路由（decision_guide）、检索策略与轮次语义（retrieve-agent.md）、写作结构（write-section.md）。
+3. **新增工具/子代理三查**：INV-01（工具必须返回结构化结果+错误分类）、INV-02（调用方有轮次/预算）、INV-04（sync 工具走 registry 执行器以继承 contextvar）。
+4. **D1 放行声明**：写类工具（write_local_file）不做"默认拒绝+审批"——单用户内网部署 + workspace 路径白名单 + 综述写作链路依赖写盘，审批流会破坏核心工作流。此决策为显式权衡，非疏漏。
+5. **评估口径**：过程指标关注 步数/冗余动作/回退次数/成本延迟（日志已有 tool 计数与耗时）；轨迹 vs 结果双覆盖（write 有 read-back；问答靠复测人工核验）。
+
+## 5. 真实服务复测清单（每次大改后执行）
+
+1. **深度问题**：`花青素的驯化过程` → 检索子代理 ≤2 个、retrieve-agent ≤2 轮（"提前收敛"日志）、回答逐证据引用 [n]、无 "An error occurred"
+2. **锁争抢**：双实例并存启动 → 启动 ERROR 汇总列出失败批次；空结果回传含"向量库部分批次不可用"
+3. **预算截断**：观察 `budget_skip` 事件 + 前端状态条可见提示；无 OpenAI 400
+4. **心跳量级**：最耗时工具执行期间 SSE 有周期 `tool_executing`（心跳在工作）、结束后停止；单请求事件量百级而非千级
+5. **状态栏**：日志/SSE 可见 `<agent_status>`（轮次/预算/去重文献数/关键词）；预算触发次数明显下降
+6. **write 流水线**：综述 plan_ready → section_start/done 逐章进度 → 文件落盘；modify"改第三章"定向替换
+7. **协议回归**：任何一次请求的 tool_calls 数量 == tool_result 数量（配对）
+
+---
+
+## 历史变更摘要
+
+- **v8.3.5（2026-08-12）**：状态栏/熔断/透明化（规范对齐《深入理解AI Agent》）——INV-07 状态栏、INV-08 熔断+截断透明、计时器 id 单一来源（F7）、提示注入边界声明；测试 208→232
+- **v8.3.4（2026-08-12）**：执行卡片修复（contextvar 线程传播 F1）、Qdrant 争抢可感知降级（F2）、supervisor 每轮工具预算 + 400 修复（F3）、retrieve-agent 代码级收敛（F4）、证据清单 + cap 提升（F5）、decision_guide 深度规则（F6）
+- **v8.3.3（2026-08-12）**：综述首跑必崩修复（UnboundLocalError）、运行时容量兜底、写后校验、引用完整性、react_fallback 落盘、断点续传原子化、安全加固（沙箱/路径/XSS/队列/request_id）、配置接线、死代码清理
+- **v8.3.2（2026-08-11）**：Write Pipeline Plan-Execute（四路路由/逐章生成/断点续传/SSE 进度事件）
+- **v8.3.1（2026-08-11）**：职责矩阵重构、统一回传协议、性能优化（min_keep/分块/预览）、上下文面板
+- **v8.3.0（2026-07-26）**：结构化 SSE + 上下文管理 + 长期记忆 + Fast Guard
