@@ -570,7 +570,27 @@ async def supervisor_node(state: AgentState) -> dict:
                 except Exception:
                     pass
 
-            for tc in response.tool_calls:
+            # v8.3.4: 每轮工具预算强制（config supervisor.max_tools_per_turn）——
+            # 防止一轮内串行执行 3-4 个 retrieve-agent（预算由代码裁决，不依赖 LLM 自觉）
+            max_tools_per_turn = getattr(settings, "SUPERVISOR_MAX_TOOLS_PER_TURN", 2) or 2
+            pending_calls = list(response.tool_calls)
+            skipped_calls = pending_calls[max_tools_per_turn:]
+            pending_calls = pending_calls[:max_tools_per_turn]
+            if skipped_calls:
+                skipped_names = [getattr(tc, "name", "?") for tc in skipped_calls]
+                logger.warning(
+                    f"[ExpertGraph:supervisor] turn{turn}: 工具预算 {max_tools_per_turn} "
+                    f"触发，跳过 {len(skipped_calls)} 个调用: {skipped_names}"
+                )
+                try:
+                    emit_status("budget_skip",
+                                message=f"每轮工具预算 {max_tools_per_turn}，"
+                                        f"{len(skipped_calls)} 个工具调用推迟到下一轮: "
+                                        f"{', '.join(skipped_names)}")
+                except Exception:
+                    pass
+
+            for tc in pending_calls:
                 tc_dict = _make_tool_call(tc)
                 tc_id = getattr(tc, "id", str(uuid.uuid4()))
                 if tc_dict["name"] == "call_write_agent":
@@ -687,6 +707,18 @@ async def supervisor_node(state: AgentState) -> dict:
                     tool_call_id=tc.get("id", "unknown"),
                     name=tc_dict["name"],
                 ))
+
+            if skipped_calls:
+                try:
+                    messages.append(ToolMessage(
+                        content=f"[budget] 每轮工具预算 {max_tools_per_turn} 已满，"
+                                f"以下调用未执行: {', '.join(skipped_names)}。"
+                                f"如有必要请在下一轮重新发起（优先执行最高价值的调用）。",
+                        tool_call_id=f"budget-{uuid.uuid4().hex[:8]}",
+                        name="budget_skip",
+                    ))
+                except Exception:
+                    pass
 
             logger.info(
                 f"[ExpertGraph:supervisor] turn{turn}: "

@@ -89,4 +89,4 @@ python tests/verify_retrieval.py
 | 检索无结果 | 检查 `data/` 是否拷贝完整、`verify_retrieval.py` 输出 |
 | `optimum` 导入失败 | `pip install optimum transformers` |
 | 端口被占用 | 换端口或用 `--port` 参数 |
-| 数据库锁（Qdrant .lock） | 服务退出后再启动；多实例禁止同时开（单例设计） |
+| 数据库锁（Qdrant .lock） | 服务退出后再启动；多实例禁止同时开（单例设计）。v8.3.4：若仍发生占用，冲突批次自动跳过向量加载、以 BM25 兜底并在启动日志 ERROR 列出失败批次；空结果回传会附"向量库部分批次不可用"提示 |

@@ -50,6 +50,20 @@ def _truncate_context_blocks(context: str, max_chars: int = 24000) -> str:
     return "\n\n".join(out)
 
 
+def _count_unique_docs(main_results: list) -> int:
+    """按 DOI 去重计数文献（无 DOI 按条计数）— v8.3.4 收敛判断用。"""
+    seen = set()
+    n = 0
+    for r in main_results:
+        doi = (r.get("doi") or "").strip().lower()
+        if doi:
+            if doi in seen:
+                continue
+            seen.add(doi)
+        n += 1
+    return n
+
+
 async def run_agent(
     agent_name: str,
     task: dict,
@@ -135,6 +149,25 @@ async def run_agent(
     turns_taken = 0
 
     for turn in range(max_turns):
+        # v8.3.4: retrieve-agent 代码级收敛——去重文献数达标 → 强制收尾输出报告，
+        # 不再进入下一轮检索（"max turns forcing final" 只在确有必要时出现）
+        if (agent_name == "retrieve-agent" and turn > 0
+                and _count_unique_docs(collected_artifacts["main_results"])
+                >= settings.RETRIEVE_CONVERGE_MIN_DOCS):
+            logger.info(
+                f"[AgentRunner] {agent_name} 提前收敛: 去重文献 ≥ "
+                f"{settings.RETRIEVE_CONVERGE_MIN_DOCS} 篇，强制输出检索报告"
+            )
+            messages.append(HumanMessage(content=(
+                "已收集到足够的相关文献，立即停止检索，"
+                "直接输出最终结构化检索报告（检索结论 / 关键文献 / 信息缺口）。")))
+            try:
+                final_resp = await llm_base.ainvoke(messages)
+                if final_resp.content:
+                    result_content = final_resp.content
+            except Exception as e:
+                logger.warning(f"[AgentRunner] {agent_name} converge-final failed: {e}")
+            break
         turns_taken = turn + 1
         t_llm = time.perf_counter()
         response = None

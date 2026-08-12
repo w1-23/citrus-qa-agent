@@ -279,6 +279,12 @@ def citrus_rag_search(query: str) -> tuple[str, dict]:
             else:
                 note = ("原因: 本地柑橘文献库未收录该主题。\n"
                         "建议: 改用 academic_search 学术源补充，或接受模型知识并标注 [模型知识]。")
+            # v8.3.4: 向量库部分批次不可用（如另一实例占用/加载失败）→ 显式告知降级，
+            # 避免把"检索能力受损"误判为"无相关文献"
+            failed = getattr(rag, "failed_batches", None) or {}
+            if failed:
+                note += (f"\n注意: 向量库有 {len(failed)} 个批次不可用（{list(failed.keys())[:3]}），"
+                         f"本次结果基于 BM25 检索，可能不全。")
             content = _format_tool_result(
                 "citrus_rag_search", query, f"未检索到相关文献。\n{note}",
                 status="empty", elapsed_ms=elapsed,

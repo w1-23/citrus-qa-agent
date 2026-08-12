@@ -15,6 +15,7 @@ retrieval:
   web_relevance_threshold: 0.3   # Web 语义过滤阈值（BGE reranker 分数，0=不相关 1=完美匹配）
   rag_hyde_enabled: true         # HyDE: 本地RAG检索前生成英文假想答案提升召回
   hyde_max_tokens: 512           # HyDE 假想答案输出上限（与 prompt 250词约束配套，防截断）
+  converge_min_docs: 6           # v8.3.4: retrieve-agent 去重文献数达到即代码级收敛（强制收尾）
 
 # 学术搜索配置（CrossRef/PubMed/Semantic Scholar/OpenAlex）
 # 根据网络状况选择性启用。大陆网络仅 CrossRef+PubMed 稳定。
@@ -134,7 +135,7 @@ agent:
   tool_exec_timeout_sec: 60      # 单个工具执行整体超时（超时返回 [ERR_TIMEOUT]）
   tool_result_caps:              # 子Agent结果回传supervisor的分档截断(字符)
     write-agent: 1000            #   write-agent 只回传保存摘要
-    retrieve-agent: 15000        #   检索结果摘要
+    retrieve-agent: 40000        #   v8.3.4: 检索证据清单完整回传（原 15000 截掉关键证据细节）
     analyze-agent: 10000         #   分析结论
     default: 100000              #   read_local_file/pdf_read 保留大值
 
@@ -204,6 +205,7 @@ guard:
 # ── Supervisor v8.1.1 ──
 supervisor:
   max_turns: 8
+  max_tools_per_turn: 2         # v8.3.4: 每轮工具调用预算（防一轮内串行多个子代理）
   parallel_tool_calls: false
 
 # ── Subagents v8.1.1 ──

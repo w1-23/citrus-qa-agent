@@ -46,11 +46,17 @@ class MultiBatchRetriever:
             self.bm25 = BM25Plus()
             self._idx_map = {}
             self.last_empty_reason: str = ""   # v8.3.1: 空结果归因（threshold_blocked / no_match），供工具回传 LLM
+            self.failed_batches: Dict[str, str] = {}  # v8.3.4: 向量加载失败批次（lock 冲突/异常），供降级提示
 
             try:
                 self._load_data()
                 self._initialized = True
                 logger.info(f"[MultiBatchRetriever] 初始化完成 | 批次: {len(self.batches)} | 块数: {len(self.global_chunks)}")
+                if self.failed_batches:
+                    logger.error(
+                        f"[MultiBatchRetriever] {len(self.failed_batches)} 批次向量库不可用（BM25-only 降级）: "
+                        f"{list(self.failed_batches.keys())} | 原因: {list(self.failed_batches.values())[:2]}"
+                    )
             except Exception as e:
                 logger.error(f"[MultiBatchRetriever] 初始化失败: {e}")
                 raise
@@ -68,15 +74,16 @@ class MultiBatchRetriever:
         logger.info("[MultiBatchRetriever] closed all Qdrant clients")
 
     # ========== 原有业务逻辑 ==========
-    def _clean_stale_locks(self):
-        """Remove stale .lock files before creating QdrantClient.
-        
-        Qdrant local mode creates a .lock per storage dir. If a previous
-        process crashed without calling close(), locks persist and block
-        the next startup. This method cleans them all up front.
+    def _clean_stale_locks(self) -> set:
+        """清理陈旧 .lock 文件；返回被另一实例占用的批次集合（v8.3.4）。
+
+        Qdrant local 模式每个存储目录一个 .lock。崩溃残留锁可删；
+        若 unlink 失败（PermissionError = 另一实例正持有）→ 标记冲突批次，
+        调用方跳过该批次的 Qdrant 加载（不再产生无意义的失败噪音与竞态）。
         """
+        conflict = set()
         if not self.data_dir.exists():
-            return
+            return conflict
         for batch_dir in sorted(self.data_dir.iterdir()):
             if not batch_dir.is_dir():
                 continue
@@ -87,15 +94,19 @@ class MultiBatchRetriever:
                 lock.unlink()
                 logger.info(f"[MultiBatchRetriever] cleaned stale lock: {lock}")
             except PermissionError:
+                conflict.add(batch_dir.name)
                 logger.error(
                     f"[MultiBatchRetriever] Qdrant 数据目录被另一实例占用: {lock} — "
-                    f"local 模式单实例限制，请先停止其他服务进程再启动"
+                    f"local 模式单实例限制，该批次向量检索不可用（BM25 兜底），"
+                    f"请先停止其他服务进程再启动以获得完整检索"
                 )
             except Exception as e:
                 logger.debug(f"[MultiBatchRetriever] lock cleanup: {lock}: {e}")
+        return conflict
 
     def _load_data(self):
-        self._clean_stale_locks()
+        lock_conflict = self._clean_stale_locks()
+        self.failed_batches = {name: "另一实例占用 (lock)" for name in lock_conflict}
         if not self.data_dir.exists():
             raise FileNotFoundError(f"Data directory not found: {self.data_dir}")
         logger.info(f"Scanning multi-source batches in {self.data_dir}...")
@@ -105,14 +116,39 @@ class MultiBatchRetriever:
             chunks_path = batch_dir / "chunks" / "chunks.jsonl"
             if qdrant_path.exists() and chunks_path.exists():
                 batch_name = batch_dir.name
+                if batch_name in lock_conflict:
+                    # v8.3.4: 另一实例占用 → 跳过 Qdrant（避免重复失败日志），BM25 仍可构建
+                    with open(chunks_path, encoding="utf-8") as f:
+                        for local_idx, line in enumerate(f):
+                            if not line.strip(): continue
+                            chunk = json.loads(line)
+                            chunk["_batch"] = batch_name
+                            chunk["_global_idx"] = len(self.global_chunks)
+                            self.global_chunks.append(chunk)
+                    continue
                 try:
                     client = QdrantClient(path=str(qdrant_path), timeout=settings.QDRANT_TIMEOUT, prefer_grpc=False)
                     colls = client.get_collections().collections
                     coll_name = colls[0].name if colls else "citrus_literature"
                     self.batches[batch_name] = (client, coll_name)
                 except Exception as e:
-                    logger.warning(f"Failed to load Qdrant for {batch_name}: {e}")
-                    continue
+                    # v8.3.4: 瞬时窗口重试一次（删锁后 Qdrant 内部清理延迟/竞态）
+                    msg = str(e)
+                    if "already accessed" in msg or "lock" in msg.lower():
+                        time.sleep(2)
+                        try:
+                            client = QdrantClient(path=str(qdrant_path), timeout=settings.QDRANT_TIMEOUT, prefer_grpc=False)
+                            colls = client.get_collections().collections
+                            coll_name = colls[0].name if colls else "citrus_literature"
+                            self.batches[batch_name] = (client, coll_name)
+                        except Exception as e2:
+                            self.failed_batches[batch_name] = str(e2)[:120]
+                            logger.error(f"Failed to load Qdrant for {batch_name}: {e2}")
+                            continue
+                    else:
+                        self.failed_batches[batch_name] = msg[:120]
+                        logger.warning(f"Failed to load Qdrant for {batch_name}: {e}")
+                        continue
                 with open(chunks_path, encoding="utf-8") as f:
                     for local_idx, line in enumerate(f):
                         if not line.strip(): continue

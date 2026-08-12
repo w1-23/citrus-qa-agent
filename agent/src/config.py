@@ -104,6 +104,8 @@ class Settings(BaseSettings):
     MAX_REACT_STEPS: int = Field(default_factory=lambda: _yaml_val("react", "max_steps", default=5))
     DYNAMIC_THRESHOLD_RATIO: float = Field(default_factory=lambda: _yaml_val("retrieval", "dynamic_threshold_ratio", default=0.60))
     RAG_HYDE_ENABLED: bool = Field(default_factory=lambda: _yaml_val("retrieval", "rag_hyde_enabled", default=True))
+    # v8.3.4: retrieve-agent 去重文献数达到此值即代码级收敛（强制收尾，不再换词重试）
+    RETRIEVE_CONVERGE_MIN_DOCS: int = Field(default_factory=lambda: _yaml_val("retrieval", "converge_min_docs", default=6))
     HYDE_MAX_TOKENS: int = Field(default_factory=lambda: _yaml_val("retrieval", "hyde_max_tokens", default=512))
     RRF_WEIGHT_ORIG_DENSE: float = Field(default_factory=lambda: _yaml_val("retrieval", "rrf_weights", "orig_dense", default=1.0))
     RRF_WEIGHT_HYDE_DENSE: float = Field(default_factory=lambda: _yaml_val("retrieval", "rrf_weights", "hyde_dense", default=1.0))
@@ -147,6 +149,8 @@ class Settings(BaseSettings):
     WORKSPACE_DIR: str = Field(default_factory=lambda: _yaml_val("agent", "workspace_dir", default="workspace"))
     # v8.3.3: 轮次上限接线 config（此前 supervisor/light/子代理全部硬编码且与 config 脱节）
     SUPERVISOR_MAX_TURNS: int = Field(default_factory=lambda: _yaml_val("supervisor", "max_turns", default=8))
+    # v8.3.4: 每轮工具调用预算（防一轮内串行执行多个子代理）
+    SUPERVISOR_MAX_TOOLS_PER_TURN: int = Field(default_factory=lambda: _yaml_val("supervisor", "max_tools_per_turn", default=2))
     LIGHT_MAX_TURNS: int = Field(default_factory=lambda: _yaml_val("light", "max_turns", default=2))
     SUBAGENT_MAX_TURNS: dict = Field(default_factory=lambda: _yaml_val("subagents", default={}))
     TOOL_EXEC_TIMEOUT_SEC: int = Field(default_factory=lambda: _yaml_val("agent", "tool_exec_timeout_sec", default=60))

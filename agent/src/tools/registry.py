@@ -1,5 +1,6 @@
 """Tool Registry — tool classification, partitioned concurrency, offload"""
 import asyncio
+import contextvars
 import logging
 import time
 from dataclasses import dataclass, field
@@ -131,6 +132,19 @@ async def _check_tool_sandbox(tool_name: str, args: dict) -> Optional[str]:
     return None
 
 
+async def _invoke_tool_with_ctx(ctx: contextvars.Context, tool: BaseTool, args: dict):
+    """工具执行时保持请求 contextvar（v8.3.4）。
+
+    run_in_executor 线程不继承 contextvars → 工具内部的 emit_*（tool_progress 等）
+    会落到全局兜底队列而丢失（执行卡片缺失的根因）。
+    async 工具协程天然继承 contextvar，直接 await；sync 工具用 ctx.run 注入。
+    """
+    if getattr(tool, "coroutine", None) is not None:
+        return await tool.ainvoke(args)
+    return await asyncio.get_running_loop().run_in_executor(
+        None, lambda: ctx.run(lambda: tool.invoke(args)))
+
+
 async def _run_single_tool(tool: BaseTool, tool_call: dict) -> ToolMessage:
     tool_name = tool_call.get("name", tool.name)
     args = tool_call.get("args", {})
@@ -146,12 +160,13 @@ async def _run_single_tool(tool: BaseTool, tool_call: dict) -> ToolMessage:
     # 必须直接调用底层函数才能获取完整的 (content, artifact) 元组。
     response_format = getattr(tool, "response_format", None)
     raw_func = getattr(tool, "func", None)
+    ctx = contextvars.copy_context()
 
     if response_format == "content_and_artifact" and raw_func is not None:
         try:
             content, artifact = await asyncio.wait_for(
                 asyncio.get_running_loop().run_in_executor(
-                    None, lambda: raw_func(**args)
+                    None, lambda: ctx.run(lambda: raw_func(**args))
                 ),
                 timeout=exec_timeout,
             )
@@ -169,7 +184,8 @@ async def _run_single_tool(tool: BaseTool, tool_call: dict) -> ToolMessage:
         return ToolMessage(content=content, artifact=artifact, tool_call_id=tool_call["id"], name=tool_name)
     else:
         try:
-            result = await asyncio.wait_for(tool.ainvoke(args), timeout=exec_timeout)
+            result = await asyncio.wait_for(_invoke_tool_with_ctx(ctx, tool, args),
+                                            timeout=exec_timeout)
         except asyncio.TimeoutError:
             logger.error(f"[PartitionedNode] 工具 {tool.name} 执行超时(>{exec_timeout}s)")
             return ToolMessage(

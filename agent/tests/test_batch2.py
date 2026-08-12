@@ -243,6 +243,62 @@ def test_ag5_ltm():
     check("constraints 含冲突规则", "跨会话记忆规则" in c)
 
 
+def test_ag17_thread_context_propagation():
+    print("[AG-17] 工具线程内 emit 路由到请求队列（执行卡片修复）")
+    from langchain_core.tools import tool as lc_tool
+    from src.tools.registry import PartitionedToolNode
+    from src.core import progress_bus as pb
+
+    @lc_tool
+    def emitting_tool(msg: str) -> str:
+        """Emit tool_progress from inside the tool (sync → executor thread)."""
+        pb.emit_progress("tool_progress", {"message": msg, "tool_call_id": "inner"})
+        return "ok:" + msg
+
+    loop = asyncio.new_event_loop()
+    request_queue = asyncio.Queue()
+    pb.set_request_queue(request_queue)
+    try:
+        node = PartitionedToolNode([emitting_tool])
+        tc = {"id": "call_emit", "name": "emitting_tool", "args": {"msg": "hello-from-thread"}}
+        msgs = loop.run_until_complete(node.execute_tools([tc]))
+        check("工具返回正常", msgs and "ok:" in msgs[0].content, str(msgs)[:80])
+        got = []
+        while not request_queue.empty():
+            got.append(loop.run_until_complete(request_queue.get()))
+        evt = [e for e in got if e.get("event") == "tool_progress"]
+        check("线程内 tool_progress 事件进入请求队列",
+              len(evt) == 1 and "hello-from-thread" in evt[0]["data"],
+              f"got={[e.get('event') for e in got]}")
+    finally:
+        pb.clear_request_queue()
+        loop.close()
+
+
+def test_ag18_budget_and_converge():
+    print("[AG-18] supervisor 工具预算 + retrieve-agent 收敛")
+    check("config supervisor.max_tools_per_turn=2", settings.SUPERVISOR_MAX_TOOLS_PER_TURN == 2,
+          str(settings.SUPERVISOR_MAX_TOOLS_PER_TURN))
+    check("config retrieve.converge_min_docs=6", settings.RETRIEVE_CONVERGE_MIN_DOCS == 6,
+          str(settings.RETRIEVE_CONVERGE_MIN_DOCS))
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            'src', 'graph', 'expert_graph.py'), encoding='utf-8').read()
+    check("expert_graph 含预算截断逻辑", "SUPERVISOR_MAX_TOOLS_PER_TURN" in src
+          and "budget" in src)
+    runner = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               'src', 'core', 'agent_runner.py'), encoding='utf-8').read()
+    check("agent_runner 含收敛判断", "提前收敛" in runner or "converge" in runner)
+
+    from src.core.agent_runner import _count_unique_docs
+    docs = [
+        {"doi": "10.1/a"}, {"doi": "10.1/a"}, {"doi": "10.1/b"},
+        {"doi": ""}, {"doi": ""},
+    ]
+    check("去重计数(DOI+无DOI按条)", _count_unique_docs(docs) == 4, str(_count_unique_docs(docs)))
+    check("全同 DOI → 1", _count_unique_docs([{"doi": "x"}, {"doi": "x"}]) == 1)
+    check("空列表 → 0", _count_unique_docs([]) == 0)
+
+
 if __name__ == "__main__":
     test_ag4_session_new()
     test_ag7_timeout_retry()
@@ -253,6 +309,8 @@ if __name__ == "__main__":
     test_ag12_route_removed()
     test_ag14_degraded_event()
     test_ag5_ltm()
+    test_ag17_thread_context_propagation()
+    test_ag18_budget_and_converge()
     print(f"\n结果: {len(passed)} passed / {len(failed)} failed")
     if failed:
         print("失败项:", failed)
