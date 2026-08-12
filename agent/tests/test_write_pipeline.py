@@ -126,8 +126,7 @@ def test_missing_section():
     plan = {"title": "T", "abstract_draft": "A", "keywords": [],
             "sections": [{"heading": "1 A", "points": [], "target_chars": 500, "refs": []},
                          {"heading": "2 B", "points": [], "target_chars": 500, "refs": []}]}
-    llm = FakeLLM([None, "## 1 A\n内容A。<summary>sumA</summary>"])  # 第1章失败3次
-    # FakeLLM 返回 None 会 AttributeError → 走重试 → 最终 missing
+    # 第1章 3 次异常 → 缺章；第2章正常返回（read-back 校验要求返回内容与章节匹配）
     class BoomLLM:
         def __init__(self):
             self.calls = 0
@@ -135,7 +134,7 @@ def test_missing_section():
             self.calls += 1
             if self.calls <= 3:
                 raise Exception("boom")
-            return FakeResp("## 1 A\n内容A。<summary>sumA</summary>")
+            return FakeResp("## 2 B\n内容B。<summary>sumB</summary>")
     llm = BoomLLM()
     fname = f"test_pipe2_{uuid.uuid4().hex[:6]}.md"
     r = run(wp.run_stage2_execute(llm, plan, [], fname))
@@ -272,6 +271,82 @@ def test_runtime_capacity():
         settings.PIPELINE_SECTION_MAX_TOKENS = old
 
 
+def test_pipeline_state():
+    import json as _json
+    from src.core.write_pipeline_state import (start_task, find_resumable_task,
+                                               mark_section_done, finish_task,
+                                               cleanup_stale_tasks)
+    print("[state] 断点续传表 原子操作")
+    plan_obj = {"title": "T", "sections": [{"heading": "a"}, {"heading": "b"}]}
+    sid = f"st-{uuid.uuid4().hex[:6]}"
+    op = f"test_state_{uuid.uuid4().hex[:6]}.md"
+    tid = start_task(sid, op, plan_obj)
+    check("start_task 返回 task_id", bool(tid))
+    r = find_resumable_task(sid, op)
+    check("find_resumable_task 命中", r is not None and r["completed"] == [] and r["plan"]["title"] == "T")
+    check("不同 session 不命中", find_resumable_task("other", op) is None)
+    mark_section_done(tid, 0)
+    r2 = find_resumable_task(sid, op)
+    check("mark_section_done 追加", r2["completed"] == [0])
+    mark_section_done(tid, 0)
+    r3 = find_resumable_task(sid, op)
+    check("重复标记幂等", r3["completed"] == [0])
+    mark_section_done(tid, 1)
+    r4 = find_resumable_task(sid, op)
+    check("完成两章", r4["completed"] == [0, 1])
+    finish_task(tid, "done")
+    check("finish 后不再可续传", find_resumable_task(sid, op) is None)
+    n = cleanup_stale_tasks(0)
+    check("cleanup 删除 running 过期任务", isinstance(n, int) and n >= 0, f"n={n}")
+    # cleanup 不误删 done 任务
+    tid2 = start_task("st-keep", op, plan_obj)
+    finish_task(tid2, "done")
+    check("cleanup 保留 done 任务", find_resumable_task("st-keep", op) is None
+          and cleanup_stale_tasks(0) >= 0)
+
+
+def test_verify_functions():
+    print("[校验] read-back + 引用完整性")
+    fname = f"test_verify_{uuid.uuid4().hex[:6]}.md"
+    target = PROJECT_ROOT / "workspace" / "output" / fname
+    target.write_text("# T\n\n## 引言\n正文[1][2]。\n\n## 参考文献\n[1] Ref A\n[2] Ref B\n",
+                      encoding="utf-8")
+    check("read-back 命中（容错）", wp._verify_section_written(fname, "1 引言"))
+    check("read-back 未写 → False", not wp._verify_section_written(fname, "不存在的章节"))
+    issues = wp.verify_reference_integrity(fname)
+    check("引用完整无问题", issues == [], str(issues))
+    # 缺引用 + 未用文献
+    target.write_text("# T\n\n正文[1][3]。\n\n## 参考文献\n[1] Ref A\n[2] Ref B\n",
+                      encoding="utf-8")
+    issues2 = wp.verify_reference_integrity(fname)
+    check("正文[3]无文献 → 检出", any("[3]" in i for i in issues2), str(issues2))
+    check("文献[2]未引用 → 检出", any("[2]" in i for i in issues2), str(issues2))
+    target.unlink()
+
+
+def test_react_fallback():
+    print("[回退] react_fallback 落盘")
+    fname = f"test_fb_{uuid.uuid4().hex[:6]}.md"
+    # stage1 两次 JSON 失败 → 回退生成：第 3 次响应为回退全文
+    llm = FakeLLM(["not json", "still not json",
+                   "# 回退文档\n\n## 一 概述\n内容。<summary>s</summary>"])
+    r = run(wp.run_write_pipeline({"goal": "写一篇综述", "output_path": fname},
+                                  [{"doi": "1", "title": "X"}],
+                                  llm_factory=lambda: llm))
+    check("react_fallback 模式", r["mode"] == "react_fallback" and "已保存" in r["result"],
+          f"mode={r['mode']}")
+    target = PROJECT_ROOT / "workspace" / "output" / fname
+    check("回退内容已落盘", target.exists() and "回退文档" in target.read_text(encoding="utf-8"))
+    check("回退内容无 summary 标签", target.exists() and "<summary>" not in target.read_text(encoding="utf-8"))
+    if target.exists():
+        target.unlink()
+    # LLM 也失败 → 提示文本兜底
+    llm2 = FakeLLM(["not json", "not json", "nope"])
+    r2 = run(wp.run_write_pipeline({"goal": "写一篇综述", "output_path": ""},
+                                   [], llm_factory=lambda: llm2))
+    check("全部失败 → 提示文本", r2["mode"] == "react_fallback" and "回退" in r2["result"])
+
+
 def json_doc(obj):
     import json
     return json.dumps(obj, ensure_ascii=False)
@@ -287,6 +362,9 @@ if __name__ == "__main__":
     test_modify()
     test_entry_pipeline()
     test_runtime_capacity()
+    test_pipeline_state()
+    test_verify_functions()
+    test_react_fallback()
     print(f"\n结果: {len(passed)} passed / {len(failed)} failed")
     if failed:
         print("失败项:", failed)

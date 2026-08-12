@@ -213,6 +213,64 @@ async def run_stage1_plan(llm, material_pack: list[dict], target_chars: int) -> 
     return None, plan_text
 
 
+async def _react_fallback_write(llm, goal: str, plan_text: str, material_pack: list[dict],
+                                output_path: str, gap: bool) -> dict:
+    """Plan 失败回退: 带大纲一次性生成全文并落盘（v8.3.3）。
+
+    单次 LLM 调用；内容超单章容量时按 ## 章节切块 write+append 分批写盘。
+    LLM 也失败 → 返回提示文本（兜底告知 supervisor）。
+    """
+    if not output_path:
+        return {"result": f"[plan_failed] 大纲生成失败，已回退常规写作。\n{plan_text[:500]}",
+                "mode": "react_fallback", "chapters": 0, "total_chars": 0,
+                "missing_sections": [], "truncated_sections": [], "material_gap": gap}
+    prompt_file = _read_prompt("write-section.md")
+    prompt = (f"{prompt_file}\n\n---\n任务: 撰写完整文档 — {goal[:300]}\n"
+              f"参考大纲（用于结构参考）:\n{plan_text[:2000]}\n\n"
+              f"检索材料:\n{_format_material_pack(material_pack, max_entries=25)}\n"
+              f"要求: 一次输出完整 Markdown 文档（# 标题 + 摘要 + 分章节），"
+              f"控制在 3000 字以内，宁精勿滥。")
+    try:
+        resp = await asyncio.wait_for(llm.ainvoke([SystemMessage(content=prompt)]),
+                                      timeout=settings.PIPELINE_SECTION_TIMEOUT * 3)
+        content, _ = extract_summary((resp.content or "").strip())
+    except Exception as e:
+        logger.warning(f"[WritePipeline] react_fallback LLM failed: {e}")
+        content = ""
+    if not content:
+        return {"result": f"[plan_failed] 大纲生成失败，已回退常规写作。\n{plan_text[:500]}",
+                "mode": "react_fallback", "chapters": 0, "total_chars": 0,
+                "missing_sections": [], "truncated_sections": [], "material_gap": gap}
+
+    from src.tools.file_ops import write_local_file
+    max_per_section = int(settings.PIPELINE_SECTION_MAX_TOKENS / 1.2 * 0.9)
+    blocks = [b.strip() for b in SECTION_SPLIT_RE.split(content) if b.strip()]
+    total = 0
+    try:
+        if len(content) <= max_per_section or len(blocks) <= 1:
+            msg = write_local_file.func(output_path, content, "write")
+            if msg.startswith("Error"):
+                raise RuntimeError(msg[:200])
+            total = len(content)
+        else:
+            for i, b in enumerate(blocks):
+                mode = "write" if i == 0 else "append"
+                msg = write_local_file.func(output_path, b, mode)
+                if msg.startswith("Error"):
+                    raise RuntimeError(msg[:200])
+                total += len(b)
+    except Exception as e:
+        logger.error(f"[WritePipeline] react_fallback write failed: {e}")
+        return {"result": f"[plan_failed] 大纲生成失败，回退写作也未能保存。\n{plan_text[:300]}",
+                "mode": "react_fallback", "chapters": 0, "total_chars": 0,
+                "missing_sections": [], "truncated_sections": [], "material_gap": gap}
+
+    logger.info(f"[WritePipeline] react_fallback saved: {total} chars -> {output_path}")
+    return {"result": f"已保存到 {output_path}（{total} 字符，大纲失败回退模式）",
+            "mode": "react_fallback", "chapters": len(blocks), "total_chars": total,
+            "missing_sections": [], "truncated_sections": [], "material_gap": gap}
+
+
 # ─────────────────────────────────────────────
 # 3. Stage 2: Execute（逐章生成）
 # ─────────────────────────────────────────────
@@ -225,6 +283,52 @@ def extract_summary(resp: str) -> tuple[str, str]:
         body = SUMMARY_TAG_RE.sub("", resp).rstrip()
         return body, summary
     return resp.rstrip(), ""
+
+
+def _verify_section_written(output_path: str, heading: str) -> bool:
+    """写后 read-back: 文件存在且含本章节标题（防静默写失败/路径逃逸）。
+
+    容错匹配: 与文件中 ## 标题做 精确/包含 双向比对（LLM 可能微调标题措辞）。
+    """
+    target = (_WORKSPACE_ROOT / output_path).resolve()
+    try:
+        if not target.exists():
+            return False
+        content = target.read_text(encoding="utf-8")
+        if not heading:
+            return bool(content.strip())
+        for m in SECTION_HEADING_RE.finditer(content):
+            h = m.group(1).strip()
+            if heading == h or heading in h or h in heading:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def verify_reference_integrity(output_path: str) -> list:
+    """引用完整性校验（轻量、非 LLM）: 正文 [n] 编号 vs 参考文献区编号。
+
+    Returns: 问题列表（空 = 无问题）。
+    """
+    target = (_WORKSPACE_ROOT / output_path).resolve()
+    try:
+        content = target.read_text(encoding="utf-8")
+    except Exception as e:
+        return [f"read_back_failed: {e}"]
+    refs_m = re.search(r"(?:^|\n)#{1,3}\s*参考文献\s*", content)
+    body = content[:refs_m.start()] if refs_m else content
+    cited = {int(n) for n in re.findall(r"\[(\d{1,3})\]", body)}
+    refs_text = content[refs_m.start():] if refs_m else ""
+    listed = {int(n) for n in re.findall(r"\[(\d{1,3})\]\s*[\.\]\s\S]", refs_text)}
+    issues = []
+    if not refs_m:
+        issues.append("未找到参考文献区")
+    for n in sorted(cited - listed):
+        issues.append(f"正文引用[{n}] 无对应文献条目")
+    for n in sorted(listed - cited):
+        issues.append(f"文献[{n}] 未被正文引用")
+    return issues
 
 
 def _extract_material_subsets(plan_section: dict, material_pack: list[dict]) -> str:
@@ -364,11 +468,23 @@ async def run_stage2_execute(llm, plan: dict, material_pack: list[dict],
             body = header + body
         try:
             msg = write_local_file.func(output_path, body, mode)
+            if msg.startswith("Error"):
+                # write_local_file 失败时返回错误字符串而非抛异常，必须显式检测
+                logger.error(f"[WritePipeline] write failed section {idx+1}: {msg[:200]}")
+                missing.append(section.get("heading", f"第{idx+1}章"))
+                continue
             total_chars += len(body)
             logger.info(f"[WritePipeline] section {idx+1}/{len(sections)} done: "
                         f"{len(body)} chars | {msg[:80]}")
         except Exception as e:
             logger.error(f"[WritePipeline] write failed section {idx+1}: {e}")
+            missing.append(section.get("heading", f"第{idx+1}章"))
+            continue
+
+        # v8.3.3 写后 read-back: 确认章节已落盘
+        if not _verify_section_written(output_path, section.get("heading", "")):
+            logger.error(f"[WritePipeline] read-back FAILED section {idx+1} "
+                         f"{section.get('heading', '')}")
             missing.append(section.get("heading", f"第{idx+1}章"))
             continue
 
@@ -498,7 +614,8 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
         llm_factory: 可注入（测试用），默认构造 main 模型 ChatOpenAI
     Returns:
         {"result": str, "mode": str, "chapters": int, "total_chars": int,
-         "missing_sections": list, "truncated_sections": list, "material_gap": bool}
+         "missing_sections": list, "truncated_sections": list,
+         "reference_issues": list, "material_gap": bool}
     """
     from src.core.progress_bus import emit_encoded
 
@@ -536,9 +653,10 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
                 "missing_sections": [], "material_gap": gap}
 
     if cls["mode"] == "react":
-        return {"result": "[react] 渐进式写作应走 ReAct 路径",
-                "mode": "react", "chapters": 0, "total_chars": 0,
-                "missing_sections": [], "material_gap": gap}
+        # 渐进式写作由调用方（supervisor）转入 ReAct 路径，此处仅做结构化交接
+        return {"result": "[react] 已转入渐进式写作流程", "mode": "react",
+                "chapters": 0, "total_chars": 0, "missing_sections": [],
+                "truncated_sections": [], "material_gap": gap}
 
     # plan_execute
     target_chars = cls["target_chars"]
@@ -570,10 +688,9 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
     else:
         plan_text = ""
     if plan is None:
-        # ReAct 回退（带大纲文本）
-        return {"result": f"[plan_failed] 大纲生成失败，已回退常规写作。\n{plan_text[:500]}",
-                "mode": "react_fallback", "chapters": 0, "total_chars": 0,
-                "missing_sections": [], "material_gap": gap}
+        # ReAct 回退: 带大纲一次性生成全文并落盘（材料已在 pack，单次调用成本可控）
+        return await _react_fallback_write(llm, goal, plan_text, material_pack,
+                                           output_path, gap)
 
     if not task_id:
         try:
@@ -598,6 +715,12 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
         finish_task(task_id, "done" if not exec_result["missing_sections"] else "partial")
     except Exception:
         pass
+    # v8.3.3 写后引用完整性校验（正文 [n] vs 参考文献列表）
+    ref_issues = []
+    if exec_result["chapters"] > 0 and output_path:
+        ref_issues = verify_reference_integrity(output_path)
+        for issue in ref_issues[:5]:
+            logger.warning(f"[WritePipeline] ref integrity: {issue}")
     summary = (f"综述已保存: {output_path}（{exec_result['total_chars']} 字符，"
                f"{exec_result['chapters']} 章）")
     if exec_result["missing_sections"]:
@@ -605,6 +728,8 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
     if exec_result.get("truncated_sections"):
         summary += (f"\n⚠️ 章节超容量有截断风险: "
                     f"{', '.join(exec_result['truncated_sections'])}（精简重试后仍超限）")
+    if ref_issues:
+        summary += f"\n⚠️ 引用完整性: {'；'.join(ref_issues[:3])}"
     if gap:
         summary += f"\n⚠️ 材料不足（{len(material_pack)} 篇），部分章节可能缺少文献支撑"
     summary += f"\n\n摘要: {plan.get('abstract_draft', '')}"
@@ -613,4 +738,4 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
             "chapters": exec_result["chapters"], "total_chars": exec_result["total_chars"],
             "missing_sections": exec_result["missing_sections"],
             "truncated_sections": exec_result.get("truncated_sections", []),
-            "material_gap": gap}
+            "reference_issues": ref_issues, "material_gap": gap}

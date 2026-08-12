@@ -21,7 +21,10 @@ _DB_PATH = PROJECT_ROOT / "state" / "sessions.db"
 
 
 def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(_DB_PATH))
+    conn = sqlite3.connect(str(_DB_PATH), timeout=30)
+    # WAL + busy_timeout: 并发写不互锁、不丢更新
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS pipeline_tasks (
             task_id TEXT PRIMARY KEY,
@@ -80,11 +83,16 @@ def find_resumable_task(session_id: str, output_path: str) -> Optional[dict]:
 
 
 def mark_section_done(task_id: str, section_index: int) -> None:
-    """章节完成后追加到 completed_sections。"""
+    """章节完成后追加到 completed_sections。
+
+    BEGIN IMMEDIATE 事务包裹读-改-写，保证并发续传不丢 completed 标记
+    （防止章节重复 append）。
+    """
     if not task_id:
         return
     try:
         with _connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("SELECT completed_sections FROM pipeline_tasks WHERE task_id=?",
                                (task_id,)).fetchone()
             done = json.loads(row[0] or "[]") if row else []
@@ -113,11 +121,15 @@ def finish_task(task_id: str, status: str = "done") -> None:
 
 
 def cleanup_stale_tasks(days: int = 7) -> int:
-    """清理过期任务记录。"""
+    """清理 N 天前仍未完成的过期任务记录（仅 running 状态）。"""
     try:
+        from datetime import timedelta
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
         with _connect() as conn:
-            cur = conn.execute("DELETE FROM pipeline_tasks WHERE updated_at < ?",
-                               (datetime.now().isoformat(),))
+            cur = conn.execute(
+                "DELETE FROM pipeline_tasks WHERE status='running' AND updated_at < ?",
+                (cutoff,))
+            conn.commit()
             return cur.rowcount
     except Exception as e:
         logger.warning(f"[WritePipeline] cleanup failed: {e}")
