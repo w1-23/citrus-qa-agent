@@ -46,7 +46,7 @@
 
 | 参数 | 当前值 | 位置 | 优化建议 |
 |------|--------|------|---------|
-| `main_model` | deepseek-v4-pro | `.env` | 可降级为 deepseek-chat 降成本 |
+| `main_model` | deepseek-v4-flash | `.env` | v8.3.1: 已全切 Flash 正式版（V4 Pro 移除）；可降级 deepseek-chat 降成本 |
 | `fast_model` | deepseek-v4-flash | `.env` | HyDE/hints 用, 可换更便宜模型 |
 | `embedding_model` | multilingual-e5-large | `config.yaml:27` | 可换 BGE-M3(更好多语言) |
 | `reranker_model` | bge-reranker-v2-m3 | `config.yaml:28` | 可换更小更快的 minicpm |
@@ -61,13 +61,12 @@
 
 | 参数 | 当前值 | 位置 | 优化建议 |
 |------|--------|------|---------|
-| `SUPERVISOR_MAX_TURNS` | 4 | `expert_graph.py:33` | Expert 最大轮次 |
-| `LIGHT_MAX_TURNS` | 2 | `light_graph.py:29` | Light 最大轮次 |
-| `retrieve-agent max_turns` | 3 | `agent_runner.py` | v8.3.1: 1→3 支持多轮迭代换关键词；结果足够时 LLM 提前收尾，实际通常 1-2 轮 |
-| `write-agent max_turns` | 6 | `agent_runner.py:295` | 通常 1-2 轮够了 |
-| `analyze-agent max_turns` | 2 | `agent_runner.py:296` | 分析 Agent |
-| `max_tool_calls` | 4 | `config.yaml` | 每轮最大并发工具数 |
-| `recursion_limit` | 25 | `config.yaml:109` | Graph 递归深度上限 |
+| `SUPERVISOR_MAX_TURNS` | 8 | `config.yaml supervisor.max_turns` | v8.3.3: 已接线配置（此前硬编码 4）；综述类长任务建议 ≥6 |
+| `LIGHT_MAX_TURNS` | 2 | `config.yaml light.max_turns` | v8.3.3: 已接线配置 |
+| `retrieve-agent max_turns` | 3 | `config.yaml subagents.retrieve-agent.max_turns` | v8.3.3: 已接线配置；v8.3.1: 1→3 支持多轮迭代换关键词；结果足够时 LLM 提前收尾，实际通常 1-2 轮 |
+| `write-agent max_turns` | 6 | `config.yaml subagents.write-agent.max_turns` | 通常 1-2 轮够了（综述走 Plan-Execute 流水线，不经 ReAct 多轮） |
+| `analyze-agent max_turns` | 2 | `config.yaml subagents.analyze-agent.max_turns` | 分析 Agent |
+| `recursion_limit` | 25 | `config.yaml:109` | v8.3.3: 已接线 astream（此前未传参） |
 
 ---
 
@@ -75,12 +74,11 @@
 
 | 参数 | 当前值 | 位置 | 说明 |
 |------|--------|------|------|
-| `context_max_tokens` | 1,000,000 | `config.yaml:190` | DeepSeek v4 Pro 支持 |
-| `context_soft_threshold` | 0.90 | `config.yaml:191` | 触发 LLM 压缩 |
-| `context_hard_threshold` | 0.95 | `config.yaml:192` | 硬截断 |
-| `keep_recent_turns` | 2 | `config.yaml:194` | 截断时保留 N 轮 |
-| `compact_max_tokens` | 800 | `config.yaml:195` | 压缩输出上限 |
-| `history_compact_threshold` | 3 | `config.yaml:64` | 触发压缩的对话轮数 |
+| `context_max_tokens` | 1,000,000 | `config.yaml` | DeepSeek V4 Flash 1M 窗口 |
+| `context_soft_threshold` | 0.60 | `config.yaml` | 触发 LLM 压缩（v8.3.1 调优） |
+| `context_hard_threshold` | 0.93 | `config.yaml` | 硬截断（v8.3.1 调优） |
+| `keep_recent_turns` | 2 | `config.yaml` | 截断时保留 N 轮 |
+| `compact_max_tokens` | 800 | `config.yaml` | 压缩输出上限 |
 
 ---
 

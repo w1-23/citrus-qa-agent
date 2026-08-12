@@ -1,8 +1,8 @@
-# Citrus QA Agent v8.3.1
+# Citrus QA Agent v8.3.3
 
 柑橘科研问答 RAG + Multi-Agent 系统：Light/Expert 双图、HyDE+RRF 混合检索、SSE 流式输出、上下文预算与长期记忆。
 
-> v8.3.1（2026-08-11）基于生产就绪度审计完成 16 项功能修复（P0×2 / P2×9 / P3×4 + 检索 P0 映射修复）。完整审计与修复记录见 `AUDIT_2026-08-10.md`。
+> v8.3.3（2026-08-12）修复综述写作首跑必崩（UnboundLocalError）、补齐 Plan-Execute 完整性（写后校验/引用校验/落盘回退）并完成安全与健壮性加固（沙箱 fail-closed、路径白名单、XSS 转义、per-request 事件队列、request_id 追踪）。历史审计与修复记录见 `AUDIT_2026-08-10.md`。
 
 ---
 
@@ -42,16 +42,15 @@ python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000
     │
     ├─ ① FastGuard: 问候语直接回复（不调 LLM/RAG）
     ├─ ② 会话: get_or_create_session（"new"/空 → 新 UUID；修复 AG-4）
-    ├─ ③ 路由兜底 _resolve_mode（修复 AG-12）: light 模式下
-    │    命中复杂关键词(综述/设计/分析…) → expert
-    │    长句 >25 字 → expert；否则按客户端 light_mode
+    ├─ ③ 模式: 完全由客户端 light_mode 决定（用户手动切换，
+    │    无服务端路由自动升级——AG-12 已按用户决策彻底移除）
     │
     ├─ ④ 图执行（expert_graph / light_graph）
     │    ├─ load: 历史加载 → ContextBudget.check（修复 AG-3）
     │    │         1M 窗口 / soft 0.60 / hard 0.93 → SUMMARIZE/TRUNCATE
     │    │         压缩结果 replace_history 持久化（修复 AG-6）
     │    │         压缩用 MAIN 模型（质量优先）
-    │    ├─ supervisor: ReAct 循环（expert ≤4 轮 / light ≤2 轮）
+    │    ├─ supervisor: ReAct 循环（expert ≤8 轮 / light ≤2 轮，config 可调）
     │    │    ├─ LLM 调用 3 次重试（修复 AG-7）
     │    │    ├─ 工具执行 asyncio.wait_for 60s 超时（修复 AG-7）
     │    │    ├─ 工具失败 → [ERR_*]/[AgentError] 回传 LLM 可感知（修复 AG-14）
@@ -77,9 +76,10 @@ python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000
 
 **Write Pipeline（v8.3.2，Plan-Execute 长文写作）**：
 - 写任务**四路路由**（supervisor 层 `classify_write_task`）：`plan_execute`（综述/报告）/ `react`（渐进式写作）/ `direct_write`（保存现成内容）/ `modify`（定向修改已有文档章节）
-- **Plan 阶段**：结构化大纲（title/摘要/关键词/章节/每章 refs 文献分配），动态字数阈值校验 + 重试 + ReAct 回退（带大纲）
-- **Execute 阶段**：每章**独立 LLM 调用**（输出预算 100% 聚焦一章，无截断）+ 章间 `running_context`（前章 `<summary>` 标签，代码提取）+ 材料按 refs 语义分配
-- 单章失败 → 缺章占位 + 部分成功返回（优雅降级）；**断点续传**（pipeline_tasks 表，中断后从下一章继续）
+- **Plan 阶段**：结构化大纲（title/摘要/关键词/章节/每章 refs 文献分配），动态字数阈值校验（严格/自主双模式）+ 单章容量上限（≤3000 字防截断）+ 重试 + ReAct 回退（带大纲落盘）
+- **Execute 阶段**：每章**独立 LLM 调用**（输出预算 100% 聚焦一章，无截断）+ 章间 `running_context`（前章 `<summary>` 标签，代码提取）+ 材料按 refs 语义分配 + **运行时容量兜底**（实际输出超限 → 精简重试 + truncated 标记）
+- 单章失败 → 缺章占位 + 部分成功返回（优雅降级）；**断点续传**（pipeline_tasks 表，WAL+原子事务，中断后从下一章继续）
+- **写后校验（v8.3.3）**：read-back 确认章节落盘（防静默写失败）+ 引用完整性校验（正文 [n] vs 参考文献列表）
 - SSE 进度事件：`plan_ready`（大纲）/ `section_start` / `section_done`（前端实时章节进度）
 
 ### 检索管线（v8.3.1 关键修复）

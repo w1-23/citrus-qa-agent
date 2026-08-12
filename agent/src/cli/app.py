@@ -1,4 +1,4 @@
-"""CLI — Rich terminal interface for Citrus QA Agent v8.1.1"""
+"""CLI — Rich terminal interface for Citrus QA Agent v8.3.3"""
 import asyncio
 import logging
 import re
@@ -43,7 +43,7 @@ async def run_query(query: str, mode: str = "light"):
     }
 
     t0 = time.perf_counter()
-    console.print(Panel(f"[bold]Citrus QA Agent v8.1.1[/bold]  Mode: [cyan]{mode.upper()}[/cyan]  Query: {query[:80]}", expand=False))
+    console.print(Panel(f"[bold]Citrus QA Agent v8.3.3[/bold]  Mode: [cyan]{mode.upper()}[/cyan]  Query: {query[:80]}", expand=False))
 
     # Live progress display using Rich Text (not Table — avoids Row API issues)
     final = {}
@@ -180,7 +180,7 @@ def main():
             console.print(f"[red][WARN] Load failed: {e} — will retry on first query[/red]")
 
     console.print(Panel(
-        "[bold cyan]Citrus QA Agent v8.1.1[/bold cyan]\n"
+        "[bold cyan]Citrus QA Agent v8.3.3[/bold cyan]\n"
         "  • [green]light mode[/green]: local RAG — fast (1-3s)\n"
         "  • [orange3]expert mode[/orange3]: RAG + academic databases + sub-agents\n"
         "  • Log file: [dim]logs/agent.log[/dim]\n\n"

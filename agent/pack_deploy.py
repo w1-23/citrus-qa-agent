@@ -18,7 +18,7 @@ EXCLUDE_DIRS = {
 }
 EXCLUDE_FILES = {
     ".env", ".env.example", "test_batch1.py", "test_batch2.py",
-    "pack_deploy.py", "verify_retrieval.py", "AGENT_CHANGES.md",
+    "pack_deploy.py", "AGENT_CHANGES.md",
     "TUNE_PARAMS.md", "readme2.md",
 }
 EXCLUDE_SUFFIX = {".pyc", ".tmp"}
@@ -40,6 +40,11 @@ def main():
         OUT.unlink()
     n = 0
     with zipfile.ZipFile(OUT, "w", zipfile.ZIP_DEFLATED) as zf:
+        # v8.3.3: 依赖清单 requirements.txt 在仓库根目录，必须随包发布
+        req = ROOT.parent / "requirements.txt"
+        if req.exists():
+            zf.write(req, "agent/requirements.txt")
+            n += 1
         for root, dirs, files in os.walk(ROOT):
             root_path = Path(root)
             # 剪枝：不进入被排除的目录
@@ -54,6 +59,7 @@ def main():
     size_mb = OUT.stat().st_size / (1024 * 1024)
     print(f"OK: {OUT.name} ({n} files, {size_mb:.1f} MB)")
     print("部署时还需单独拷贝: data/ (语料库), 并配置 agent/.env")
+    print("验收: 解压后 cd agent && pip install -r requirements.txt && python tests/verify_retrieval.py")
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Citrus QA Agent v8.3.1</title>
+<title>Citrus QA Agent v8.3.3</title>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -847,7 +847,7 @@ dialog::backdrop {
 <header>
   <div class="logo-mark">C</div>
   <h1>Citrus QA Agent</h1>
-  <span class="version-badge">v8.3.1</span>
+  <span class="version-badge">v8.3.3</span>
   <div class="header-actions">
     <button class="ctx-circle-btn" id="ctxCircleBtn" onclick="toggleCtxDrawer()" title="上下文用量">
       <svg viewBox="0 0 36 36" width="22" height="22">
@@ -867,7 +867,7 @@ dialog::backdrop {
       <div class="message bot">
         <div class="avatar">◆</div>
         <div class="content">
-          您好，我是 Citrus QA Agent v8.3.1。<br>
+          您好，我是 Citrus QA Agent v8.3.3。<br>
           <span style="color:var(--text-muted);font-size:13px">本地 RAG 检索 · CrossRef 学术搜索 · 文献综述写作 · 实验设计 · 文件读写</span>
         </div>
       </div>
@@ -1255,7 +1255,7 @@ async function clearSession() {
   if (!confirm('确定清空当前会话？')) return;
   try {
     await fetch('/api/v1/session/' + sessionId + '/clear', { method: 'POST' });
-    chatContainer.innerHTML = '<div class="message bot"><div class="avatar">◆</div><div class="content">您好，我是 Citrus QA Agent v8.3.1。<br><span style="color:var(--text-muted);font-size:13px">本地 RAG 检索 · CrossRef 学术搜索 · 文献综述写作 · 实验设计 · 文件读写</span></div></div>';
+    chatContainer.innerHTML = '<div class="message bot"><div class="avatar">◆</div><div class="content">您好，我是 Citrus QA Agent v8.3.3。<br><span style="color:var(--text-muted);font-size:13px">本地 RAG 检索 · CrossRef 学术搜索 · 文献综述写作 · 实验设计 · 文件读写</span></div></div>';
     sidebarContent.innerHTML = '<div class="empty-sidebar">提交问题后文献将在此展示</div>';
     citationCount.textContent = '0';
     roundHistory = [];
