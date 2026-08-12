@@ -1411,6 +1411,16 @@ async function sendMsg(isFollowUp) {
       case 'context_status': renderContextPanel(data); break;
       case 'context_usage': updateContextTokens(data.total || 0); break;
       case 'context_degraded': showBanner('⚠️ 历史会话加载失败，本次回答可能缺少上下文'); break;
+      case 'plan_ready':
+        updateStatus('answer', '📑 大纲已生成 (' + (data.sections||[]).length + ' 章)，开始逐章撰写...');
+        appendTerminal('📑 大纲: ' + (data.title||'') + ' | 章节: ' + (data.sections||[]).join(' → '));
+        break;
+      case 'section_start':
+        updateStatus('answer', '✍️ 正在写第 ' + (data.index||'') + '/' + (data.total||'') + ' 章: ' + (data.heading||''));
+        break;
+      case 'section_done':
+        updateStatus('answer', '✅ 第 ' + (data.index||'') + '/' + (data.total||'') + ' 章完成');
+        break;
       case 'citations':
         roundHistory.push({roundId:currentRoundId,query:currentQuery,cited:data.cited||[],uncited:data.uncited||[],historical:data.historical||[]});
         renderRoundSidebar(); citationsDiv.style.display='';

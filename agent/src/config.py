@@ -151,6 +151,15 @@ class Settings(BaseSettings):
     AGENT_MAX_TURNS: int = Field(default_factory=lambda: _yaml_val("agent", "max_turns", default=3))
     AGENT_TIMEOUT_SEC: int = Field(default_factory=lambda: _yaml_val("agent", "timeout_sec", default=30))
     TOOL_EXEC_TIMEOUT_SEC: int = Field(default_factory=lambda: _yaml_val("agent", "tool_exec_timeout_sec", default=60))
+
+    # ── Write Pipeline (v8.3.2) ──
+    PIPELINE_DEFAULT_TARGET_CHARS: int = Field(default_factory=lambda: _yaml_val("pipeline", "default_target_chars", default=6000))
+    PIPELINE_MATERIAL_MIN_COUNT: int = Field(default_factory=lambda: _yaml_val("pipeline", "material_min_count", default=8))
+    PIPELINE_MAX_PLAN_RETRIES: int = Field(default_factory=lambda: _yaml_val("pipeline", "max_plan_retries", default=1))
+    PIPELINE_REFS_COVERAGE_RATIO: float = Field(default_factory=lambda: _yaml_val("pipeline", "refs_coverage_ratio", default=0.4))
+    PIPELINE_SECTION_MAX_TOKENS: int = Field(default_factory=lambda: _yaml_val("pipeline", "section_max_tokens", default=4000))
+    PIPELINE_SECTION_TIMEOUT: int = Field(default_factory=lambda: _yaml_val("pipeline", "section_timeout", default=120))
+    PIPELINE_RESUME_ENABLED: bool = Field(default_factory=lambda: _yaml_val("pipeline", "resume_enabled", default=True))
     TOOL_RESULT_CAPS: dict = Field(default_factory=lambda: _yaml_val("agent", "tool_result_caps", default={}))
 
     # ── File I/O ──

@@ -19,7 +19,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 
 from src.graph.state import AgentState
-from src.config import settings, get_deepseek_model
+from src.config import settings, get_deepseek_model, PROJECT_ROOT
 from src.prompts.loader import assemble_system_prompt
 
 logger = logging.getLogger(__name__)
@@ -300,7 +300,8 @@ async def _classify_document(text: str) -> bool:
         return False
 
 
-async def _execute_tool_call(tc: dict, tc_id: str = "") -> dict:
+async def _execute_tool_call(tc: dict, tc_id: str = "", material_pack: list | None = None,
+                             session_id: str = "") -> dict:
     from src.core.agent_runner import run_agent
 
     name = tc.get("name", "")
@@ -364,6 +365,25 @@ async def _execute_tool_call(tc: dict, tc_id: str = "") -> dict:
             logger.info(f"[ExpertGraph] direct write (context={len(context)}chars): {save_msg}")
             result = {"agent": "write-agent", "result": f"已保存到 {save_path}", "artifacts": {},
                       "tools_called": 0}
+        elif agent_name == "write-agent":
+            # v8.3.2: 写任务四路路由 — 直写确认失败后，按意图分类
+            from src.core.write_pipeline import classify_write_task, run_write_pipeline
+            pack = material_pack or []
+            target = (PROJECT_ROOT / "workspace" / "output" / task["output_path"]).resolve() \
+                if task["output_path"] else None
+            file_exists = bool(target and target.exists())
+            cls = classify_write_task(task.get("goal", ""), context, file_exists)
+            if cls["mode"] == "plan_execute" and len(pack) >= 1:
+                result = await run_write_pipeline(
+                    task, pack, session_id=session_id,
+                )
+                result["agent"] = "write-agent"
+            else:
+                # react / modify(无目标) / 材料不足 → ReAct 原路径（含 skill）
+                result = await run_agent(
+                    agent_name, task, context=context,
+                    system_prompt_extra=skill_prompt, timeout_sec=120,
+                )
         else:
             result = await run_agent(
                 agent_name, task, context=context,
@@ -626,7 +646,11 @@ async def supervisor_node(state: AgentState) -> dict:
                     except Exception:
                         pass
                 else:
-                    sub_result = await _execute_tool_call(tc_dict, tc_id)
+                    sub_result = await _execute_tool_call(
+                        tc_dict, tc_id,
+                        material_pack=all_main_results,
+                        session_id=state.get("session_id", ""),
+                    )
                     try:
                         emit_tool_result(
                             tc_dict["name"],

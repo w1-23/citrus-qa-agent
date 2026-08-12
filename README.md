@@ -75,6 +75,13 @@ python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000
   - 通用错误 → `[ERR_类别]` 每条含操作建议（`_classify_error`，如 FILE_NOT_FOUND→检查路径、TIMEOUT→改用本地源）
 - Agent 输出要求强化：write/analyze 必须说明结果归因与信息缺口（哪些有文献支持、哪些方向未检索到）
 
+**Write Pipeline（v8.3.2，Plan-Execute 长文写作）**：
+- 写任务**四路路由**（supervisor 层 `classify_write_task`）：`plan_execute`（综述/报告）/ `react`（渐进式写作）/ `direct_write`（保存现成内容）/ `modify`（定向修改已有文档章节）
+- **Plan 阶段**：结构化大纲（title/摘要/关键词/章节/每章 refs 文献分配），动态字数阈值校验 + 重试 + ReAct 回退（带大纲）
+- **Execute 阶段**：每章**独立 LLM 调用**（输出预算 100% 聚焦一章，无截断）+ 章间 `running_context`（前章 `<summary>` 标签，代码提取）+ 材料按 refs 语义分配
+- 单章失败 → 缺章占位 + 部分成功返回（优雅降级）；**断点续传**（pipeline_tasks 表，中断后从下一章继续）
+- SSE 进度事件：`plan_ready`（大纲）/ `section_start` / `section_done`（前端实时章节进度）
+
 ### 检索管线（v8.3.1 关键修复）
 
 ```

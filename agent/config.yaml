@@ -148,6 +148,16 @@ agent:
     analyze-agent: 10000         #   分析结论
     default: 100000              #   read_local_file/pdf_read 保留大值
 
+# ── Write Pipeline (Plan-Execute 长文写作流水线, v8.3.2) ──
+pipeline:
+  default_target_chars: 6000    # 用户未指定字数时的综述目标
+  material_min_count: 8         # 材料包就绪最小文献数（不足时 supervisor 补 1 次定向检索）
+  max_plan_retries: 1           # Plan 校验失败最大重试次数
+  refs_coverage_ratio: 0.4      # 大纲 refs 覆盖章节比例下限
+  section_max_tokens: 4000      # 单章生成输出上限
+  section_timeout: 120          # 单章 LLM 调用超时(秒)
+  resume_enabled: true          # 中断续传（pipeline_tasks 表）开关
+
 # ── File I/O ──
 file_io:
   read_max_size_mb: 50           # 单次读取文件大小上限（MB）
