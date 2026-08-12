@@ -549,6 +549,16 @@ async def supervisor_node(state: AgentState) -> dict:
     used_queries = []
     consecutive_failures = 0
     max_tools_per_turn = getattr(settings, "SUPERVISOR_MAX_TOOLS_PER_TURN", 2) or 2
+    # v8.3.6 预算前移 (规范 2.2.5): 每次模型调用前检查上下文占用（原仅 load 时检查一次）
+    try:
+        from src.core.context_budget import ContextBudget, ContextBudgetConfig
+        supervisor_budget = ContextBudget(ContextBudgetConfig(
+            max_tokens=settings.CONTEXT_BUDGET_MAX_TOKENS,
+            soft_threshold=settings.CONTEXT_BUDGET_SOFT_THRESHOLD,
+            hard_threshold=settings.CONTEXT_BUDGET_HARD_THRESHOLD,
+        ))
+    except Exception:
+        supervisor_budget = None
 
     try:
         emit_status("step_done", step_id="load")
@@ -572,6 +582,30 @@ async def supervisor_node(state: AgentState) -> dict:
                 "</agent_status>\n"
                 "以上为系统注入的运行时状态摘要，请据此决策，不要重复已完成步骤。"))
             call_messages = list(messages) + [status_msg]
+            # v8.3.6 预算前移: 每次调用前估算，超硬阈值强制收尾（防窗口溢出），
+            # 超软阈值在状态栏提示模型收敛
+            if supervisor_budget is not None:
+                try:
+                    est = supervisor_budget.estimate_tokens(call_messages)
+                    ratio = est / supervisor_budget.config.max_tokens
+                    if ratio >= supervisor_budget.config.hard_threshold:
+                        logger.warning(
+                            f"[ExpertGraph:supervisor] 上下文占用 {ratio:.1%} ≥ "
+                            f"硬阈值 {supervisor_budget.config.hard_threshold:.0%}，强制收尾")
+                        forced_final = True
+                        break
+                    if ratio >= supervisor_budget.config.soft_threshold:
+                        logger.warning(
+                            f"[ExpertGraph:supervisor] 上下文占用 {ratio:.1%} ≥ "
+                            f"软阈值 {supervisor_budget.config.soft_threshold:.0%}")
+                        status_msg = HumanMessage(content=(
+                            f"{status_msg.content}\n"
+                            f"[budget] 上下文占用 {ratio:.1%}（软阈值 "
+                            f"{supervisor_budget.config.soft_threshold:.0%}），"
+                            f"请尽快收敛输出。"))
+                        call_messages = list(messages) + [status_msg]
+                except Exception:
+                    pass
             for attempt in range(3):
                 try:
                     response = await llm_with_tools.ainvoke(call_messages)
@@ -802,6 +836,14 @@ async def supervisor_node(state: AgentState) -> dict:
                 f"(total {time.perf_counter()-t0:.1f}s)"
             )
 
+        if forced_final and not answer:
+            # v8.3.6: 预算熔断（上下文超硬阈值）→ 强制收尾
+            logger.warning("[ExpertGraph:supervisor] 预算熔断，强制输出最终回答")
+            messages.append(HumanMessage(content=(
+                "上下文接近上限，立即停止调用工具，"
+                "基于已有信息给出最终回答（信息不足请明确说明）。")))
+            final_resp = await llm_base.ainvoke(messages)
+            answer = final_resp.content or ""
         else:
             logger.info("[ExpertGraph:supervisor] max turns, forcing final")
             messages.append(HumanMessage(content=(

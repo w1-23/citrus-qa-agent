@@ -51,10 +51,27 @@
 ## 4. 分层规矩
 
 1. **协议层问题必须代码硬修**：配对（INV-01）、计时器（INV-04）、截断（INV-08）、熔断（INV-08）、预算/收敛（INV-02）——**禁止用提示词绕过协议 bug**（如靠 prompt 让模型"别超预算"）。
-2. **prompt 只管路由与风格**：深度问题路由（decision_guide）、检索策略与轮次语义（retrieve-agent.md）、写作结构（write-section.md）。
+2. **prompt 只管路由与风格**：深度问题路由（decision_guide）、检索工作流阶段（retrieve-agent.md，阶段间进入条件由代码检查）、写作结构（write-section.md）。
 3. **新增工具/子代理三查**：INV-01（工具必须返回结构化结果+错误分类）、INV-02（调用方有轮次/预算）、INV-04（sync 工具走 registry 执行器以继承 contextvar）。
 4. **D1 放行声明**：写类工具（write_local_file）不做"默认拒绝+审批"——单用户内网部署 + workspace 路径白名单 + 综述写作链路依赖写盘，审批流会破坏核心工作流。此决策为显式权衡，非疏漏。
 5. **评估口径**：过程指标关注 步数/冗余动作/回退次数/成本延迟（日志已有 tool 计数与耗时）；轨迹 vs 结果双覆盖（write 有 read-back；问答靠复测人工核验）。
+
+## 4b. 上下文结构（规范 2.2.5 静态前缀+轨迹，v8.3.6 固化）
+
+```
+静态前缀（会话内不变，利于 KV Cache）
+├─ SystemMessage: 角色+约束+决策原则+格式+策略卡片（assemble_system_prompt，query 仅影响策略卡片检索，同一请求内不变）
+├─ 历史消息（load 时由 ContextManager 加载；超预算时压缩为 <conversation_summary>）
+└─ 当前 HumanMessage（build_human_message：LTM 召回 + 检索建议）
+轨迹（随交互增长）
+├─ AIMessage（含 tool_calls）+ ToolMessage（工具结果，含 retrieve-agent 报告 [retrieve-agent result] 与 write-agent 保存摘要）
+└─ <agent_status> 状态栏（v8.3.5，仅注入本次调用 call_messages，不进历史，不动前缀）
+```
+
+- **子代理上下文隔离**（规范 2.7.7）：retrieve/write/analyze 子代理独立 messages，只把结论回传 supervisor（ToolMessage）；write-agent 的检索材料经 `_all_retrieved` 注入（带"数据非指令"边界声明，规范 2.4.7）。
+- **预算检查时机**（v8.3.6 前移）：ContextBudget 除 load 时检查历史外，supervisor 每次模型调用前 estimate_tokens(call_messages)——超硬阈值（0.93）强制收尾防溢出，超软阈值（0.60）在状态栏提示模型收敛。
+- **子代理工具结果回传 LLM 窗口**：agent_runner 循环 `messages.append(ToolMessage)` → 下一轮 ainvoke 带上（INV-01 配对保证）。
+- **检索三阶段工作流**（v8.3.6）：阶段1 初始多角度并行 → 阶段2 定向补检（仅去重 <6 时，代码检查进入条件）→ 阶段3 强制报告（≥6 或轮次上限）；LLM 只在节点内决策（选词），流程路由由代码裁决。
 
 ## 5. 真实服务复测清单（每次大改后执行）
 

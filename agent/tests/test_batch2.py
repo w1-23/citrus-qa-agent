@@ -359,7 +359,9 @@ def test_ag22_output_routing():
     print("[AG-22] 输出路由与证据保真（INV-05）")
     prom = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                              'src', 'prompts', 'agents', 'retrieve-agent.md'), encoding='utf-8').read()
-    check("retrieve 证据清单格式", "核心结论与证据点" in prom and "收敛优先" in prom)
+    check("retrieve 证据清单格式", "核心结论与证据点" in prom)
+    check("retrieve 三阶段工作流", "阶段 1" in prom and "阶段 3" in prom
+          and "由代码检查进入条件" in prom)
     guide = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                               'src', 'prompts', 'system', 'decision_guide.md'), encoding='utf-8').read()
     check("决策指南深度规则", "逐证据引用" in guide and "深度问题生成策略" in guide)
@@ -368,6 +370,20 @@ def test_ag22_output_routing():
                                            'config.yaml'), encoding='utf-8'))
     check("retrieve-agent cap=40000",
           cfg['agent']['tool_result_caps']['retrieve-agent'] == 40000)
+
+
+def test_ag26_budget_forward():
+    print("[AG-26] 预算检查前移（规范 2.2.5，每次调用前）")
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            'src', 'graph', 'expert_graph.py'), encoding='utf-8').read()
+    check("每轮调用前估算", "estimate_tokens(call_messages)" in src)
+    check("硬阈值强制收尾", "硬阈值" in src and "强制收尾" in src)
+    check("软阈值状态栏提示", "软阈值" in src and "尽快收敛" in src)
+    from src.core.context_budget import ContextBudget, ContextBudgetConfig
+    b = ContextBudget(ContextBudgetConfig(max_tokens=1000))
+    from langchain_core.messages import HumanMessage
+    est = b.estimate_tokens([HumanMessage(content="字" * 100)])
+    check("估算函数可用", est >= 100, str(est))
 
 
 def test_ag23_converge_behavior():
@@ -459,6 +475,7 @@ if __name__ == "__main__":
     test_ag23_converge_behavior()
     test_ag24_circuit_breaker()
     test_ag25_truncation_transparency()
+    test_ag26_budget_forward()
     print(f"\n结果: {len(passed)} passed / {len(failed)} failed")
     if failed:
         print("失败项:", failed)

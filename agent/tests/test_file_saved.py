@@ -48,7 +48,7 @@ def test_retrieve_turns():
     check("config subagents.retrieve-agent.max_turns=3",
           cfg.get('subagents', {}).get('retrieve-agent', {}).get('max_turns') == 3)
     prom = open(os.path.join(BASE, 'src', 'prompts', 'agents', 'retrieve-agent.md'), encoding='utf-8').read()
-    check("prompt 含轮次语义", "最多 3 轮" in prom and "同一轮内" in prom)
+    check("prompt 含轮次语义", "三阶段" in prom and "阶段 1" in prom and "阶段 3" in prom)
 
 
 def test_light_read():
