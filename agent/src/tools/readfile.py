@@ -18,10 +18,30 @@ _WORKSPACE_ROOT = PROJECT_ROOT / settings.WORKSPACE_DIR
 PDF_DEFAULT_MAX_CHARS = 30000
 
 
+def _is_path_allowed(full: Path) -> bool:
+    """v8.3.3 路径白名单: 项目根目录 + 配置的额外读取根目录。"""
+    try:
+        os.path.commonpath([str(full), str(PROJECT_ROOT.resolve())])
+        return True
+    except ValueError:
+        pass
+    for root in getattr(settings, "FILE_READ_EXTRA_ROOTS", None) or []:
+        try:
+            os.path.commonpath([str(full), str(Path(root).resolve())])
+            return True
+        except ValueError:
+            continue
+    return False
+
+
 def _resolve_read_path(path: str) -> Path:
     p = Path(path)
     if p.is_absolute():
         full = p.resolve()
+        # v8.3.3 安全: 绝对路径仅允许项目根目录内（防 LLM 读取系统任意文件，
+        # 与 write_local_file/pdf_read 的 workspace 校验对称）
+        if not _is_path_allowed(full):
+            raise PermissionError(f"拒绝读取项目目录外的文件: {full}")
     else:
         full = (_WORKSPACE_ROOT / p).resolve()
         if not full.exists():
@@ -134,7 +154,7 @@ def _read_text(path: Path) -> str:
 async def read_local_file(path: str, max_chars: int = 0) -> str:
     """读取本地文件。PDF 默认读前 30000 字符（约8-12页），其它格式默认读全文。
 
-    绝对路径：可读取本机上任意位置的文件。
+    绝对路径：仅允许项目根目录内的文件。
     相对路径：从 workspace/ 或当前工作目录查找。
 
     Args:

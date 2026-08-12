@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 from src.core.progress_bus import (
     emit_encoded, emit_thinking,
     emit_tool_call_start, emit_tool_executing, emit_tool_result,
-    emit_status, mark_tool_start, mark_tool_end,
+    emit_usage_delta,
 )
 
 
@@ -58,6 +58,7 @@ async def run_agent(
     system_prompt_extra: str = "",
     skills: Optional[list[str]] = None,
     timeout_sec: int = 120,
+    session_id: str = "",
 ) -> dict:
     """Run a sub-agent in ReAct loop. Returns result dict.
 
@@ -68,6 +69,7 @@ async def run_agent(
         system_prompt_extra: additional instructions appended to system prompt
         skills: skill IDs for write-agent
         timeout_sec: LLM call timeout
+        session_id: 会话 ID（context_usage 增量追踪用）
 
     Returns:
         {"agent": str, "result": str, "artifacts": dict, "tools_called": int, "turns": int}
@@ -130,8 +132,10 @@ async def run_agent(
     t_start = time.perf_counter()
 
     result_content = ""
+    turns_taken = 0
 
     for turn in range(max_turns):
+        turns_taken = turn + 1
         t_llm = time.perf_counter()
         response = None
         for attempt in range(3):
@@ -150,16 +154,15 @@ async def run_agent(
 
         dt_llm = (time.perf_counter() - t_llm) * 1000
         messages.append(response)
-        # v8.3.1: 子 Agent 真实 token 消耗也推送（前端上下文面板实时刷新）
+        # v8.3.3: 子 Agent 真实 token 增量推送（前端上下文面板实时刷新，避免累计值重复计数）
         try:
             usage = (getattr(response, "usage_metadata", None)
                      or (getattr(response, "response_metadata", {}) or {}).get("usage", {}))
             if isinstance(usage, dict) and usage.get("total_tokens"):
-                emit_encoded("context_usage", {
-                    "input_tokens": usage.get("input_tokens", 0),
-                    "output_tokens": usage.get("output_tokens", 0),
-                    "total": usage.get("total_tokens", 0),
-                })
+                emit_usage_delta(session_id, agent_name,
+                                 usage.get("input_tokens", 0),
+                                 usage.get("output_tokens", 0),
+                                 usage.get("total_tokens", 0))
         except Exception:
             pass
 
@@ -312,7 +315,8 @@ async def run_agent(
         "result": result_content or (f"[AgentError] {agent_name} LLM 调用失败(重试耗尽): {llm_error}" if llm_error else "(no output)"),
         "artifacts": collected_artifacts,
         "tools_called": tool_count,
-        "turns": max_turns,
+        # v8.3.3: 返回实际轮数（此前恒等于上限，误导调用方）
+        "turns": turns_taken,
     }
 
 
@@ -343,9 +347,8 @@ def _resolve_tool_names(agent_name: str) -> list[str]:
 
 
 def _get_max_turns(agent_name: str) -> int:
-    mapping = {
-        "retrieve-agent": 3,   # v8.3.1: 1→3，支持多轮换关键词迭代检索（对齐 config subagents 声明）
-        "write-agent": 6,
-        "analyze-agent": 2,
-    }
-    return mapping.get(agent_name, 3)
+    # v8.3.3: 轮次上限接线 config.yaml subagents.<name>.max_turns（此前硬编码）
+    sub = (getattr(settings, "SUBAGENT_MAX_TURNS", None) or {}).get(agent_name, {})
+    if isinstance(sub, dict):
+        return int(sub.get("max_turns") or 3)
+    return int(sub or 3)

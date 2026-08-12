@@ -110,19 +110,31 @@ def test_ag9_atomic_write():
 
 def test_ag10_limits():
     print("[AG-10] 文件大小 + 样本量上限")
-    import tempfile
+    # v8.3.3: 绝对路径读取限项目根内 → 测试文件置于 workspace/output
+    from src.config import PROJECT_ROOT
     from pathlib import Path
     from src.tools.analyze import statistical_analysis
+    out_dir = PROJECT_ROOT / "workspace" / "output"
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    tmp = Path(tempfile.mkdtemp()) / "big.csv"
+    tmp = out_dir / "test_big.csv"
     tmp.write_text("a,b\n" + "1,2\n" * 150000, encoding="utf-8")
     r = statistical_analysis.func(str(tmp), "descriptive", '{"value_column": "a"}')
     check("超过样本量 → 标注截断", "[数据截断]" in r, r[:80])
+    tmp.unlink()
 
-    huge = Path(tempfile.mkdtemp()) / "huge.csv"
+    huge = out_dir / "test_huge.csv"
     huge.write_bytes(b"0" * (settings.FILE_READ_MAX_SIZE_MB * 1024 * 1024 + 1024))
     r2 = statistical_analysis.func(str(huge), "descriptive", '{"value_column": "a"}')
     check("超过文件大小 → [ERR_FILE_TOO_LARGE]", "[ERR_FILE_TOO_LARGE]" in r2, r2[:60])
+    huge.unlink()
+
+    # v8.3.3: 项目目录外的绝对路径 → 拒绝
+    import tempfile
+    outside = Path(tempfile.mkdtemp()) / "out.csv"
+    outside.write_text("a,b\n1,2\n", encoding="utf-8")
+    r3 = statistical_analysis.func(str(outside), "descriptive", '{"value_column": "a"}')
+    check("项目外绝对路径 → [ERR_PERMISSION]", "[ERR_PERMISSION]" in r3, r3[:60])
 
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'tools', 'search.py'),
                encoding='utf-8').read()

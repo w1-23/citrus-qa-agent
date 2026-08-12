@@ -1,12 +1,13 @@
 """Progress bus — shared between graph nodes and SSE generator.
 
-v8.3.0: unified JSON-string data format, ToolCallAccumulator for fragmented
-tool_call args assembly, heartbeat/progress tracking for long tool executions,
-SSE raw-frame debug logging middleware.
+v8.3.3: request-scoped progress queue (contextvars, 消除跨请求串扰) +
+unified JSON-string data format + usage delta emitter + heartbeat/progress
+tracking for long tool executions + SSE raw-frame debug logging.
 """
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import time
@@ -14,15 +15,32 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# 全局兜底队列（非 SSE 上下文，如 CLI/测试）；SSE 请求使用 per-request 队列
 _progress_queue: asyncio.Queue | None = None
 _log_queue: asyncio.Queue | None = None
 
+# 请求级队列: 每个 SSE 请求 set_request_queue() 绑定自己的队列，emit 只进本请求
+_current_queue: contextvars.ContextVar = contextvars.ContextVar(
+    "progress_queue", default=None)
+
 
 def get_progress_queue() -> asyncio.Queue:
+    q = _current_queue.get()
+    if q is not None:
+        return q
     global _progress_queue
     if _progress_queue is None:
         _progress_queue = asyncio.Queue()
     return _progress_queue
+
+
+def set_request_queue(queue: asyncio.Queue) -> None:
+    """绑定当前请求的进度队列（SSE 事件生成器内调用）。"""
+    _current_queue.set(queue)
+
+
+def clear_request_queue() -> None:
+    _current_queue.set(None)
 
 
 def get_log_queue() -> asyncio.Queue:
@@ -34,12 +52,6 @@ def get_log_queue() -> asyncio.Queue:
 
 def reset_progress_queue() -> None:
     global _progress_queue, _log_queue
-    if _progress_queue is not None:
-        while not _progress_queue.empty():
-            try:
-                _progress_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
     _progress_queue = asyncio.Queue()
     if _log_queue is not None:
         while not _log_queue.empty():
@@ -56,7 +68,7 @@ def _encode_event(event_type: str, data: dict) -> dict:
 
 
 def emit_progress(event_type: str, data: dict) -> None:
-    """Push a progress event to the SSE queue (synchronous, non-blocking)."""
+    """Push a progress event to the current request's SSE queue (non-blocking)."""
     q = get_progress_queue()
     try:
         q.put_nowait(_encode_event(event_type, data))
@@ -70,93 +82,35 @@ def emit_encoded(event_type: str, data: dict) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Tool Call State Accumulator — assembles fragmented tool_call arguments
+# Token usage delta emitter — context_usage 增量推送
 # ═══════════════════════════════════════════════════════════════════════
 
-
-# NOTE: ToolCallAccumulator is reserved for future streaming tool_call support.
-# Currently unused (all LLM calls use ainvoke, not streaming).
-class ToolCallAccumulator:
-    """Assembles delta.tool_calls chunks into complete tool call events.
-
-    LLM providers stream tool_calls as incremental deltas:
-      - chunk 0: id="call_abc", name="get_weather"
-      - chunk 1: id="call_abc", arguments='{"cit'
-      - chunk 2: id="call_abc", arguments='y":"\\u'
-      - chunk 3: id="call_abc", arguments='5357\\u'
-
-    This accumulator buffers fragments per call_id and emits
-    tool_call_start + tool_executing + tool_result events when ready.
-    """
-
-    def __init__(self):
-        self._slots: dict[str, dict] = {}
-
-    def feed(self, call_id: str, name: str | None, args_delta: str | None) -> Optional[str]:
-        """Feed a delta chunk. Returns None normally, or the call_id
-        when arguments are complete and the slot is finalized."""
-        if call_id not in self._slots:
-            self._slots[call_id] = {"name": name or "", "args_buf": ""}
-        slot = self._slots[call_id]
-        if name:
-            slot["name"] = name
-        if args_delta:
-            slot["args_buf"] += args_delta
-        return None
-
-    def is_complete(self, call_id: str) -> bool:
-        """Check if the call has a name and its args_buf is valid JSON."""
-        slot = self._slots.get(call_id)
-        if not slot:
-            return False
-        if not slot.get("name"):
-            return False
-        if not slot.get("args_buf"):
-            return False
-        try:
-            json.loads(slot["args_buf"])
-            return True
-        except json.JSONDecodeError:
-            return False
-
-    def get_call(self, call_id: str) -> Optional[dict]:
-        """Return the assembled call as {name, args} or None if incomplete."""
-        slot = self._slots.get(call_id)
-        if not slot or not slot.get("name"):
-            return None
-        try:
-            args = json.loads(slot["args_buf"]) if slot["args_buf"] else {}
-        except json.JSONDecodeError:
-            return None
-        return {"name": slot["name"], "args": args}
-
-    def get_args_raw(self, call_id: str) -> str:
-        slot = self._slots.get(call_id)
-        return slot["args_buf"] if slot else ""
-
-    def remove(self, call_id: str) -> None:
-        self._slots.pop(call_id, None)
-
-    def clear(self) -> None:
-        self._slots.clear()
+# 每次 LLM 调用的 usage.total_tokens 是该次请求的累计值（含重放历史），
+# 前端若直接累加会多轮重复计数 → 按 session+source 发增量。
+_usage_last: dict = {}
 
 
-# Singleton instance shared across the request lifecycle
-_tool_call_acc: Optional[ToolCallAccumulator] = None
-
-
-def get_tool_call_accumulator() -> ToolCallAccumulator:
-    global _tool_call_acc
-    if _tool_call_acc is None:
-        _tool_call_acc = ToolCallAccumulator()
-    return _tool_call_acc
-
-
-def reset_tool_call_accumulator() -> None:
-    global _tool_call_acc
-    if _tool_call_acc is not None:
-        _tool_call_acc.clear()
-    _tool_call_acc = ToolCallAccumulator()
+def emit_usage_delta(session_id: str, source: str, input_tokens: int = 0,
+                     output_tokens: int = 0, total: int = 0) -> None:
+    """context_usage 增量推送 (v8.3.3): total 为单次调用累计，delta 为相对上次的增量。"""
+    if not total:
+        return
+    key = f"{session_id}:{source}"
+    last = _usage_last.get(key, 0)
+    if last == 0:
+        delta = total  # 首次调用: 增量 = 本次总量
+    else:
+        delta = max(total - last, 0)  # 后续: 相对上次的增量（重放历史不重复计）
+    if delta == 0:
+        return  # 同值重复（如调用未消耗新 token），不发零增量
+    _usage_last[key] = total
+    emit_encoded("context_usage", {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total": total,
+        "delta": delta,
+        "source": source,
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════

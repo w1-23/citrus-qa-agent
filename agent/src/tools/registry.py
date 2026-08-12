@@ -106,15 +106,28 @@ def cleanup_offload_files() -> int:
 
 
 async def _check_tool_sandbox(tool_name: str, args: dict) -> Optional[str]:
+    """沙箱检查（v8.3.3 内置实现，替代缺失的 engine.sandbox 模块）。
+
+    fail-closed 策略:
+      - SANDBOX_ENABLED=False → 放行
+      - 已注册且只读/分析类工具 → 放行（检索/读取类）
+      - 命中 SANDBOX_DANGEROUS_PATTERNS 且未在 HITL 放行名单 → 拒绝
+      - 检查异常 → 拒绝执行（fail-closed），不再静默放行
+    """
     try:
-        from src.engine.sandbox import check_sandbox
-        decision = await check_sandbox(tool_name, args)
-        if not decision.allowed:
-            return f"[ERR_HITL_REJECT] 沙箱拒绝: {decision.reason}"
-        if decision.requires_approval:
+        if not getattr(settings, "SANDBOX_ENABLED", True):
             return None
-    except ImportError:
-        pass  # sandbox module not available — allow all tools
+        import fnmatch
+        spec = get_tool_spec(tool_name)
+        if spec is not None and (spec.is_readonly or spec.category in ("analysis", "agent", "file")):
+            return None
+        dangerous = getattr(settings, "SANDBOX_DANGEROUS_PATTERNS", None) or []
+        if any(fnmatch.fnmatch(tool_name, p) for p in dangerous):
+            return (f"[ERR_HITL_REJECT] 沙箱拒绝: 工具 {tool_name} 属危险操作类，"
+                    f"未获执行批准")
+    except Exception as e:
+        logger.error(f"[Sandbox] 检查异常(fail-closed): {e}")
+        return f"[ERR_HITL_REJECT] 沙箱检查失败，已拒绝执行: {e}"
     return None
 
 

@@ -13,6 +13,18 @@ from src.config import PROJECT_ROOT, settings
 logger = logging.getLogger(__name__)
 
 
+class RequestIdFilter(logging.Filter):
+    """注入 request_id（contextvar 贯穿请求链路，无请求时为 '-'）。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            from src.core.tracing import get_request_id
+            record.request_id = get_request_id()
+        except Exception:
+            record.request_id = "-"
+        return True
+
+
 def setup_logging():
     """Configure root logger: INFO+ to file, WARNING+ to console."""
     log_level = getattr(logging, (settings.LOG_LEVEL or "INFO").upper(), logging.INFO)
@@ -29,7 +41,7 @@ def setup_logging():
     )
     file_handler.setLevel(log_level)
     file_handler.setFormatter(logging.Formatter(
-        "%(asctime)s | %(levelname)-5s | %(name)s | %(message)s",
+        "%(asctime)s | %(levelname)-5s | %(name)s | req=%(request_id)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     ))
 
@@ -37,6 +49,10 @@ def setup_logging():
     console = logging.StreamHandler()
     console.setLevel(logging.WARNING)
     console.setFormatter(logging.Formatter("%(levelname)s | %(message)s"))
+
+    rid_filter = RequestIdFilter()
+    file_handler.addFilter(rid_filter)
+    console.addFilter(rid_filter)
 
     root.handlers.clear()
     root.addHandler(file_handler)

@@ -39,8 +39,14 @@ def test_supervisor_direct_write():
 
 def test_retrieve_turns():
     print("[职责] retrieve-agent 3 轮")
-    runner = open(os.path.join(BASE, 'src', 'core', 'agent_runner.py'), encoding='utf-8').read()
-    check("_get_max_turns retrieve=3", '"retrieve-agent": 3' in runner)
+    # v8.3.3: 轮次已接线 config subagents.<name>.max_turns（原断言硬编码字面量）
+    from src.core.agent_runner import _get_max_turns
+    check("_get_max_turns retrieve=3", _get_max_turns("retrieve-agent") == 3,
+          str(_get_max_turns("retrieve-agent")))
+    import yaml
+    cfg = yaml.safe_load(open(os.path.join(BASE, 'config.yaml'), encoding='utf-8'))
+    check("config subagents.retrieve-agent.max_turns=3",
+          cfg.get('subagents', {}).get('retrieve-agent', {}).get('max_turns') == 3)
     prom = open(os.path.join(BASE, 'src', 'prompts', 'agents', 'retrieve-agent.md'), encoding='utf-8').read()
     check("prompt 含轮次语义", "最多 3 轮" in prom and "同一轮内" in prom)
 

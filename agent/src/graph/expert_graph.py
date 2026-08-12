@@ -3,11 +3,9 @@
 v8.3.0: structured SSE events (thinking, tool_call_start, tool_executing, tool_result, text).
 """
 import asyncio
-import json
 import logging
 import time
 import uuid
-from typing import AsyncIterator
 
 from langchain_core.messages import (
     SystemMessage,
@@ -27,10 +25,11 @@ logger = logging.getLogger(__name__)
 from src.core.progress_bus import (
     emit_encoded, emit_thinking, emit_text,
     emit_tool_call_start, emit_tool_executing, emit_tool_result,
-    emit_status, mark_tool_start, mark_tool_end,
+    emit_status, emit_usage_delta, mark_tool_start,
 )
 
-SUPERVISOR_MAX_TURNS = 4
+# v8.3.3: 轮次上限接线 config.yaml supervisor.max_turns（此前硬编码 4）
+SUPERVISOR_MAX_TURNS = settings.SUPERVISOR_MAX_TURNS
 
 _AGENT_TOOLS = [
     {
@@ -383,11 +382,13 @@ async def _execute_tool_call(tc: dict, tc_id: str = "", material_pack: list | No
                 result = await run_agent(
                     agent_name, task, context=context,
                     system_prompt_extra=skill_prompt, timeout_sec=120,
+                    session_id=session_id,
                 )
         else:
             result = await run_agent(
                 agent_name, task, context=context,
                 system_prompt_extra=skill_prompt, timeout_sec=120,
+                session_id=session_id,
             )
         dt_agent = (time.perf_counter() - t_agent) * 1000
     except Exception as e:
@@ -478,6 +479,7 @@ async def expert_load_node(state: AgentState) -> dict:
 async def supervisor_node(state: AgentState) -> dict:
     query = state.get("query", "")
     format_hint = state.get("format_hint")
+    session_id = state.get("session_id", "")
     logger.info(f"[ExpertGraph:supervisor] query={query[:60]}...")
 
     system_prompt = assemble_system_prompt(
@@ -541,16 +543,15 @@ async def supervisor_node(state: AgentState) -> dict:
                         raise
             dt_llm = (time.perf_counter() - t_llm) * 1000
             messages.append(response)
-            # v8.3.1: 推送真实 token 消耗（前端上下文面板实时刷新）
+            # v8.3.3: 推送真实 token 增量（前端面板实时刷新，避免累计值重复计数）
             try:
                 usage = (getattr(response, "usage_metadata", None)
                          or (getattr(response, "response_metadata", {}) or {}).get("usage", {}))
                 if isinstance(usage, dict) and usage.get("total_tokens"):
-                    emit_encoded("context_usage", {
-                        "input_tokens": usage.get("input_tokens", 0),
-                        "output_tokens": usage.get("output_tokens", 0),
-                        "total": usage.get("total_tokens", 0),
-                    })
+                    emit_usage_delta(session_id, "supervisor",
+                                     usage.get("input_tokens", 0),
+                                     usage.get("output_tokens", 0),
+                                     usage.get("total_tokens", 0))
             except Exception:
                 pass
 

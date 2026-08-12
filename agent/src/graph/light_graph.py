@@ -4,11 +4,8 @@ v8.3.0: 移除 hardcoded pre-retrieve/ReAct fallback.
 LLM bind_tools 自主决定是否调用搜索工具, max 3 轮.
 """
 import asyncio
-import json
 import logging
 import time
-import uuid
-from typing import AsyncIterator
 
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
@@ -23,10 +20,11 @@ logger = logging.getLogger(__name__)
 from src.core.progress_bus import (
     emit_encoded, emit_thinking, emit_text,
     emit_tool_call_start, emit_tool_executing, emit_tool_result,
-    emit_status,
+    emit_status, emit_usage_delta,
 )
 
-LIGHT_MAX_TURNS = 2
+# v8.3.3: 轮次上限接线 config.yaml light.max_turns（此前硬编码 2）
+LIGHT_MAX_TURNS = settings.LIGHT_MAX_TURNS
 LIGHT_TOOL_NAMES = ("citrus_rag_search", "read_local_file")
 
 
@@ -179,16 +177,15 @@ async def light_supervisor_node(state: AgentState) -> dict:
                         raise
             dt_llm = (time.perf_counter() - t_llm) * 1000
             messages.append(response)
-            # v8.3.1: 推送真实 token 消耗（前端上下文面板实时刷新）
+            # v8.3.3: 推送真实 token 增量（前端上下文面板实时刷新，避免累计值重复计数）
             try:
                 usage = (getattr(response, "usage_metadata", None)
                          or (getattr(response, "response_metadata", {}) or {}).get("usage", {}))
                 if isinstance(usage, dict) and usage.get("total_tokens"):
-                    emit_encoded("context_usage", {
-                        "input_tokens": usage.get("input_tokens", 0),
-                        "output_tokens": usage.get("output_tokens", 0),
-                        "total": usage.get("total_tokens", 0),
-                    })
+                    emit_usage_delta(state.get("session_id", ""), "light_supervisor",
+                                     usage.get("input_tokens", 0),
+                                     usage.get("output_tokens", 0),
+                                     usage.get("total_tokens", 0))
             except Exception:
                 pass
 

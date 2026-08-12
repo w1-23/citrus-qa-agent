@@ -80,11 +80,11 @@ async def lifespan(app: FastAPI):
     logger.info("[Lifespan] shutdown complete")
 
 
-app = FastAPI(title="Citrus QA Agent v8.3", version="8.3.0", lifespan=lifespan)
+app = FastAPI(title="Citrus QA Agent v8.3", version="8.3.3", lifespan=lifespan)
+# v8.3.3: 无 Cookie 鉴权场景下不允许 "*" + credentials 组合（浏览器规范拒绝），仅开 Origin
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -100,6 +100,9 @@ class ChatRequest(BaseModel):
 async def chat_v2(req: ChatRequest):
     query = req.query
     sid = await session_manager.get_or_create_session(req.session_id)
+    # v8.3.3: 请求级追踪 ID（日志串线）
+    from src.core.tracing import new_request_id
+    rid = new_request_id()
     # 模式完全由客户端 light_mode 决定（用户手动切换，无服务端自动升级）
     mode = "light" if req.light_mode else "expert"
 
@@ -131,7 +134,7 @@ async def chat_v2(req: ChatRequest):
 
         return EventSourceResponse(guard_events())
 
-    logger.info(f"[API v2] mode={mode} session={sid[:8]}... query={query[:60]}")
+    logger.info(f"[API v2] mode={mode} session={sid[:8]}... query={query[:60]} req={rid}")
 
     from src.graph.graph import build_graph
     from src.graph.state import AgentState
@@ -149,23 +152,22 @@ async def chat_v2(req: ChatRequest):
     async def event_generator():
         from src.core.progress_bus import (
             get_progress_queue, get_log_queue,
-            reset_progress_queue, SSELogHandler,
+            set_request_queue, clear_request_queue,
             _encode_event, log_sse_frame,
-            reset_tool_call_accumulator, get_tool_call_accumulator,
             get_running_tools, get_tool_elapsed, clear_tool_timers,
         )
 
-        reset_progress_queue()
-        reset_tool_call_accumulator()
+        # v8.3.3: 每个请求独立队列（contextvars 绑定），并发会话互不串扰
+        request_queue: asyncio.Queue = asyncio.Queue()
+        set_request_queue(request_queue)
         clear_tool_timers()
-        progress_queue = get_progress_queue()
         log_queue = get_log_queue()
         event_queue: asyncio.Queue = asyncio.Queue()
 
         async def bridge_progress():
             while True:
                 try:
-                    evt = await asyncio.wait_for(progress_queue.get(), timeout=0.3)
+                    evt = await asyncio.wait_for(request_queue.get(), timeout=0.3)
                     await event_queue.put(evt)
                 except asyncio.TimeoutError:
                     continue
@@ -212,7 +214,8 @@ async def chat_v2(req: ChatRequest):
 
         async def process_graph():
             try:
-                async for node_output in graph.astream(initial_state, stream_mode="updates"):
+                async for node_output in graph.astream(initial_state, stream_mode="updates",
+                                                       recursion_limit=settings.RECURSION_LIMIT):
                     for node_name, output in node_output.items():
                         if "_trace" in output:
                             trace = output["_trace"]
@@ -257,13 +260,16 @@ async def chat_v2(req: ChatRequest):
             except Exception as e:
                 logger.error(f"[SSE v2] graph processing error: {e}")
                 try:
-                    await event_queue.put(_encode_event("error", {"message": str(e)}))
+                    # v8.3.3: 错误脱敏——详细异常只进日志，SSE 只发用户可读信息
+                    await event_queue.put(_encode_event("error", {
+                        "message": "处理请求时发生内部错误，请稍后重试",
+                    }))
                 except Exception:
                     pass
             finally:
                 # Drain pending bridge/log events before sending sentinel
                 for _ in range(10):
-                    if progress_queue.empty() and log_queue.empty():
+                    if request_queue.empty() and log_queue.empty():
                         break
                     await asyncio.sleep(0.1)
                 heartbeat_task.cancel()
@@ -302,6 +308,7 @@ async def chat_v2(req: ChatRequest):
                 log_task.cancel()
             if not heartbeat_task.done():
                 heartbeat_task.cancel()
+            clear_request_queue()
 
     return EventSourceResponse(event_generator())
 
@@ -346,7 +353,7 @@ async def serve_frontend():
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "version": "8.1.1"}
+    return {"status": "ok", "version": "8.3.3"}
 
 
 @app.post("/api/v1/session/{session_id}/clear")

@@ -957,6 +957,16 @@ var _agentTokenName = '';
 if (typeof marked === 'undefined') window.marked = { parse: function(t) { return t; } };
 marked.setOptions({ breaks: true });
 
+/* ─── XSS 防护: 所有动态文本入 innerHTML 前转义 (v8.3.3) ─── */
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function renderMarkdownSafe(text) {
+  return marked.parse(escapeHtml(text == null ? '' : text));
+}
+
 /* ─── Theme ─── */
 (function() {
   var t = localStorage.getItem('citrus_theme') || 'dark';
@@ -1325,8 +1335,9 @@ async function sendMsg(isFollowUp) {
 
   function updateStatus(type, text) {
     var icon = _icons[type] || '•';
-    var subtitle = text.length > 30 ? ' <span class="tool-subtitle">' + text + '</span>' : '';
-    statusDiv.innerHTML = '<div class="exec-status" onclick="var t=document.getElementById(\'' + termId + '\'); if(t){t.style.display=t.style.display==\'none\'?\'block\':\'none\'}">' + icon + ' ' + text.split('.')[0] + '...' + subtitle + '</div>';
+    var safeText = escapeHtml(text);
+    var subtitle = text.length > 30 ? ' <span class="tool-subtitle">' + safeText + '</span>' : '';
+    statusDiv.innerHTML = '<div class="exec-status" onclick="var t=document.getElementById(\'' + termId + '\'); if(t){t.style.display=t.style.display==\'none\'?\'block\':\'none\'}">' + icon + ' ' + safeText.split('.')[0] + '...' + subtitle + '</div>';
   }
 
   function appendTerminal(msg) {
@@ -1361,7 +1372,7 @@ async function sendMsg(isFollowUp) {
             if (q) qs.push(q);
           }
         }
-        answerDiv.innerHTML = marked.parse(main);
+        answerDiv.innerHTML = renderMarkdownSafe(main);
         if (qs.length > 0) {
           var cc = document.createElement('div'); cc.className = 'follow-up-container';
           var cl = document.createElement('div'); cl.className = 'follow-up-label'; cl.textContent = '深入探索（点击追问）'; cc.appendChild(cl);
@@ -1409,7 +1420,7 @@ async function sendMsg(isFollowUp) {
         if (!isAnswerStarted) { isAnswerStarted=true; clearTimeout(spinnerTimeout); updateStatus('answer','生成回答中...'); answerDiv.style.display=''; }
         fullText+=data.content; updateContextTokens((data.content||'').length * 0.7); renderAnswer(); break;
       case 'context_status': renderContextPanel(data); break;
-      case 'context_usage': updateContextTokens(data.total || 0); break;
+      case 'context_usage': updateContextTokens((data.delta != null ? data.delta : data.total) || 0); break;
       case 'context_degraded': showBanner('⚠️ 历史会话加载失败，本次回答可能缺少上下文'); break;
       case 'plan_ready':
         updateStatus('answer', '📑 大纲已生成 (' + (data.sections||[]).length + ' 章)，开始逐章撰写...');
@@ -1428,14 +1439,14 @@ async function sendMsg(isFollowUp) {
         if (cited.length>0) {
           var c=document.createElement('div'); c.style.cssText='margin-top:10px;padding-top:10px;border-top:1px solid var(--border-hairline)';
           c.innerHTML='<div style="font-size:11px;color:var(--text-muted);margin-bottom:5px">引用 ('+cited.length+'篇)</div>';
-          for (var k=0;k<cited.length;k++) c.innerHTML+='<span style="display:inline-block;font-family:var(--font-mono);font-size:10px;background:var(--success-glow);color:var(--success);padding:1px 5px;border-radius:3px;margin:2px;font-weight:600">['+cited[k].ref_id+']</span>';
+          for (var k=0;k<cited.length;k++) c.innerHTML+='<span style="display:inline-block;font-family:var(--font-mono);font-size:10px;background:var(--success-glow);color:var(--success);padding:1px 5px;border-radius:3px;margin:2px;font-weight:600">['+escapeHtml(cited[k].ref_id)+']</span>';
           citationsDiv.appendChild(c);
         }
         break;
       case 'done':
         clearTimeout(spinnerTimeout); isCancelled=true; answerDiv.style.display=''; clearStatus();
         if (!fullText&&data.answer) fullText=data.answer;
-        if (fullText) answerDiv.innerHTML=marked.parse(fullText.replace(/__NEED_COMPLEX__/g,''));
+        if (fullText) answerDiv.innerHTML=renderMarkdownSafe(fullText.replace(/__NEED_COMPLEX__/g,''));
         if (fullText.indexOf('__NEED_COMPLEX__')>=0) {
           var uc=document.createElement('div');uc.style.cssText='margin-top:12px;text-align:center';
           var ub=document.createElement('button');ub.className='need-complex-btn';ub.textContent='信息不足，切换到专家模式深入检索';
@@ -1472,7 +1483,7 @@ async function sendMsg(isFollowUp) {
   } catch(err){if(err.name!=='AbortError'){clearTimeout(spinnerTimeout);isCancelled=true;clearStatus();answerDiv.style.display='';answerDiv.innerHTML='<span style="color:var(--error)">请求失败: '+err+'</span>';setSendDisabled(false);}}
   finally{if(currentAbortController)currentAbortController=null;}
 
-  function renderCitationItem(item){var du=item.doi&&item.doi!=='N/A'?'https://doi.org/'+item.doi:'#';var b=item.type==='main'?'citation-badge':item.type==='dynamic'?'citation-badge uncited':'citation-badge uncited';var sl=item.type==='dynamic'?'Agent 发现':item.type==='web'?'Web':(item.score?'CE='+item.score.toFixed(3):'');var h='<div class="citation-item" onclick="this.classList.toggle(\'expanded\')">';h+='<div class="citation-header"><span class="'+b+'">['+item.ref_id+']</span><span class="citation-score">'+sl+'</span></div>';if(item.type==='web'){if(item.url)h+='<a href="'+item.url+'" target="_blank" class="citation-doi" onclick="event.stopPropagation()">'+item.url+'</a>'}else if(item.doi&&item.doi!=='N/A'){h+='<a href="'+du+'" target="_blank" class="citation-doi" onclick="event.stopPropagation()">'+item.doi+'</a>'}if(item.section_name)h+='<div class="citation-text"><strong>Section:</strong> '+item.section_name+'</div>';if(item.text_preview)h+='<div class="citation-text">'+(item.text_preview||'').substring(0,250)+'</div>';h+='<div class="citation-detail">';if(item.title)h+='<div class="citation-text"><strong>Title:</strong> '+(item.title||'').substring(0,200)+'</div>';if(item.authors)h+='<div class="citation-text"><strong>Authors:</strong> '+item.authors+'</div>';if(item.year)h+='<div class="citation-text"><strong>Year:</strong> '+item.year+'</div>';h+='</div></div>';return h}
+  function renderCitationItem(item){var du=item.doi&&item.doi!=='N/A'?'https://doi.org/'+encodeURIComponent(item.doi):'#';var b=item.type==='main'?'citation-badge':item.type==='dynamic'?'citation-badge uncited':'citation-badge uncited';var sl=item.type==='dynamic'?'Agent 发现':item.type==='web'?'Web':(item.score?'CE='+item.score.toFixed(3):'');var h='<div class="citation-item" onclick="this.classList.toggle(\'expanded\')">';h+='<div class="citation-header"><span class="'+b+'">['+escapeHtml(item.ref_id)+']</span><span class="citation-score">'+escapeHtml(sl)+'</span></div>';if(item.type==='web'){if(item.url)h+='<a href="'+escapeHtml(item.url)+'" target="_blank" class="citation-doi" onclick="event.stopPropagation()">'+escapeHtml(item.url)+'</a>'}else if(item.doi&&item.doi!=='N/A'){h+='<a href="'+du+'" target="_blank" class="citation-doi" onclick="event.stopPropagation()">'+escapeHtml(item.doi)+'</a>'}if(item.section_name)h+='<div class="citation-text"><strong>Section:</strong> '+escapeHtml(item.section_name)+'</div>';if(item.text_preview)h+='<div class="citation-text">'+escapeHtml((item.text_preview||'').substring(0,250))+'</div>';h+='<div class="citation-detail">';if(item.title)h+='<div class="citation-text"><strong>Title:</strong> '+escapeHtml((item.title||'').substring(0,200))+'</div>';if(item.authors)h+='<div class="citation-text"><strong>Authors:</strong> '+escapeHtml(item.authors)+'</div>';if(item.year)h+='<div class="citation-text"><strong>Year:</strong> '+escapeHtml(item.year)+'</div>';h+='</div></div>';return h}
   function renderRoundSidebar(){if(roundHistory.length===0){sidebarContent.innerHTML='<div class="empty-sidebar">提交问题后文献将在此展示</div>';citationCount.textContent='0';return}var tC=0,tU=0;for(var i=0;i<roundHistory.length;i++){tC+=roundHistory[i].cited.length;tU+=roundHistory[i].uncited.length}citationCount.textContent=(tC+tU);var html='';for(var i=roundHistory.length-1;i>=0;i--){var round=roundHistory[i];var all=[];for(var k=0;k<round.cited.length;k++){if(round.cited[k].type!=='web')all.push(round.cited[k])}for(var k=0;k<round.uncited.length;k++){if(round.uncited[k].type!=='web')all.push(round.uncited[k])}if(all.length===0)continue;var qp=round.query.length>25?round.query.substring(0,25)+'...':round.query;var open=i===roundHistory.length-1;html+='<div class="round-group">';html+='<div class="round-header" onclick="toggleRound(\'round-'+round.roundId+'\')">';html+='<span class="toggle-icon" id="round-'+round.roundId+'-icon">▶</span>';html+='<span class="round-title">Round '+round.roundId+': '+qp+'</span>';html+='<span class="round-count">'+all.length+'</span></div>';html+='<div class="round-body" id="round-'+round.roundId+'"'+(open?'':' style="display:none"')+'>';for(var m=0;m<all.length;m++){html+=renderCitationItem(all[m])}html+='</div></div>'}sidebarContent.innerHTML=html||'<div class="empty-sidebar">本轮未检索到相关文献</div>'}
   }
 

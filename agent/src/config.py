@@ -128,16 +128,13 @@ class Settings(BaseSettings):
     CONTEXT_BUDGET_HARD_THRESHOLD: float = Field(default_factory=lambda: _yaml_val("context_budget", "hard_threshold", default=0.93))
 
     # 5. Tools Parameters
-    MAX_TOOL_CALLS: int = Field(default_factory=lambda: _yaml_val("tools", "max_tool_calls", default=4))
+    # v8.3.3: MAX_TOOL_CALLS 死配置已删除（无引用）
 
     # 6. Graph Parameters
     RECURSION_LIMIT: int = Field(default_factory=lambda: _yaml_val("graph", "recursion_limit", default=25))
 
     # 7. API Timeouts & Limits
     QDRANT_TIMEOUT: int = Field(default_factory=lambda: _yaml_val("api", "qdrant_timeout", default=60))
-    LLM_TIMEOUT: int = Field(default_factory=lambda: _yaml_val("api", "llm_timeout", default=15))
-    INTENT_TIMEOUT: int = Field(default_factory=lambda: _yaml_val("api", "intent_timeout", default=10))
-    INTENT_MAX_TOKENS: int = Field(default_factory=lambda: _yaml_val("api", "intent_max_tokens", default=10))
 
     # 8. System Paths & Logging
     DATA_DIR: Path = Field(default_factory=lambda: PROJECT_ROOT / "data")
@@ -148,12 +145,13 @@ class Settings(BaseSettings):
     # ── Agent / Sub-agent ──
     AGENTS_DIR: str = Field(default_factory=lambda: _yaml_val("agent", "agents_dir", default="agents"))
     WORKSPACE_DIR: str = Field(default_factory=lambda: _yaml_val("agent", "workspace_dir", default="workspace"))
-    AGENT_MAX_TURNS: int = Field(default_factory=lambda: _yaml_val("agent", "max_turns", default=3))
-    AGENT_TIMEOUT_SEC: int = Field(default_factory=lambda: _yaml_val("agent", "timeout_sec", default=30))
+    # v8.3.3: 轮次上限接线 config（此前 supervisor/light/子代理全部硬编码且与 config 脱节）
+    SUPERVISOR_MAX_TURNS: int = Field(default_factory=lambda: _yaml_val("supervisor", "max_turns", default=8))
+    LIGHT_MAX_TURNS: int = Field(default_factory=lambda: _yaml_val("light", "max_turns", default=2))
+    SUBAGENT_MAX_TURNS: dict = Field(default_factory=lambda: _yaml_val("subagents", default={}))
     TOOL_EXEC_TIMEOUT_SEC: int = Field(default_factory=lambda: _yaml_val("agent", "tool_exec_timeout_sec", default=60))
 
     # ── Write Pipeline (v8.3.2) ──
-    PIPELINE_DEFAULT_TARGET_CHARS: int = Field(default_factory=lambda: _yaml_val("pipeline", "default_target_chars", default=6000))
     PIPELINE_MATERIAL_MIN_COUNT: int = Field(default_factory=lambda: _yaml_val("pipeline", "material_min_count", default=8))
     PIPELINE_MAX_PLAN_RETRIES: int = Field(default_factory=lambda: _yaml_val("pipeline", "max_plan_retries", default=1))
     PIPELINE_REFS_COVERAGE_RATIO: float = Field(default_factory=lambda: _yaml_val("pipeline", "refs_coverage_ratio", default=0.4))
@@ -165,6 +163,8 @@ class Settings(BaseSettings):
     # ── File I/O ──
     FILE_READ_MAX_SIZE_MB: int = Field(default_factory=lambda: _yaml_val("file_io", "read_max_size_mb", default=50))
     FILE_WRITE_MAX_SIZE_MB: int = Field(default_factory=lambda: _yaml_val("file_io", "write_max_size_mb", default=10))
+    # v8.3.3: 绝对路径读取仅限项目根 + 此额外根目录列表（默认空 = 严格工作区模式）
+    FILE_READ_EXTRA_ROOTS: list = Field(default_factory=lambda: _yaml_val("file_io", "read_extra_roots", default=[]))
 
     # ── Statistics ──
     STATS_ALPHA: float = Field(default_factory=lambda: _yaml_val("statistics", "alpha", default=0.05))
@@ -217,6 +217,29 @@ class Settings(BaseSettings):
         return self.FAST_BASE_URL or self.MAIN_BASE_URL
 
 settings = Settings()
+
+# ── 启动配置校验（v8.3.3 fail-fast）──
+def validate_config() -> list:
+    """关键配置自检，返回问题列表（缺失 API key 等）。"""
+    issues = []
+    if not settings.RESOLVED_MAIN_API_KEY:
+        issues.append("缺少主模型 API Key（.env 的 DEEPSEEK_API_KEY 或 MAIN_API_KEY）")
+    if not settings.RESOLVED_FAST_API_KEY:
+        issues.append("缺少快速模型 API Key（将回退主 Key）")
+    if settings.CONTEXT_BUDGET_MAX_TOKENS <= 0:
+        issues.append("CONTEXT_BUDGET_MAX_TOKENS 必须为正数")
+    if settings.PIPELINE_SECTION_MAX_TOKENS <= 0:
+        issues.append("PIPELINE_SECTION_MAX_TOKENS 必须为正数")
+    if not isinstance(settings.SUBAGENT_MAX_TURNS, dict):
+        issues.append("subagents 配置必须是 dict（{name: {max_turns: n}}）")
+    return issues
+
+
+_config_issues = validate_config()
+if _config_issues:
+    _w = logging.getLogger("src.config")
+    for _issue in _config_issues:
+        _w.warning(f"[Config] 配置问题: {_issue}")
 
 # --- Model Switching Logic ---
 # v8.3.1: 全部切换 DeepSeek V4 Flash 正式版，V4 Pro 已移除
