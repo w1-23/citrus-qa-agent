@@ -212,6 +212,20 @@ def _tc_id(tc) -> str:
     return getattr(tc, "id", "") or str(uuid.uuid4())
 
 
+def _count_unique_dois(main_results: list) -> int:
+    """按 DOI 去重计数文献（状态栏/引用统计用）。"""
+    seen = set()
+    n = 0
+    for r in main_results:
+        doi = (r.get("doi") or "").strip().lower()
+        if doi:
+            if doi in seen:
+                continue
+            seen.add(doi)
+        n += 1
+    return n
+
+
 def _build_full_retrieval_context(main_results: list, web_results: list) -> str:
     parts = []
     for i, r in enumerate(main_results[:20]):
@@ -528,6 +542,10 @@ async def supervisor_node(state: AgentState) -> dict:
     all_web_results = []
     tool_call_count = 0
     t0 = time.perf_counter()
+    # v8.3.5: 状态栏与熔断状态（规范 1.2.2 Correct / 2.6 状态栏）
+    used_queries = []
+    consecutive_failures = 0
+    max_tools_per_turn = getattr(settings, "SUPERVISOR_MAX_TOOLS_PER_TURN", 2) or 2
 
     try:
         emit_status("step_done", step_id="load")
@@ -537,10 +555,23 @@ async def supervisor_node(state: AgentState) -> dict:
 
     try:
         for turn in range(SUPERVISOR_MAX_TURNS):
+            forced_final = False
             t_llm = time.perf_counter()
+            # v8.3.5 Agent 状态栏 (规范 2.6): 上下文末尾注入显式状态，
+            # 模型无需从长历史"数"工具调用/文献数——"数不清"是预算超支的深层根因
+            status_msg = HumanMessage(content=(
+                "<agent_status>\n"
+                f"当前轮次: {turn+1}/{SUPERVISOR_MAX_TURNS}\n"
+                f"已执行工具调用: {tool_call_count} 次 | 每轮预算: {max_tools_per_turn}\n"
+                f"已检索去重文献: {_count_unique_dois(all_main_results)} 篇\n"
+                f"已用检索关键词: {( '; '.join(used_queries[-5:]) or '(暂无)')}\n"
+                f"连续工具失败: {consecutive_failures} 次 (≥3 强制收尾)\n"
+                "</agent_status>\n"
+                "以上为系统注入的运行时状态摘要，请据此决策，不要重复已完成步骤。"))
+            call_messages = list(messages) + [status_msg]
             for attempt in range(3):
                 try:
-                    response = await llm_with_tools.ainvoke(messages)
+                    response = await llm_with_tools.ainvoke(call_messages)
                     break
                 except Exception as e:
                     if attempt < 2:
@@ -579,7 +610,6 @@ async def supervisor_node(state: AgentState) -> dict:
 
             # v8.3.4: 每轮工具预算强制（config supervisor.max_tools_per_turn）——
             # 防止一轮内串行执行 3-4 个 retrieve-agent（预算由代码裁决，不依赖 LLM 自觉）
-            max_tools_per_turn = getattr(settings, "SUPERVISOR_MAX_TOOLS_PER_TURN", 2) or 2
             pending_calls = list(response.tool_calls)
             skipped_calls = pending_calls[max_tools_per_turn:]
             pending_calls = pending_calls[:max_tools_per_turn]
@@ -609,7 +639,7 @@ async def supervisor_node(state: AgentState) -> dict:
                 except Exception:
                     pass
 
-            for tc in pending_calls:
+            for pidx, tc in enumerate(pending_calls):
                 tc_dict = _make_tool_call(tc)
                 tc_id = _tc_id(tc)
                 if tc_dict["name"] == "call_write_agent":
@@ -726,6 +756,42 @@ async def supervisor_node(state: AgentState) -> dict:
                     tool_call_id=_tc_id(tc),
                     name=tc_dict["name"],
                 ))
+
+                # v8.3.5 状态栏: 已用检索关键词（模型可见，防重复检索）
+                if tc_dict["name"] == "call_retrieve_agent":
+                    q = str((tc_dict.get("args") or {}).get("query", ""))
+                    if q:
+                        used_queries.append(q[:80])
+                # v8.3.5 轻量熔断 (规范 1.2.2 Correct): 连续工具失败 ≥3 → 强制收尾
+                rtext = sub_result.get("result", "") or ""
+                is_fail = (rtext.startswith("[Error")
+                           or "[ERR_TIMEOUT]" in rtext or "[ERR_NETWORK]" in rtext
+                           or "[ERR_HITL_REJECT]" in rtext or "[AgentError]" in rtext)
+                consecutive_failures = consecutive_failures + 1 if is_fail else 0
+                if consecutive_failures >= 3:
+                    logger.error(f"[ExpertGraph:supervisor] 连续 {consecutive_failures} 次工具失败，"
+                                 f"熔断强制收尾")
+                    forced_final = True
+                    # 为剩余未执行的 tool_calls 补占位响应（INV-01 协议配对，防 400）
+                    for rest in pending_calls[pidx + 1:]:
+                        messages.append(ToolMessage(
+                            content="[circuit_breaker] 熔断触发，该调用未执行。",
+                            tool_call_id=_tc_id(rest), name="circuit_breaker"))
+                    try:
+                        emit_status("circuit_breaker",
+                                    message=f"连续 {consecutive_failures} 次工具失败，"
+                                            f"已停止工具调用")
+                    except Exception:
+                        pass
+                    break
+
+            if forced_final:
+                messages.append(HumanMessage(content=(
+                    "检测到连续工具失败，立即停止调用工具，"
+                    "基于已有信息给出最终回答（信息不足请明确说明）。")))
+                final_resp = await llm_base.ainvoke(messages)
+                answer = final_resp.content or ""
+                break
 
             logger.info(
                 f"[ExpertGraph:supervisor] turn{turn}: "

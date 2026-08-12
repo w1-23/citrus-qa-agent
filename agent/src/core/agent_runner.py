@@ -35,7 +35,11 @@ from src.core.progress_bus import (
 
 
 def _truncate_context_blocks(context: str, max_chars: int = 24000) -> str:
-    """按完整条目截断检索证据，避免把单篇文献切尾 (AG-8)."""
+    """按完整条目截断检索证据，避免把单篇文献切尾 (AG-8)。
+
+    v8.3.5 截断透明 (规范 4.2.5 参数保真): 截断时显式标记缺失内容，
+    模型不得误以为看到了全部上下文。
+    """
     if len(context) <= max_chars:
         return context
     blocks = context.split("\n\n")
@@ -46,8 +50,10 @@ def _truncate_context_blocks(context: str, max_chars: int = 24000) -> str:
         out.append(b)
         total += len(b) + 2
     if not out:
-        return context[:max_chars]
-    return "\n\n".join(out)
+        return context[:max_chars] + \
+            f"\n\n[上下文已截断: 原始 {len(context)} 字符，仅显示前 {max_chars} 字符]"
+    return "\n\n".join(out) + \
+        f"\n\n[上下文已截断: 共 {len(blocks)} 条内容，仅显示前 {len(out)} 条，其余未提供]"
 
 
 def _count_unique_docs(main_results: list) -> int:
@@ -62,6 +68,13 @@ def _count_unique_docs(main_results: list) -> int:
             seen.add(doi)
         n += 1
     return n
+
+
+def _tc_id(tc) -> str:
+    """兼容 dict/对象两种 tool_calls 形态取 id（v8.3.5 id 单一来源）。"""
+    if isinstance(tc, dict):
+        return tc.get("id", "") or str(uuid.uuid4())
+    return getattr(tc, "id", "") or str(uuid.uuid4())
 
 
 async def run_agent(
@@ -221,9 +234,12 @@ async def run_agent(
                 pass
 
         # Emit structured tool events for each tool call
-        for tc in response.tool_calls:
+        # v8.3.5: id 单一来源——每个 tool_call 只提取一次 id，
+        # 协议 ToolMessage / 计时器 mark_tool_start-end / SSE 三处复用同一 id
+        tc_ids = [_tc_id(tc) for tc in response.tool_calls]
+        for idx, tc in enumerate(response.tool_calls):
             tc_dict = _make_tool_call_dict(tc)
-            tc_id = getattr(tc, "id", None) or str(uuid.uuid4())
+            tc_id = tc_ids[idx]
             tc_name = tc_dict.get("name", "?")
             try:
                 emit_tool_call_start(tc_name[:30], tc_dict.get("args", {}), tc_id)
@@ -237,9 +253,9 @@ async def run_agent(
             tool_results = await tn.execute_tools(list(response.tool_calls))
         except Exception as e:
             logger.error(f"[AgentRunner] {agent_name} tool exec failed: {e}")
-            for tc in response.tool_calls:
-                tc_id = getattr(tc, "id", None) or str(uuid.uuid4())
-                tc_name = getattr(tc, "name", "")
+            for idx, tc in enumerate(response.tool_calls):
+                tc_id = tc_ids[idx] if idx < len(tc_ids) else _tc_id(tc)
+                tc_name = getattr(tc, "name", "") or (tc.get("name", "") if isinstance(tc, dict) else "")
                 try:
                     emit_tool_result(tc_name, str(e)[:500], tc_id,
                                      is_error=True, summary="工具执行失败")
@@ -261,13 +277,11 @@ async def run_agent(
                 )
 
             tc = response.tool_calls[idx] if idx < len(response.tool_calls) else None
-            # tool_calls 元素为 dict（OpenAI 兼容格式），兼容对象形式取值
-            if isinstance(tc, dict):
-                tc_id = tc.get("id", None) or str(uuid.uuid4())
-                tc_name = tc.get("name", "")
-            else:
-                tc_id = getattr(tc, "id", None) or str(uuid.uuid4())
-                tc_name = getattr(tc, "name", "")
+            # v8.3.5: 复用 tc_ids 单一来源（此前两次独立提取 → dict 形态 UUID 不匹配，
+            # mark_tool_start/end 失配 → 心跳计时器泄漏 → tool_executing 事件风暴）
+            tc_id = tc_ids[idx] if idx < len(tc_ids) else _tc_id(tc)
+            tc_name = (tc.get("name", "") if isinstance(tc, dict)
+                       else getattr(tc, "name", "") if tc else "")
             # AG-8: 子 Agent 内工具结果分档截断（与 supervisor 的 TOOL_RESULT_CAPS 一致）
             caps = getattr(settings, "TOOL_RESULT_CAPS", {}) or {}
             cap = caps.get(agent_name, caps.get("default", 100000))

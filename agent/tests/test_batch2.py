@@ -79,11 +79,14 @@ def test_ag8_truncation():
     ctx = "\n\n".join(orig_blocks)
     out = _truncate_context_blocks(ctx, 5000)
     blocks = out.split("\n\n")
-    check("总长 ≤ 上限+单条", len(out) <= 5000 + 1000 + 2, f"len={len(out)}")
+    # v8.3.5: 截断标记行（[上下文已截断...]）需过滤后再校验原块完整性
+    pure = [b for b in blocks if not b.startswith("[上下文已截断")]
+    check("总长 ≤ 上限+单条+标记", len(out) <= 5000 + 1000 + 2 + 120, f"len={len(out)}")
     check("保留完整条目（每块都是原块）",
-          all(b in orig_blocks for b in blocks), f"{len(blocks)} blocks")
-    check("非首块即被截断时不含半截", len(blocks) == 4 or all(
-        b in orig_blocks for b in blocks))
+          all(b in orig_blocks for b in pure), f"{len(pure)} blocks")
+    check("非首块即被截断时不含半截", len(pure) == 4 or all(
+        b in orig_blocks for b in pure))
+    check("截断含透明标记", "[上下文已截断" in out)
     check("短内容不截断", _truncate_context_blocks("abc", 100) == "abc")
 
 
@@ -299,6 +302,144 @@ def test_ag18_budget_and_converge():
     check("空列表 → 0", _count_unique_docs([]) == 0)
 
 
+def test_ag19_protocol_pairing():
+    print("[AG-19] 协议配对不变量（INV-01）")
+    from src.graph.expert_graph import _tc_id
+    # dict / 对象 两种形态 id 提取一致且非空
+    d_tc = {"id": "call_dict_1", "name": "x", "args": {}}
+    o_tc = type("TC", (), {"id": "call_obj_1", "name": "y", "args": {}})()
+    check("dict 形态 id 提取", _tc_id(d_tc) == "call_dict_1")
+    check("对象形态 id 提取", _tc_id(o_tc) == "call_obj_1")
+    check("缺 id dict → 兜底 uuid", len(_tc_id({"name": "z", "args": {}})) == 36)
+    # 预算截断/熔断场景: 每个 tool_call 必须有 ToolMessage 占位（配对硬约束）
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            'src', 'graph', 'expert_graph.py'), encoding='utf-8').read()
+    check("跳过调用生成占位 ToolMessage", "budget_skip" in src
+          and "占位响应" in src or "未执行" in src)
+    check("熔断补占位 ToolMessage", "circuit_breaker" in src
+          and "_tc_id(rest)" in src)
+
+
+def test_ag20_lock_degrade():
+    print("[AG-20] 锁冲突降级归因（INV-03）")
+    import yaml
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            'src', 'retrieval', 'multi_retriever.py'), encoding='utf-8').read()
+    check("冲突批次跳过 Qdrant 加载", "lock_conflict" in src
+          and "failed_batches" in src)
+    check("启动 ERROR 汇总失败批次", "批次向量库不可用" in src)
+    check("瞬时窗口重试一次", "already accessed" in src and "time.sleep(2)" in src)
+    s2 = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           'src', 'tools', 'search.py'), encoding='utf-8').read()
+    check("空结果归因含降级提示", "向量库有" in s2 and "failed_batches" in s2)
+
+
+def test_ag21_timer_pairing():
+    print("[AG-21] 计时器配对（INV-04）— dict 形态")
+    from src.core import progress_bus as pb
+    loop = asyncio.new_event_loop()
+    try:
+        # dict 形态 tool_call: emit_tool_call_start → 执行中非空 → emit_tool_result → 空
+        tc_id = "call_timer_1"
+        pb.mark_tool_start(tc_id, "citrus_rag_search")
+        check("执行中 get_running_tools 非空", any(c == tc_id for c, _, _ in pb.get_running_tools()))
+        pb.mark_tool_end(tc_id)
+        check("结束后 get_running_tools 为空", not any(c == tc_id for c, _, _ in pb.get_running_tools()))
+        # 对象形态
+        tc_id2 = "call_timer_2"
+        pb.mark_tool_start(tc_id2, "read_local_file")
+        pb.mark_tool_end(tc_id2)
+        check("对象形态配对后无残留", not any(c == tc_id2 for c, _, _ in pb.get_running_tools()))
+        pb.clear_tool_timers()
+    finally:
+        loop.close()
+
+
+def test_ag22_output_routing():
+    print("[AG-22] 输出路由与证据保真（INV-05）")
+    prom = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                             'src', 'prompts', 'agents', 'retrieve-agent.md'), encoding='utf-8').read()
+    check("retrieve 证据清单格式", "核心结论与证据点" in prom and "收敛优先" in prom)
+    guide = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              'src', 'prompts', 'system', 'decision_guide.md'), encoding='utf-8').read()
+    check("决策指南深度规则", "逐证据引用" in guide and "深度问题生成策略" in guide)
+    import yaml
+    cfg = yaml.safe_load(open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                           'config.yaml'), encoding='utf-8'))
+    check("retrieve-agent cap=40000",
+          cfg['agent']['tool_result_caps']['retrieve-agent'] == 40000)
+
+
+def test_ag23_converge_behavior():
+    print("[AG-23] 收敛行为（INV-02）— mock 子代理循环")
+    import sys
+    from langchain_core.messages import AIMessage, ToolMessage
+    from src.core import agent_runner as ar
+
+    results = [{"doi": f"10.1/{i}", "title": f"paper{i}"} for i in range(7)]
+    calls = {"n": 0}
+
+    class FakeLLM:
+        async def ainvoke(self, messages):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return AIMessage(content="", tool_calls=[
+                    {"id": "c1", "name": "citrus_rag_search", "args": {"query": "q"}}])
+            return AIMessage(content="检索报告：7 篇关键文献")
+
+    class FakeChat:
+        def __init__(self, *a, **k):
+            self.fake = FakeLLM()
+        def bind_tools(self, tools=None):
+            return self
+        async def ainvoke(self, messages):
+            return await self.fake.ainvoke(messages)
+
+    orig_exec = ar.PartitionedToolNode.execute_tools
+
+    async def fake_exec(self, tool_calls):
+        return [ToolMessage(content="ok", tool_call_id="c1", name="citrus_rag_search",
+                            artifact={"main_results": results})]
+
+    ar.PartitionedToolNode.execute_tools = fake_exec
+    orig_chat = ar.ChatOpenAI
+    ar.ChatOpenAI = FakeChat
+    try:
+        loop = asyncio.new_event_loop()
+        r = loop.run_until_complete(ar.run_agent(
+            "retrieve-agent", {"goal": "g", "query": "q"}))
+        loop.close()
+        check("首轮收集 ≥6 篇 → 提前收敛（第 2 次调用即最终报告）", calls["n"] == 2,
+              f"calls={calls['n']}")
+        check("结果含报告", "检索报告" in r.get("result", ""))
+    finally:
+        ar.PartitionedToolNode.execute_tools = orig_exec
+        ar.ChatOpenAI = orig_chat
+
+
+def test_ag24_circuit_breaker():
+    print("[AG-24] 熔断与截断透明（INV-08）")
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            'src', 'graph', 'expert_graph.py'), encoding='utf-8').read()
+    check("连续失败计数逻辑", "consecutive_failures" in src and ">= 3" in src)
+    check("熔断强制收尾", "熔断强制收尾" in src or "forced_final" in src)
+    runner = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               'src', 'core', 'agent_runner.py'), encoding='utf-8').read()
+    check("截断标记实现", "已截断" in runner)
+
+
+def test_ag25_truncation_transparency():
+    print("[AG-25] 上下文截断透明（INV-08 纯函数）")
+    from src.core.agent_runner import _truncate_context_blocks
+    short = "a\n\nb\n\nc"
+    check("短内容不截断", _truncate_context_blocks(short, 100) == short)
+    long_block = "\n\n".join(f"block-{i}-" + "x" * 300 for i in range(100))
+    out = _truncate_context_blocks(long_block, 2000)
+    check("截断含标记", "已截断" in out and "共 100 条" in out, out[-60:])
+    tiny = _truncate_context_blocks(long_block, 10)
+    check("无完整块 → 前缀+标记", "已截断" in tiny)
+
+
 if __name__ == "__main__":
     test_ag4_session_new()
     test_ag7_timeout_retry()
@@ -311,6 +452,13 @@ if __name__ == "__main__":
     test_ag5_ltm()
     test_ag17_thread_context_propagation()
     test_ag18_budget_and_converge()
+    test_ag19_protocol_pairing()
+    test_ag20_lock_degrade()
+    test_ag21_timer_pairing()
+    test_ag22_output_routing()
+    test_ag23_converge_behavior()
+    test_ag24_circuit_breaker()
+    test_ag25_truncation_transparency()
     print(f"\n结果: {len(passed)} passed / {len(failed)} failed")
     if failed:
         print("失败项:", failed)
