@@ -205,6 +205,13 @@ def _make_tool_call(tc: dict) -> dict:
     return {"name": name, "args": args}
 
 
+def _tc_id(tc) -> str:
+    """兼容 dict/对象两种 tool_calls 形态取 id（v8.3.4）。"""
+    if isinstance(tc, dict):
+        return tc.get("id", "") or str(uuid.uuid4())
+    return getattr(tc, "id", "") or str(uuid.uuid4())
+
+
 def _build_full_retrieval_context(main_results: list, web_results: list) -> str:
     parts = []
     for i, r in enumerate(main_results[:20]):
@@ -577,7 +584,19 @@ async def supervisor_node(state: AgentState) -> dict:
             skipped_calls = pending_calls[max_tools_per_turn:]
             pending_calls = pending_calls[:max_tools_per_turn]
             if skipped_calls:
-                skipped_names = [getattr(tc, "name", "?") for tc in skipped_calls]
+                skipped_names = []
+                for sk in skipped_calls:
+                    sk_dict = _make_tool_call(sk)
+                    skipped_names.append(sk_dict["name"] or "?")
+                    # 关键: AIMessage 的 tool_calls 必须全部有 ToolMessage 响应，
+                    # 否则 OpenAI API 报 400 "must be followed by tool messages"。
+                    # 被预算跳过的调用生成占位响应（不执行），id 必须与原始调用一致。
+                    messages.append(ToolMessage(
+                        content=("[budget] 该工具调用因每轮工具预算限制未执行，"
+                                 "如有必要请在下一轮重新发起。"),
+                        tool_call_id=_tc_id(sk),
+                        name="budget_skip",
+                    ))
                 logger.warning(
                     f"[ExpertGraph:supervisor] turn{turn}: 工具预算 {max_tools_per_turn} "
                     f"触发，跳过 {len(skipped_calls)} 个调用: {skipped_names}"
@@ -592,7 +611,7 @@ async def supervisor_node(state: AgentState) -> dict:
 
             for tc in pending_calls:
                 tc_dict = _make_tool_call(tc)
-                tc_id = getattr(tc, "id", str(uuid.uuid4()))
+                tc_id = _tc_id(tc)
                 if tc_dict["name"] == "call_write_agent":
                     full_ctx = _build_full_retrieval_context(all_main_results, all_web_results)
                     if full_ctx:
@@ -704,21 +723,9 @@ async def supervisor_node(state: AgentState) -> dict:
                 tool_msg_content = f"[{agent_display} result]\n{truncated}"
                 messages.append(ToolMessage(
                     content=tool_msg_content,
-                    tool_call_id=tc.get("id", "unknown"),
+                    tool_call_id=_tc_id(tc),
                     name=tc_dict["name"],
                 ))
-
-            if skipped_calls:
-                try:
-                    messages.append(ToolMessage(
-                        content=f"[budget] 每轮工具预算 {max_tools_per_turn} 已满，"
-                                f"以下调用未执行: {', '.join(skipped_names)}。"
-                                f"如有必要请在下一轮重新发起（优先执行最高价值的调用）。",
-                        tool_call_id=f"budget-{uuid.uuid4().hex[:8]}",
-                        name="budget_skip",
-                    ))
-                except Exception:
-                    pass
 
             logger.info(
                 f"[ExpertGraph:supervisor] turn{turn}: "
