@@ -98,12 +98,12 @@ def classify_write_task(goal: str, context: str, file_exists: bool,
             except Exception as e:
                 logger.warning(f"[WritePipeline] classify LLM failed, default react: {e}")
 
-    # 目标字数提取（正则优先，LLM 兜底值其次，最后默认）
+    # 目标字数提取（正则优先，LLM 兜底值其次；0 = 由 Plan 依据材料丰富度自主决定）
     m = CHAR_TARGET_RE.search(goal)
     if m:
         out["target_chars"] = int(m.group(1))
-    elif not out["target_chars"] or out["target_chars"] < 300:
-        out["target_chars"] = settings.PIPELINE_DEFAULT_TARGET_CHARS
+    elif not out.get("target_chars"):
+        out["target_chars"] = 0
 
     logger.info(f"[WritePipeline] classify -> {out['mode']} (target_chars={out['target_chars']}, "
                 f"section={out['target_section'] or 'none'}, file_exists={file_exists})")
@@ -117,10 +117,17 @@ def classify_write_task(goal: str, context: str, file_exists: bool,
 def _build_plan_prompt(material_pack: list[dict], target_chars: int, retry_info: str = "") -> str:
     prompt_file = _read_prompt("write-plan.md")
     material_text = _format_material_pack(material_pack, max_entries=25)
+    if target_chars and target_chars > 0:
+        size_line = f"目标字数: {target_chars} 字"
+    else:
+        # v8.3.2: 自主模式——篇幅由材料丰富度决定
+        size_line = ("目标字数: 由你依据【检索材料】的丰富程度自主决定——"
+                     "材料充分则深入展开（多章节、每章充实）；材料有限则精简成文（不灌水、不编造），"
+                     "并如实说明哪些方面因材料不足而省略。")
     extra = ""
     if retry_info:
         extra = f"\n\n【上次大纲未通过校验，失败项: {retry_info}】请修正后重新输出完整 JSON。"
-    return (f"{prompt_file}\n\n---\n目标字数: {target_chars} 字\n"
+    return (f"{prompt_file}\n\n---\n{size_line}\n"
             f"检索材料:\n{material_text}{extra}")
 
 
@@ -138,18 +145,39 @@ def _format_material_pack(material_pack: list[dict], max_entries: int = 25) -> s
 
 
 def validate_plan(plan: dict, target_chars: int) -> tuple[bool, dict]:
-    """动态阈值校验（跟随用户目标字数）。返回 (ok, failed_checks)。"""
+    """动态阈值校验（v8.3.2 双模式 + 单章防截断上限）。
+
+    - 用户指定字数: 严格校验（下限按目标联动）
+    - 自主模式 (target_chars=0): 宽松下限（材料少可精简），只保证成文质量
+    - 单章上限: target_chars ≤ 单章安全容量，防止 API 截断
+    Returns: (ok, failed_checks)
+    """
     sections = plan.get("sections") or []
     if not isinstance(sections, list) or not sections:
         return False, {"section_count": "sections 为空"}
-    target = max(target_chars, 300)
-    checks = {
-        "section_count": len(sections) >= max(3, target // 1500),
-        "min_per_section": all(int(s.get("target_chars") or 0) >= 250 for s in sections),
-        "total_chars": sum(int(s.get("target_chars") or 0) for s in sections) >= target * 0.8,
-        "ref_coverage": (sum(1 for s in sections if s.get("refs"))
-                         / len(sections)) >= settings.PIPELINE_REFS_COVERAGE_RATIO,
-    }
+
+    # 单章安全容量: section_max_tokens / 1.2 * 0.9（留余量防截断）
+    max_per_section = int(settings.PIPELINE_SECTION_MAX_TOKENS / 1.2 * 0.9)
+    if target_chars and target_chars > 0:
+        target = max(target_chars, 300)
+        checks = {
+            "section_count": len(sections) >= max(3, target // 1500),
+            "min_per_section": all(int(s.get("target_chars") or 0) >= 250 for s in sections),
+            "max_per_section": all(int(s.get("target_chars") or 0) <= max_per_section for s in sections),
+            "total_chars": sum(int(s.get("target_chars") or 0) for s in sections) >= target * 0.8,
+            "ref_coverage": (sum(1 for s in sections if s.get("refs"))
+                             / len(sections)) >= settings.PIPELINE_REFS_COVERAGE_RATIO,
+        }
+    else:
+        # 自主模式: 材料有限时允许精简，但保证成文最低质量
+        checks = {
+            "section_count": len(sections) >= 2,
+            "min_per_section": all(int(s.get("target_chars") or 0) >= 200 for s in sections),
+            "max_per_section": all(int(s.get("target_chars") or 0) <= max_per_section for s in sections),
+            "total_chars": sum(int(s.get("target_chars") or 0) for s in sections) >= 1500,
+            "ref_coverage": (sum(1 for s in sections if s.get("refs"))
+                             / len(sections)) >= 0.3,
+        }
     failed = {k: v for k, v in checks.items() if not v}
     return (not failed), failed
 

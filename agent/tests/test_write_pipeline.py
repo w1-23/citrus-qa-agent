@@ -48,21 +48,32 @@ def test_classify():
     check("文件存在+章节→modify", wp.classify_write_task("把第三章重写", "", True)["mode"] == "modify")
     check("文献回顾→plan_execute", wp.classify_write_task("帮我写一篇柑橘的文献回顾", "", False)["mode"] == "plan_execute")
     check("3000字提取", wp.classify_write_task("写个3000字总结", "", False)["target_chars"] == 3000)
-    check("无字数→默认", wp.classify_write_task("写一篇综述", "", False)["target_chars"] == settings.PIPELINE_DEFAULT_TARGET_CHARS)
+    check("无字数→0(自主模式)", wp.classify_write_task("写一篇综述", "", False)["target_chars"] == 0)
+    check("材料丰富提示词含自主说明",
+          "材料充分则深入" in wp._build_plan_prompt([{"doi": "1", "title": "x"}], 0))
 
 
 def test_validate_plan():
-    print("[validate] 动态阈值")
+    print("[validate] 双模式 + 单章上限")
     good = {"sections": [{"heading": f"h{i}", "target_chars": 1500, "refs": ["DOI:1"]} for i in range(4)]}
     ok, fails = wp.validate_plan(good, 6000)
     check("6000字 4章×1500 → 通过", ok, str(fails))
     small = {"sections": [{"heading": f"h{i}", "target_chars": 900, "refs": ["DOI:1"]} for i in range(3)]}
     ok2, fails2 = wp.validate_plan(small, 3000)
     check("3000字 3章×900 → 通过", ok2, str(fails2))
+    # 自主模式: 材料有限精简
+    auto = {"sections": [{"heading": "h1", "target_chars": 800, "refs": ["DOI:1"]},
+                         {"heading": "h2", "target_chars": 800, "refs": []}]}
+    ok3, fails3 = wp.validate_plan(auto, 0)
+    check("自主模式 2章×800 → 通过", ok3, str(fails3))
+    # 单章超上限 → 拒绝（防截断）
+    oversized = {"sections": [{"heading": f"h{i}", "target_chars": 5000, "refs": ["DOI:1"]} for i in range(3)]}
+    ok4, fails4 = wp.validate_plan(oversized, 0)
+    check("单章 5000 字超容量 → 拒绝", not ok4 and "max_per_section" in fails4, str(fails4))
     bad = {"sections": [{"heading": "h1", "target_chars": 100, "refs": []}]}
-    ok3, fails3 = wp.validate_plan(bad, 6000)
-    check("单章100字+refs空 → 拒绝", not ok3 and "min_per_section" in fails3, str(fails3))
-    check("refs 覆盖不足 → 拒绝", "ref_coverage" in fails3)
+    ok5, fails5 = wp.validate_plan(bad, 6000)
+    check("单章100字+refs空 → 拒绝", not ok5 and "min_per_section" in fails5, str(fails5))
+    check("refs 覆盖不足 → 拒绝", "ref_coverage" in fails5)
 
 
 def test_plan_stage():
