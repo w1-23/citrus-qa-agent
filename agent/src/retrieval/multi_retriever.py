@@ -47,6 +47,7 @@ class MultiBatchRetriever:
             self._idx_map = {}
             self.last_empty_reason: str = ""   # v8.3.1: 空结果归因（threshold_blocked / no_match），供工具回传 LLM
             self.failed_batches: Dict[str, str] = {}  # v8.3.4: 向量加载失败批次（lock 冲突/异常），供降级提示
+            self.runtime_failed_batches: set = set()  # v8.3.5: 运行期查询失败的批次（动态降级提示）
 
             try:
                 self._load_data()
@@ -290,6 +291,8 @@ class MultiBatchRetriever:
                 out.append((self.global_chunks[g]["_global_idx"], p.score))
             return out
         except Exception as e:
+            # v8.3.5: 运行时失败累计 → 空结果归因联动（用户/LLM 可感知降级）
+            self.runtime_failed_batches.add(batch_name)
             logger.error(f"Qdrant search failed for {batch_name}: {e}")
             return []
 
