@@ -35,6 +35,11 @@ DB_PATH = STATE_DIR / "sessions.db"
 _session_locks: dict = {}
 _session_locks_guard = threading.Lock()
 
+# v8.4.2: 历史污染清理——旧版 supervisor 收尾 bug 会把伪造的"用户指令"写进历史
+# （"You have reached the maximum number of turns..."），读时幂等过滤（非破坏性，
+# 只滤 HumanMessage，保留其后的正式回答 AIMessage）。修复后新请求不再产生。
+_SYNTH_FORCE_FINAL_MARK = "You have reached the maximum number of turns"
+
 
 def _get_session_lock(session_id: str) -> threading.Lock:
     with _session_locks_guard:
@@ -244,6 +249,12 @@ class SessionManager:
 
                 try:
                     if msg_type == "human":
+                        # v8.4.2: 过滤旧版收尾 bug 写入的伪造"用户指令"（读时幂等清理）
+                        if content.startswith(_SYNTH_FORCE_FINAL_MARK):
+                            logger.info(
+                                f"[SessionManager] 过滤历史伪造收尾指令 "
+                                f"(session={session_id[:8]})")
+                            continue
                         messages.append(HumanMessage(content=content))
                     elif msg_type == "ai":
                         kw = {"content": content, "name": name or None}

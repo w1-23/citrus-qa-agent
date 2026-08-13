@@ -393,6 +393,39 @@ def _build_status_content(
     return "\n".join(lines)
 
 
+# ── v8.4.2 统一收尾（根治重构）──
+# 原则: answer 一旦赋值，任何路径不得再改写（结构保证，非条件约定）。
+# 所有"强制收尾"（熔断/预算/跑满轮次）统一走 _force_final_answer：
+#   - 临时列表传参 messages + [HumanMessage] → 合成消息永不进 turn_trace/历史
+#   - 未绑工具客户端 llm_base → 模型不可能再发 tool_calls 导致空答
+#   - 详尽 prompt，无任何预算/限制措辞（影响质量与长度的预算一律不生效）
+#   - 空答兜底: 取 messages 最后一段 AIMessage.content，绝不返回空串
+_FINAL_PROMPT = (
+    "请立即给出最终回答：基于已检索的全部证据，完整、详尽、结构化地作答；"
+    "不要精简、不要省略、不要提及工具或轮次限制；信息不足请逐条说明缺口。"
+)
+
+
+def _last_aimessage_content(messages: list) -> str:
+    for m in reversed(messages):
+        if isinstance(m, AIMessage) and getattr(m, "content", None):
+            return m.content
+    return ""
+
+
+async def _force_final_answer(llm, messages: list, reason: str) -> str:
+    """统一收尾入口（熔断/预算/跑满轮次三处调用）。调用方 break 后不得再改写 answer。"""
+    logger.info(f"[ExpertGraph:supervisor] {reason}, forcing final")
+    try:
+        resp = await llm.ainvoke(messages + [HumanMessage(content=_FINAL_PROMPT)])
+    except Exception as e:
+        logger.warning(f"[ExpertGraph:supervisor] {reason} 收尾调用失败: {e}")
+        return _last_aimessage_content(messages)
+    if getattr(resp, "content", None):
+        return resp.content
+    return _last_aimessage_content(messages)
+
+
 async def supervisor_node(state: AgentState) -> dict:
     query = state.get("query", "")
     format_hint = state.get("format_hint")
@@ -499,7 +532,8 @@ async def supervisor_node(state: AgentState) -> dict:
                         logger.warning(
                             f"[ExpertGraph:supervisor] 上下文占用 {ratio:.1%} ≥ "
                             f"硬阈值 {supervisor_budget.config.hard_threshold:.0%}，强制收尾")
-                        forced_final = True
+                        # v8.4.2 根治: 预算触发就地收尾（统一函数，不再依赖循环后块）
+                        answer = await _force_final_answer(llm_base, messages, "budget")
                         break
                     # v8.4: 预算占用率进状态栏（模型随时可见，无需自己估算）
                     status_msg = HumanMessage(content=(
@@ -773,13 +807,8 @@ async def supervisor_node(state: AgentState) -> dict:
                     break
 
             if forced_final:
-                messages.append(HumanMessage(content=(
-                    "检测到连续工具失败，立即停止调用工具，"
-                    "基于已有信息给出最终回答（信息不足请明确说明）。")))
-                # v8.4: 收尾保持带工具客户端（请求载荷结构一致，前缀缓存友好；
-                # 停止行为由 HumanMessage 指令约束，不靠切换无工具客户端）
-                final_resp = await llm_with_tools.ainvoke(messages)
-                answer = final_resp.content or ""
+                # v8.4.2 根治: 统一收尾（临时列表不入史 + 未绑工具 + 详尽 prompt）
+                answer = await _force_final_answer(llm_base, messages, "breaker")
                 break
 
             logger.info(
@@ -788,24 +817,16 @@ async def supervisor_node(state: AgentState) -> dict:
                 f"(total {time.perf_counter()-t0:.1f}s)"
             )
 
-        if forced_final and not answer:
-            # v8.3.6: 预算熔断（上下文超硬阈值）→ 强制收尾
-            logger.warning("[ExpertGraph:supervisor] 预算熔断，强制输出最终回答")
-            messages.append(HumanMessage(content=(
-                "上下文接近上限，立即停止调用工具，"
-                "基于已有信息给出最终回答（信息不足请明确说明）。")))
-            final_resp = await llm_with_tools.ainvoke(messages)
-            answer = final_resp.content or ""
+        # v8.4.2 根治: 循环后仅剩一种未产出答案的情况——跑满 max_turns。
+        # 自然完成/熔断/预算三条 break 均自带 answer，此处绝不覆盖任何已有回答
+        # （等价 for-else 语义，与 light_graph/agent_runner 范式对齐）。
+        if not answer:
+            answer = await _force_final_answer(llm_base, messages, "max_turns")
         else:
-            logger.info("[ExpertGraph:supervisor] max turns, forcing final")
-            messages.append(HumanMessage(content=(
-                "You have reached the maximum number of turns. "
-                "Do NOT call any more tools. "
-                "Provide your final answer now. "
-                "If information is insufficient, explain what is missing."
-            )))
-            final_resp = await llm_with_tools.ainvoke(messages)
-            answer = final_resp.content or ""
+            logger.info(
+                f"[ExpertGraph:supervisor] natural completion, keep model answer "
+                f"({len(answer)} chars), no override"
+            )
 
     except Exception as e:
         logger.error(f"[ExpertGraph:supervisor] error: {e}")

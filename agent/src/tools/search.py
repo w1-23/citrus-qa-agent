@@ -330,13 +330,25 @@ _HYDE_PROMPT = (
     "Given a user question, generate a short hypothetical answer paragraph "
     "that might appear in a citrus research paper.\n\n"
     "Rules:\n"
-    "1. Write in English.\n"
+    "1. Output in English ONLY, regardless of the question's language. "
+    "If the question is in Chinese, first translate the concepts into standard "
+    "English scientific terms, then write the paragraph in English.\n"
     "2. Keep it under 250 words.\n"
     "3. Do not invent specific numbers, p-values, gene IDs, accession numbers, or citations.\n"
     "4. If uncertain, use generic academic phrasing.\n"
     "5. Include likely biological mechanisms, gene families, pathways, and domain terms.\n"
     "6. Output only the paragraph, no preamble.\n"
 )
+
+
+def _is_english_answer(text: str) -> bool:
+    """v8.4.2: HyDE 输出必须为英文（英文向量匹配远优于中文）——
+    纯靠提示词不可靠，用确定性校验兜底：CJK 占比 >5% 判失败 → 基础检索降级。"""
+    if not text:
+        return False
+    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    return cjk / max(len(text), 1) <= 0.05
+
 
 def _generate_hyde_answer(query: str) -> str | None:
     """Generate a HyDE (Hypothetical Document Embedding) answer via fast LLM."""
@@ -357,6 +369,11 @@ def _generate_hyde_answer(query: str) -> str | None:
             max_tokens=settings.HYDE_MAX_TOKENS,
         )
         answer = resp.choices[0].message.content.strip()
+        # v8.4.2: 强制英文校验（中文 query 时常跟随生成中文，破坏英文向量匹配）
+        if not _is_english_answer(answer):
+            logger.warning(
+                f"[HyDE] 输出非英文（CJK 占比过高），回退基础检索: {answer[:60]!r}")
+            return None
         return answer if len(answer) >= 30 else None
     except Exception as e:
         logger.warning(f"[HyDE] generation failed (fallback to basic retrieval): {e}")
