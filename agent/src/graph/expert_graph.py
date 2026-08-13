@@ -490,7 +490,17 @@ async def expert_load_node(state: AgentState) -> dict:
         if history_msgs:
             result["messages"] = history_msgs
 
+        # v8.3.8: 历史检索证据块（跨轮复用）——supervisor 装配时注入
+        try:
+            block = session_manager.build_evidence_block(session_id, limit=2)
+            if block:
+                result["history_evidence_block"] = block
+        except Exception as e:
+            logger.warning(f"[ExpertGraph:load] evidence block failed: {e}")
+
         load_summary = f"history={len(history_msgs)}msgs"
+        if result.get("history_evidence_block"):
+            load_summary += ", evidence_block=yes"
         if ctx.format_hint:
             load_summary += f", fmt={ctx.format_hint}"
         result["_trace"] = {"node": "expert_load", "elapsed_ms": 0, "summary": load_summary}
@@ -550,7 +560,12 @@ async def supervisor_node(state: AgentState) -> dict:
     history_msgs = list(state.get("messages", []))
     if history_msgs:
         messages.extend(history_msgs)
+    # v8.3.8: 历史检索证据块（跨轮复用）——注入在系统与历史之后、本轮问题之前
+    if state.get("history_evidence_block"):
+        messages.append(HumanMessage(content=state["history_evidence_block"]))
     messages.append(current_human)
+    # v8.3.8: 本轮轨迹起点（save 节点完整持久化含工具配对）
+    trace_start_index = len(messages) - 1
 
     llm_base = ChatOpenAI(
         model=get_deepseek_model(),
@@ -981,6 +996,8 @@ async def supervisor_node(state: AgentState) -> dict:
         "references_data": references_data,
         "tools_called": tool_names_called,
         "citation_info": citation_info,
+        # v8.3.8: 本轮完整轨迹（save 节点持久化，含 tool_calls/ToolMessage 配对）
+        "turn_trace": messages[trace_start_index:],
         "_trace": {
             "node": "supervisor",
             "elapsed_ms": elapsed,
@@ -997,16 +1014,44 @@ async def expert_save_node(state: AgentState) -> dict:
         return {"_trace": {"node": "save", "elapsed_ms": 0, "summary": "no answer"}}
 
     try:
-        from langchain_core.messages import HumanMessage, AIMessage
-        from src.session.manager import session_manager
+        from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+        from src.session.manager import session_manager, _validate_trace
         from src.core.background import spawn
-        msgs_to_save = [
-            HumanMessage(content=query),
-            AIMessage(content=answer),
-        ]
-        # v8.3.7: 幂等键 + 持有引用（防重发重复写历史/静默丢失）
+        # v8.3.8: 完整轨迹持久化（含 tool_calls/ToolMessage 配对），不再只存 Q/A
+        trace = list(state.get("turn_trace") or [])
+        # 过滤 system 与注入的证据块（它们不属于会话轨迹）
+        trace = [m for m in trace
+                 if not isinstance(m, type(None)) and getattr(m, "type", "") != "system"]
+        # 历史证据块是注入消息，不重复入历史（由 session_evidence 表承载）
+        trace = [m for m in trace
+                 if not str(getattr(m, "content", "")).startswith("[历史检索证据")]
+        trace = _validate_trace(trace)
+        # 最终回答保证在轨迹末尾
+        if not (trace and isinstance(trace[-1], AIMessage)
+                and not getattr(trace[-1], "tool_calls", None)
+                and trace[-1].content == answer):
+            trace.append(AIMessage(content=answer))
         spawn(session_manager.save_messages(
-            session_id, msgs_to_save, state.get("idempotency_key", "")))
+            session_id, trace, state.get("idempotency_key", "")))
+        # v8.3.8: 证据账本（检索报告 + 结构化清单，跨轮复用）
+        report_text = ""
+        for m in trace:
+            if isinstance(m, ToolMessage) and getattr(m, "name", "") == "call_retrieve_agent":
+                report_text = str(m.content)
+                break
+        main_results = state.get("main_results") or []
+        if report_text or main_results:
+            evidence = [
+                {
+                    "doi": r.get("doi", ""),
+                    "title": str(r.get("title", ""))[:150],
+                    "score": r.get("score", r.get("rerank_score", 0)) or 0,
+                    "snippet": str(r.get("text", "") or r.get("abstract", ""))[:500],
+                }
+                for r in main_results[:30]
+            ]
+            spawn(session_manager.save_evidence(
+                session_id, query, evidence, report_text))
     except Exception as e:
         logger.warning(f"[ExpertGraph:save] failed: {e}")
 

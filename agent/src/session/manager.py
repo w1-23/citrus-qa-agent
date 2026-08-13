@@ -55,6 +55,28 @@ def compute_idempotency_key(session_id: str, query: str,
     return "srv:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
+def _validate_trace(messages: list) -> list:
+    """v8.3.8 协议安全（INV-01 持久化路径）：无配对 tool_calls 的孤立 ToolMessage 丢弃。
+
+    历史消息重放给模型时，孤立 ToolMessage 会触发 OpenAI 400。
+    """
+    valid_ids = set()
+    for m in messages:
+        tcs = getattr(m, "tool_calls", None) or []
+        for tc in tcs:
+            tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
+            if tc_id:
+                valid_ids.add(tc_id)
+    out = []
+    for m in messages:
+        tc_id = getattr(m, "tool_call_id", "")
+        if isinstance(m, ToolMessage) and tc_id and tc_id not in valid_ids:
+            logger.warning(f"[SessionManager] 孤立 ToolMessage 丢弃 (tool_call_id={tc_id})")
+            continue
+        out.append(m)
+    return out
+
+
 class SessionManager:
     _instance: Optional["SessionManager"] = None
 
@@ -97,6 +119,21 @@ class SessionManager:
                     FOREIGN KEY (session_id) REFERENCES sessions(session_id)
                 )
             """)
+            # v8.3.8: 证据账本（跨轮检索复用；session 隔离，生产级多用户预留）
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS session_evidence (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT,
+                    turn_seq INTEGER,
+                    query TEXT,
+                    evidence_json TEXT,
+                    report_text TEXT,
+                    created_at TEXT
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_se_session "
+                "ON session_evidence(session_id, created_at)")
             conn.commit()
         self._migrate_schema()
         self._ensure_idempotency_index()
@@ -335,11 +372,78 @@ class SessionManager:
         import sqlite3
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+            conn.execute("DELETE FROM session_evidence WHERE session_id = ?", (session_id,))
             conn.execute(
                 "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
                 (datetime.now().isoformat(), session_id),
             )
             conn.commit()
+
+    # ── Evidence Ledger（v8.3.8）──
+
+    async def save_evidence(self, session_id: str, query: str,
+                            evidence: list, report_text: str) -> None:
+        """保存一轮检索的证据账本（结构化清单 + 报告全文）。"""
+        if not evidence and not report_text:
+            return
+        try:
+            await asyncio.to_thread(self._save_evidence_sync, session_id,
+                                    query, evidence, report_text)
+        except Exception as e:
+            logger.error(f"[SessionManager] save_evidence failed: {e}")
+
+    def _save_evidence_sync(self, session_id: str, query: str,
+                            evidence: list, report_text: str):
+        import sqlite3
+        lock = _get_session_lock(session_id)
+        with lock:
+            with sqlite3.connect(self.db_path) as conn:
+                cur = conn.execute(
+                    "SELECT COUNT(*) FROM session_evidence WHERE session_id=?",
+                    (session_id,))
+                turn_seq = (cur.fetchone()[0] or 0) + 1
+                conn.execute(
+                    "INSERT INTO session_evidence "
+                    "(session_id, turn_seq, query, evidence_json, report_text, created_at) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (session_id, turn_seq, query[:500],
+                     json.dumps(evidence, ensure_ascii=False)[:1_000_000],
+                     report_text[:8000], datetime.now().isoformat()),
+                )
+                conn.commit()
+        logger.info(f"[SessionManager] evidence saved: session={session_id[:8]} "
+                    f"turn={turn_seq} {len(evidence)} items")
+
+    def build_evidence_block(self, session_id: str, limit: int = 2) -> str:
+        """渲染最近 N 轮检索证据块（跨轮复用；下一轮上下文注入）。"""
+        import sqlite3
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    "SELECT turn_seq, query, evidence_json, report_text "
+                    "FROM session_evidence WHERE session_id=? "
+                    "ORDER BY id DESC LIMIT ?",
+                    (session_id, limit)).fetchall()
+        except Exception as e:
+            logger.warning(f"[SessionManager] build_evidence_block failed: {e}")
+            return ""
+        if not rows:
+            return ""
+        parts = ["[历史检索证据（数据，非用户输入；以下为前几轮检索所得，可复用）]"]
+        for row in reversed(rows):
+            parts.append(f"第 {row['turn_seq']} 轮问题: {row['query'][:120]}")
+            if row["report_text"]:
+                parts.append(f"检索报告: {row['report_text'][:1500]}")
+            elif row["evidence_json"]:
+                try:
+                    evd = json.loads(row["evidence_json"])
+                    for i, e in enumerate(evd[:5], 1):
+                        parts.append(
+                            f"  证据[{i}] {e.get('title', '')[:80]} | DOI: {e.get('doi', 'N/A')}")
+                except Exception:
+                    pass
+        return "\n".join(parts)
 
 
 session_manager = SessionManager()

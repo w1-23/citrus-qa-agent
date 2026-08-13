@@ -84,6 +84,14 @@ async def load_context_node(state: AgentState) -> dict:
         history_msgs = list(ctx.history_messages) if ctx.history_messages else []
         result["messages"] = history_msgs
 
+        # v8.3.8: 历史检索证据块（跨轮复用）
+        try:
+            block = session_manager.build_evidence_block(session_id, limit=2)
+            if block:
+                result["history_evidence_block"] = block
+        except Exception as e:
+            logger.warning(f"[LightGraph:load] evidence block failed: {e}")
+
         load_summary = f"history={len(history_msgs)}msgs"
         if ctx.format_hint:
             load_summary += f", fmt={ctx.format_hint}"
@@ -147,7 +155,12 @@ async def light_supervisor_node(state: AgentState) -> dict:
     history_msgs = list(state.get("messages", []))
     if history_msgs:
         messages.extend(history_msgs)
+    # v8.3.8: 历史检索证据块
+    if state.get("history_evidence_block"):
+        messages.append(HumanMessage(content=state["history_evidence_block"]))
     messages.append(human_msg)
+    # v8.3.8: 本轮轨迹起点
+    trace_start_index = len(messages) - 1
 
     from src.tools import _TOOL_REGISTRY_BY_NAME
     tools = [t for t_name in LIGHT_TOOL_NAMES
@@ -316,6 +329,8 @@ async def light_supervisor_node(state: AgentState) -> dict:
         "main_results": deduped_main[:20],
         "web_results": all_web_results[:5],
         "references_data": references_data,
+        # v8.3.8: 本轮完整轨迹（save 节点持久化）
+        "turn_trace": messages[trace_start_index:],
         "_trace": {"node": "light_supervisor", "elapsed_ms": elapsed,
                    "summary": f"{len(answer)} chars, {tool_call_count} tools"},
     }
@@ -329,16 +344,38 @@ async def save_context_node(state: AgentState) -> dict:
         return {"_trace": {"node": "save", "elapsed_ms": 0, "summary": "no answer"}}
 
     try:
-        from langchain_core.messages import HumanMessage, AIMessage
-        from src.session.manager import session_manager
+        from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+        from src.session.manager import session_manager, _validate_trace
         from src.core.background import spawn
-        msgs_to_save = [
-            HumanMessage(content=query),
-            AIMessage(content=answer),
-        ]
-        # v8.3.7: 幂等键 + 持有引用
+        # v8.3.8: 完整轨迹持久化（含 tool_calls/ToolMessage 配对）
+        trace = list(state.get("turn_trace") or [])
+        trace = [m for m in trace if getattr(m, "type", "") != "system"]
+        trace = [m for m in trace
+                 if not str(getattr(m, "content", "")).startswith("[历史检索证据]")]
+        trace = _validate_trace(trace)
+        if not (trace and isinstance(trace[-1], AIMessage)
+                and not getattr(trace[-1], "tool_calls", None)
+                and trace[-1].content == answer):
+            trace.append(AIMessage(content=answer))
         spawn(session_manager.save_messages(
-            session_id, msgs_to_save, state.get("idempotency_key", "")))
+            session_id, trace, state.get("idempotency_key", "")))
+        # v8.3.8: 证据账本
+        report_text = ""
+        for m in trace:
+            if isinstance(m, ToolMessage) and getattr(m, "name", "") == "call_retrieve_agent":
+                report_text = str(m.content)
+                break
+        main_results = state.get("main_results") or []
+        if report_text or main_results:
+            evidence = [
+                {"doi": r.get("doi", ""),
+                 "title": str(r.get("title", ""))[:150],
+                 "score": r.get("score", r.get("rerank_score", 0)) or 0,
+                 "snippet": str(r.get("text", "") or r.get("abstract", ""))[:500]}
+                for r in main_results[:30]
+            ]
+            spawn(session_manager.save_evidence(
+                session_id, query, evidence, report_text))
     except Exception as e:
         logger.warning(f"[LightGraph:save] failed: {e}")
 
