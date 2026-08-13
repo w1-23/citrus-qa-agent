@@ -131,7 +131,10 @@ def _build_plan_prompt(material_pack: list[dict], target_chars: int, retry_info:
             f"检索材料:\n{material_text}{extra}")
 
 
-MATERIAL_EVIDENCE_MAX_CHARS = 1500  # v8.3.7 G1: 证据保真——chunk 正文中位数 1054 字符，此前 300 截断丢失机制细节
+# v8.3.8: 证据保真——chunk 最大 1992 字符，3000 为安全阀（当前语料零截断）；
+# 总量由条数与累计预算控制，不砍单条正文
+MATERIAL_EVIDENCE_MAX_CHARS = 3000
+MATERIAL_TOTAL_MAX_CHARS = 60000
 
 
 def _material_evidence(r: dict) -> str:
@@ -143,16 +146,27 @@ def _material_evidence(r: dict) -> str:
 
 
 def _format_material_pack(material_pack: list[dict], max_entries: int = 25) -> str:
-    """材料包 → 文本（供 Plan 阶段 LLM 阅读）。"""
+    """材料包 → 文本（供 Plan 阶段 LLM 阅读）。总量受累计预算控制，不截断单条正文。"""
     if not material_pack:
         return "(无检索材料)"
     lines = []
+    total = 0
+    truncated_by_budget = False
     for i, r in enumerate(material_pack[:max_entries], 1):
         doi = r.get("doi", "")
         title = r.get("title", r.get("name", "Untitled"))[:120]
         evidence = _material_evidence(r)
-        lines.append(f"[{i}] {title} | DOI: {doi or 'N/A'}\n    {evidence}")
-    return "\n".join(lines)
+        line = f"[{i}] {title} | DOI: {doi or 'N/A'}\n    {evidence}"
+        total += len(line)
+        if total > MATERIAL_TOTAL_MAX_CHARS:
+            truncated_by_budget = True
+            break
+        lines.append(line)
+    out = "\n".join(lines)
+    if truncated_by_budget:
+        out += (f"\n\n[材料总量达 {MATERIAL_TOTAL_MAX_CHARS} 字符预算，"
+                f"已截断条数（共 {len(material_pack)} 篇，仅列前 {len(lines)} 篇）]")
+    return out
 
 
 def validate_plan(plan: dict, target_chars: int) -> tuple[bool, dict]:

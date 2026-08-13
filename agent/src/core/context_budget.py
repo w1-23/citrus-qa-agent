@@ -137,8 +137,57 @@ class ContextBudget:
 
         return await self._summarize(messages)
 
+    def _trim_noise(self, turns: list) -> list:
+        """v8.3.8 压缩分级: 噪声优先删除（占位/错误消息），证据与结论保护。
+
+        删除 ToolMessage 时必须同步修剪配对 AIMessage.tool_calls（INV-01），
+        否则历史重放触发 OpenAI 400。
+        """
+        NOISE_NAMES = {"budget_skip", "circuit_breaker"}
+        NOISE_PREFIXES = ("[ERR_", "[circuit_breaker]", "[budget]",
+                          "[ERR_TIMEOUT]", "[ERR_NETWORK]", "[ERR_HITL_REJECT]")
+
+        def _is_noise_tool(m) -> bool:
+            from langchain_core.messages import ToolMessage
+            if not isinstance(m, ToolMessage):
+                return False
+            if getattr(m, "name", "") in NOISE_NAMES:
+                return True
+            content = str(getattr(m, "content", ""))
+            return content.startswith(NOISE_PREFIXES)
+
+        cleaned = []
+        for turn in turns:
+            drop_ids = {getattr(m, "tool_call_id", "")
+                        for m in turn if _is_noise_tool(m)
+                        and getattr(m, "tool_call_id", "")}
+            if not drop_ids:
+                cleaned.append(turn)
+                continue
+            kept = []
+            for m in turn:
+                if getattr(m, "tool_call_id", "") in drop_ids:
+                    continue
+                tcs = getattr(m, "tool_calls", None)
+                if tcs:
+                    filtered = [
+                        tc for tc in tcs
+                        if (tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", ""))
+                        not in drop_ids
+                    ]
+                    if len(filtered) != len(tcs):
+                        try:
+                            m = m.model_copy(update={"tool_calls": filtered or None})
+                        except Exception:
+                            pass
+                kept.append(m)
+            if kept:
+                cleaned.append(kept)
+        return cleaned
+
     async def _summarize(self, messages: list) -> BudgetResult:
         turns = self._split_turns(messages)
+        turns = self._trim_noise(turns)
         if len(turns) <= 3:
             return BudgetResult(level=ContextBudgetLevel.NORMAL, messages=list(messages))
 
@@ -175,6 +224,7 @@ class ContextBudget:
 
     async def _truncate(self, messages: list) -> BudgetResult:
         turns = self._split_turns(messages)
+        turns = self._trim_noise(turns)
         keep = self.config.keep_recent_turns
         if len(turns) <= keep + 2:
             return BudgetResult(level=ContextBudgetLevel.NORMAL, messages=list(messages))

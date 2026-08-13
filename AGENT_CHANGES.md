@@ -18,6 +18,8 @@
 | **INV-06 可观测回归** | 事件词汇表前端可消费（status/budget_skip/circuit_breaker 必须显示）；ERROR 有启动汇总；request_id 贯穿请求链路；每条 INV 有回归测试 | 全部 |
 | **INV-07 状态显式化** | 模型决策所需的运行时状态（轮次/已调工具数/预算剩余/去重文献数/已用关键词）以 `<agent_status>` 注入上下文末尾；禁止依赖模型从长历史自行"数" | F8（一轮 4 检索） |
 | **INV-08 失败熔断与输入隔离** | 连续工具失败 ≥3 熔断强制收尾（含占位响应保证配对）；上下文截断必须透明标记（模型不得误以为看全）；不可信数据（检索/上游）与指令显式隔离 | F9 + 提示注入面 |
+| **INV-09 证据账本** | 每轮检索结束后，检索报告与证据清单（doi/title/score/摘要）持久化到 session_evidence（按 session 隔离）；下一轮 load 时注入"[历史检索证据]"块；压缩/清理不得破坏引用关系（DOI 保留） | 跨轮证据丢失 |
+| **INV-10 存储全量·发送裁剪** | 完整交互轨迹（含 tool_calls/ToolMessage 配对）全量入 messages 表（真相源）；发送给 LLM 的上下文可裁剪/压缩，但**只压缩可再生的中间过程**（占位/错误/重试优先删），核心证据与被引结论保护；历史 append-only 以利用 prefix/KV cache | 截断丢证据 |
 
 ## 2. 症状库（症状 → 根因 → 修复 → 测试）
 
@@ -44,7 +46,9 @@
 | INV-05 | AG-22 证据清单格式 + cap + 深度规则 | tests/test_batch2.py |
 | INV-06 | 前端 status 显式化（人工复测）+ request_id（日志断言） | index.html / 复测清单 |
 | INV-07 | 状态栏注入（源码断言 + 复测项 5） | expert_graph.py |
-| INV-08 | AG-24 熔断逻辑 + AG-25 截断透明纯函数 | tests/test_batch2.py |
+| INV-08 | AG-24 熔断逻辑 + AG-25 截断透明纯函数 + AG-33 噪声修剪配对 | tests/test_batch2.py |
+| INV-09 | AG-34 证据账本保存/块渲染/limit/clear | tests/test_batch2.py |
+| INV-10 | AG-32 轨迹保存恢复配对 + AG-35 材料零截断/总量预算 | tests/test_batch2.py |
 
 **全量基线**：232 项（batch1 20 / batch2 70 / batch3 14 / direct_write 12 / file_saved 19 / optimization 32 / write_pipeline 65）。每次改动必须全量回归保持全绿。
 
@@ -56,22 +60,32 @@
 4. **D1 放行声明**：写类工具（write_local_file）不做"默认拒绝+审批"——单用户内网部署 + workspace 路径白名单 + 综述写作链路依赖写盘，审批流会破坏核心工作流。此决策为显式权衡，非疏漏。
 5. **评估口径**：过程指标关注 步数/冗余动作/回退次数/成本延迟（日志已有 tool 计数与耗时）；轨迹 vs 结果双覆盖（write 有 read-back；问答靠复测人工核验）。
 
-## 4b. 上下文结构（规范 2.2.5 静态前缀+轨迹，v8.3.6 固化）
+## 4b. 上下文结构（规范 2.2.5 静态前缀+轨迹，v8.3.6 固化 / v8.3.8 扩展）
 
 ```
 静态前缀（会话内不变，利于 KV Cache）
 ├─ SystemMessage: 角色+约束+决策原则+格式+策略卡片（assemble_system_prompt，query 仅影响策略卡片检索，同一请求内不变）
-├─ 历史消息（load 时由 ContextManager 加载；超预算时压缩为 <conversation_summary>）
+├─ 历史消息（load 时完整恢复含 tool_calls/ToolMessage 配对；超预算时压缩——噪声优先删、证据保护）
+├─ [历史检索证据] 块（v8.3.8，来自 session_evidence 账本，跨轮复用，带"数据非用户输入"边界声明）
 └─ 当前 HumanMessage（build_human_message：LTM 召回 + 检索建议）
 轨迹（随交互增长）
 ├─ AIMessage（含 tool_calls）+ ToolMessage（工具结果，含 retrieve-agent 报告 [retrieve-agent result] 与 write-agent 保存摘要）
 └─ <agent_status> 状态栏（v8.3.5，仅注入本次调用 call_messages，不进历史，不动前缀）
 ```
 
-- **子代理上下文隔离**（规范 2.7.7）：retrieve/write/analyze 子代理独立 messages，只把结论回传 supervisor（ToolMessage）；write-agent 的检索材料经 `_all_retrieved` 注入（带"数据非指令"边界声明，规范 2.4.7）。
-- **预算检查时机**（v8.3.6 前移）：ContextBudget 除 load 时检查历史外，supervisor 每次模型调用前 estimate_tokens(call_messages)——超硬阈值（0.93）强制收尾防溢出，超软阈值（0.60）在状态栏提示模型收敛。
-- **子代理工具结果回传 LLM 窗口**：agent_runner 循环 `messages.append(ToolMessage)` → 下一轮 ainvoke 带上（INV-01 配对保证）。
-- **检索三阶段工作流**（v8.3.6）：阶段1 初始多角度并行 → 阶段2 定向补检（仅去重 <6 时，代码检查进入条件）→ 阶段3 强制报告（≥6 或轮次上限）；LLM 只在节点内决策（选词），流程路由由代码裁决。
+**上下文与证据保真六原则（v8.3.8，生产级预留）**：
+1. **存储全量**：用户消息/assistant 回答/工具调用与结果/检索 chunk 证据全量入 DB（真相源），压缩永远只作用于发送上下文，不删除存储原文
+2. **发送装配**：每次调用 LLM 由装配逻辑按"当前问题+相关性+预算"组装必要上下文；核心证据保真，辅助内容可摘要
+3. **证据复用**：每轮检索生成结构化账本（session_evidence）；下一轮 supervisor 先回顾历史证据，覆盖则直接回答，缺口才增量检索
+4. **压缩分级**：保护用户意图/任务目标/最终回答/被引证据/结论/DOI；压缩重复调用/错误堆栈/失败重试/未采用结果/中间草稿
+5. **窗口触发**：token 接近预算（soft 0.60/hard 0.93）才压缩，不在运行中编辑历史（append-only）
+6. **协议安全**：历史消息不得含孤立 ToolMessage（INV-01 持久化路径，_validate_trace）；KV cache 是推理优化不是记忆机制
+
+**生产级后置清单（当前单用户开发形态，架构已按 session 隔离预留）**：
+- 鉴权中间件 / 速率限制（接口层已有 session_id 维度，鉴权只需中间件）
+- 会话写锁升级（当前 threading 分桶 + DB unique 索引兜底已可支撑多进程）
+- 任务队列 / 分布式 worker（task_jobs 表已预留）
+- 多租户隔离、审计日志、操作权限体系
 
 ## 5. 真实服务复测清单（每次大改后执行）
 

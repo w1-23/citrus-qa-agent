@@ -571,6 +571,100 @@ def test_ag29_citation_support():
     check("<context> 数据非指令声明", "非指令" in ar and "忽略" in ar)
 
 
+def test_ag32_trace_persistence():
+    print("[AG-32] 完整轨迹持久化 + 协议安全（INV-01 持久化路径）")
+    from langchain_core.messages import AIMessage, ToolMessage, HumanMessage
+    from src.session.manager import session_manager, _validate_trace
+    # 配对校验: 孤立 ToolMessage 丢弃
+    paired = [
+        AIMessage(content="", tool_calls=[{"id": "c1", "name": "t1", "args": {}}]),
+        ToolMessage(content="ok", tool_call_id="c1", name="t1"),
+        AIMessage(content="final"),
+        ToolMessage(content="orphan", tool_call_id="orphan-1", name="x"),
+    ]
+    out = _validate_trace(paired)
+    check("孤立 ToolMessage 被丢弃", len(out) == 3
+          and not any(getattr(m, "tool_call_id", "") == "orphan-1" for m in out))
+    check("配对消息全部保留", len([m for m in out if isinstance(m, ToolMessage)]) == 1)
+
+    # 完整轨迹保存→恢复→配对完整
+    loop = asyncio.new_event_loop()
+    sid = f"tr-{uuid.uuid4().hex[:8]}"
+    trace = [
+        HumanMessage(content="问"),
+        AIMessage(content="", tool_calls=[{"id": "c2", "name": "search", "args": {}}]),
+        ToolMessage(content="结果", tool_call_id="c2", name="search"),
+        AIMessage(content="答"),
+    ]
+    loop.run_until_complete(session_manager.save_messages(sid, trace, "crid-tr-1"))
+    hist = loop.run_until_complete(session_manager.get_messages(sid))
+    ai_with_tc = [m for m in hist if getattr(m, "tool_calls", None)]
+    tools = [m for m in hist if isinstance(m, ToolMessage)]
+    check("轨迹完整恢复(4条)", len(hist) == 4, f"len={len(hist)}")
+    check("tool_calls 恢复", len(ai_with_tc) == 1 and ai_with_tc[0].tool_calls[0]["id"] == "c2")
+    check("ToolMessage 配对恢复", len(tools) == 1 and tools[0].tool_call_id == "c2")
+    loop.run_until_complete(session_manager.clear_session(sid))
+    loop.close()
+
+
+def test_ag33_noise_trim():
+    print("[AG-33] 压缩分级: 噪声优先删 + 证据保护（INV-08）")
+    from langchain_core.messages import AIMessage, ToolMessage, HumanMessage
+    from src.core.context_budget import ContextBudget
+    b = ContextBudget()
+    turns = [[
+        HumanMessage(content="问"),
+        AIMessage(content="", tool_calls=[
+            {"id": "c1", "name": "call_retrieve_agent", "args": {}},
+            {"id": "c2", "name": "budget_skip", "args": {}},
+        ]),
+        ToolMessage(content="[retrieve-agent result] 证据报告", tool_call_id="c1",
+                    name="call_retrieve_agent"),
+        ToolMessage(content="[budget] 未执行", tool_call_id="c2", name="budget_skip"),
+        AIMessage(content="答"),
+    ]]
+    cleaned = b._trim_noise(turns)
+    flat = [m for t in cleaned for m in t]
+    check("占位 ToolMessage 删除", not any(getattr(m, "name", "") == "budget_skip" for m in flat))
+    check("证据 ToolMessage 保留", any("证据报告" in str(getattr(m, "content", "")) for m in flat))
+    ai = [m for m in flat if getattr(m, "tool_calls", None)]
+    check("AIMessage.tool_calls 同步修剪(配对不变量)",
+          ai and len(ai[0].tool_calls) == 1 and ai[0].tool_calls[0]["id"] == "c1",
+          str(ai[0].tool_calls if ai else None))
+
+
+def test_ag34_evidence_ledger():
+    print("[AG-34] 证据账本跨轮复用")
+    from src.session.manager import session_manager
+    loop = asyncio.new_event_loop()
+    sid = f"ev-{uuid.uuid4().hex[:8]}"
+    evd = [{"doi": "10.1/a", "title": "TitleA", "score": 0.9, "snippet": "机制细节"}]
+    loop.run_until_complete(session_manager.save_evidence(sid, "花青素调控", evd, "报告: Ruby 启动子转座子插入"))
+    block = session_manager.build_evidence_block(sid, limit=2)
+    check("证据块含历史问题与报告", "花青素调控" in block and "Ruby 启动子" in block, block[:100])
+    check("证据块含边界声明", "非用户输入" in block)
+    loop.run_until_complete(session_manager.save_evidence(sid, "第二轮", [], "第二份报告"))
+    block2 = session_manager.build_evidence_block(sid, limit=1)
+    check("limit=1 只取最近一轮", "第二份报告" in block2 and "Ruby 启动子" not in block2)
+    loop.run_until_complete(session_manager.clear_session(sid))
+    check("clear 清空证据", session_manager.build_evidence_block(sid) == "")
+    loop.close()
+
+
+def test_ag35_material_fidelity():
+    print("[AG-35] 材料零截断 + 总量预算")
+    from src.core import write_pipeline as wp
+    full_chunk = "机制细节A" * 350  # 1750 字符 < 3000
+    r = {"doi": "10.1/x", "title": "T", "text": full_chunk}
+    out = wp._format_material_pack([r], max_entries=5)
+    check("1992 内 chunk 零截断", full_chunk in out, f"len={len(out)}")
+    # 总量预算: 30 条 × 2500 字符 > 60000 → 截断条数并标记
+    many = [{"doi": f"10.1/{i}", "title": f"T{i}", "text": "x" * 2500} for i in range(30)]
+    out2 = wp._format_material_pack(many, max_entries=30)
+    check("总量预算触发条数截断标记", "材料总量达" in out2, out2[-80:])
+    check("单条正文未砍", "x" * 2500 in out2)
+
+
 if __name__ == "__main__":
     test_ag4_session_new()
     test_ag7_timeout_retry()
@@ -594,6 +688,10 @@ if __name__ == "__main__":
     test_ag27_idempotency()
     test_ag28_jobs()
     test_ag29_citation_support()
+    test_ag32_trace_persistence()
+    test_ag33_noise_trim()
+    test_ag34_evidence_ledger()
+    test_ag35_material_fidelity()
     print(f"\n结果: {len(passed)} passed / {len(failed)} failed")
     if failed:
         print("失败项:", failed)
