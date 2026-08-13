@@ -23,7 +23,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from sse_starlette.sse import EventSourceResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.config import PROJECT_ROOT, settings, FeatureFlags
 from src.guardrails.memory import memory_store
@@ -77,6 +77,12 @@ async def lifespan(app: FastAPI):
         MultiBatchRetriever().close()
     except Exception as e:
         logger.debug(f"[Lifespan] Qdrant close: {e}")
+    # v8.3.7: 等待在途后台历史写入落库（防关服务丢历史）
+    try:
+        from src.core.background import drain
+        await drain(timeout=5.0)
+    except Exception as e:
+        logger.debug(f"[Lifespan] background drain: {e}")
     logger.info("[Lifespan] shutdown complete")
 
 
@@ -92,7 +98,9 @@ app.add_middleware(
 
 class ChatRequest(BaseModel):
     session_id: Optional[str] = None
-    query: str
+    # v8.3.7: 长度上限（防单条超长文本打爆预算/日志）+ 客户端幂等 ID（重试复用）
+    query: str = Field(..., min_length=1, max_length=20000)
+    client_request_id: Optional[str] = Field(default=None, max_length=64)
     light_mode: Optional[bool] = None
 
 
@@ -103,6 +111,9 @@ async def chat_v2(req: ChatRequest):
     # v8.3.3: 请求级追踪 ID（日志串线）
     from src.core.tracing import new_request_id
     rid = new_request_id()
+    # v8.3.7 M1: 幂等键（客户端稳定 ID 优先，服务端 30s 桶兜底）——重发/重试不重复写历史
+    from src.session.manager import compute_idempotency_key
+    idem_key = compute_idempotency_key(sid, query, req.client_request_id or "")
     # 模式完全由客户端 light_mode 决定（用户手动切换，无服务端自动升级）
     mode = "light" if req.light_mode else "expert"
 
@@ -123,12 +134,12 @@ async def chat_v2(req: ChatRequest):
             yield evt
             try:
                 from langchain_core.messages import HumanMessage, AIMessage
-                asyncio.create_task(
-                    session_manager.save_messages(sid, [
-                        HumanMessage(content=query),
-                        AIMessage(content=reply),
-                    ])
-                )
+                from src.core.background import spawn
+                spawn(session_manager.save_messages(
+                    sid,
+                    [HumanMessage(content=query), AIMessage(content=reply)],
+                    idem_key,
+                ))
             except Exception:
                 pass
 
@@ -146,6 +157,7 @@ async def chat_v2(req: ChatRequest):
         "mode": mode,
         "messages": [],
         "answer": "",
+        "idempotency_key": idem_key,
     }
     t0 = time.perf_counter()
 

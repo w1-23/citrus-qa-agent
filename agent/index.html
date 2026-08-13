@@ -1310,6 +1310,10 @@ async function sendMsg(isFollowUp) {
   var query = userInput.value.trim();
   if (!query) return;
 
+  // v8.3.7 M1: 每次点击生成稳定幂等 ID，重试复用（防重发重复写历史）
+  var clientRequestId = 'crid-' + Date.now().toString(36) + '-' +
+    Math.random().toString(36).slice(2, 10);
+
   currentRoundId++;
   currentQuery = query;
   _ctxData = null;
@@ -1492,7 +1496,7 @@ async function sendMsg(isFollowUp) {
   currentAbortController = new AbortController();
 
   try {
-    var response = await fetch(API_URL, {method:'POST',headers:{'Content-Type':'application/json'},signal:currentAbortController.signal,body:JSON.stringify({session_id:sessionId,query:query,light_mode:currentMode==='light'})});
+    var response = await fetch(API_URL, {method:'POST',headers:{'Content-Type':'application/json'},signal:currentAbortController.signal,body:JSON.stringify({session_id:sessionId,query:query,client_request_id:clientRequestId,light_mode:currentMode==='light'})});
     if (!response.ok) { clearTimeout(spinnerTimeout);isCancelled=true;clearStatus();answerDiv.style.display='';answerDiv.innerHTML='<div style="color:var(--error);font-weight:500">⚠ 服务器错误 ('+response.status+')</div>';setSendDisabled(false);userInput.focus();return; }
     var reader=response.body.getReader(),decoder=new TextDecoder(),buffer='',curEvt='message';
     while(true){var chunk=await reader.read();if(chunk.done)break;buffer+=decoder.decode(chunk.value,{stream:true});var lines=buffer.split('\n');buffer=lines.pop();

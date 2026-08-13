@@ -951,11 +951,14 @@ async def expert_save_node(state: AgentState) -> dict:
     try:
         from langchain_core.messages import HumanMessage, AIMessage
         from src.session.manager import session_manager
+        from src.core.background import spawn
         msgs_to_save = [
             HumanMessage(content=query),
             AIMessage(content=answer),
         ]
-        asyncio.create_task(session_manager.save_messages(session_id, msgs_to_save))
+        # v8.3.7: 幂等键 + 持有引用（防重发重复写历史/静默丢失）
+        spawn(session_manager.save_messages(
+            session_id, msgs_to_save, state.get("idempotency_key", "")))
     except Exception as e:
         logger.warning(f"[ExpertGraph:save] failed: {e}")
 

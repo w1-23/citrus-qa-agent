@@ -1,11 +1,15 @@
 """Session Manager — SQLite-based session persistence.
 
 v8.1.1: Return LangChain Messages, no auto-compression.
+v8.3.7: 幂等写入（client_request_id/idempotency_key）+ 会话级写锁 + 统一历史写入入口。
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import threading
+import time
 import uuid
 import asyncio
 from pathlib import Path
@@ -26,6 +30,29 @@ logger = logging.getLogger(__name__)
 
 STATE_DIR = PROJECT_ROOT / "state"
 DB_PATH = STATE_DIR / "sessions.db"
+
+# 会话级写锁分桶：同一 session 的历史写入串行化，防止 save/replace 并发交错
+_session_locks: dict = {}
+_session_locks_guard = threading.Lock()
+
+
+def _get_session_lock(session_id: str) -> threading.Lock:
+    with _session_locks_guard:
+        lock = _session_locks.get(session_id)
+        if lock is None:
+            lock = threading.Lock()
+            _session_locks[session_id] = lock
+        return lock
+
+
+def compute_idempotency_key(session_id: str, query: str,
+                            client_request_id: str = "") -> str:
+    """幂等键（v8.3.7）：优先客户端稳定 ID（重试复用）；无则服务端 30s 时间桶兜底。"""
+    if client_request_id:
+        return f"crid:{client_request_id[:64]}"
+    bucket = int(time.time() // 30)
+    raw = f"{session_id}|{query[:500]}|{bucket}"
+    return "srv:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
 class SessionManager:
@@ -72,6 +99,7 @@ class SessionManager:
             """)
             conn.commit()
         self._migrate_schema()
+        self._ensure_idempotency_index()
 
     def _migrate_schema(self):
         """Add columns if missing from older schemas."""
@@ -85,6 +113,8 @@ class SessionManager:
                     ("tool_call_id", "TEXT"),
                     ("tool_calls_json", "TEXT"),
                     ("name", "TEXT"),
+                    ("client_request_id", "TEXT"),   # v8.3.7 M1
+                    ("idempotency_key", "TEXT"),     # v8.3.7 M1
                 ]:
                     if col not in existing:
                         try:
@@ -95,6 +125,20 @@ class SessionManager:
                 conn.commit()
         except Exception as e:
             logger.debug(f"[SessionManager] schema migration: {e}")
+
+    def _ensure_idempotency_index(self):
+        """幂等唯一索引（v8.3.7 M1）：数据库层兜底，防多进程/竞态重复写。"""
+        import sqlite3
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_msg_idempotency "
+                    "ON messages(session_id, idempotency_key) "
+                    "WHERE idempotency_key IS NOT NULL"
+                )
+                conn.commit()
+        except Exception as e:
+            logger.warning(f"[SessionManager] idempotency index failed: {e}")
 
     async def get_or_create_session(self, session_id: Optional[str]) -> str:
         if not session_id or session_id.lower() == "new":
@@ -171,12 +215,21 @@ class SessionManager:
                     logger.debug(f"[SessionManager] skip unparseable message: {e}")
         return messages
 
-    async def save_messages(self, session_id: str, messages: List[BaseMessage]) -> None:
+    async def save_messages(self, session_id: str, messages: List[BaseMessage],
+                            idempotency_key: str = "") -> bool:
+        """追加历史（v8.3.7 幂等）：同 session 同幂等键已存在则跳过，返回是否写入。"""
         try:
-            await asyncio.to_thread(self._save_messages_sync, session_id, messages)
-            logger.debug(f"[SessionManager] saved {len(messages)} msgs for {session_id[:8]}")
+            written = await asyncio.to_thread(
+                self._save_messages_sync, session_id, messages, idempotency_key)
+            if written:
+                logger.debug(f"[SessionManager] saved {len(messages)} msgs for {session_id[:8]}")
+            else:
+                logger.debug(f"[SessionManager] duplicate skipped (key={idempotency_key[:16]}) "
+                             f"for {session_id[:8]}")
+            return written
         except Exception as e:
             logger.error(f"[SessionManager] save failed: {e}")
+            return False
 
     def _serialize_message(self, msg: BaseMessage) -> tuple:
         """Extract (msg_type, content, tool_call_id, tool_calls_json, name) from a message."""
@@ -216,21 +269,37 @@ class SessionManager:
 
         return (msg_type, content, tool_call_id, tool_calls_json, name)
 
-    def _save_messages_sync(self, session_id: str, messages: List[BaseMessage]):
+    def _save_messages_sync(self, session_id: str, messages: List[BaseMessage],
+                            idempotency_key: str = "") -> bool:
         import sqlite3
-        with sqlite3.connect(self.db_path) as conn:
-            for msg in messages:
+        # v8.3.7: 会话级写锁串行化所有历史写入（save/replace 同一入口）
+        lock = _get_session_lock(session_id)
+        with lock:
+            with sqlite3.connect(self.db_path) as conn:
+                if idempotency_key:
+                    dup = conn.execute(
+                        "SELECT 1 FROM messages WHERE session_id=? AND idempotency_key=? LIMIT 1",
+                        (session_id, idempotency_key)).fetchone()
+                    if dup:
+                        return False
+                for idx, msg in enumerate(messages):
+                    # v8.3.7: 幂等键为"轮次级"——仅批首行携带（唯一索引防整批重放）
+                    row_key = idempotency_key if (idx == 0 and idempotency_key) else None
+                    conn.execute(
+                        "INSERT INTO messages "
+                        "(session_id, msg_type, content, tool_call_id, tool_calls_json, "
+                        "name, client_request_id, idempotency_key) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (session_id, *self._serialize_message(msg),
+                         idempotency_key if (idx == 0 and idempotency_key.startswith("crid:")) else None,
+                         row_key),
+                    )
                 conn.execute(
-                    "INSERT INTO messages "
-                    "(session_id, msg_type, content, tool_call_id, tool_calls_json, name) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (session_id, *self._serialize_message(msg)),
+                    "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
+                    (datetime.now().isoformat(), session_id),
                 )
-            conn.execute(
-                "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
-                (datetime.now().isoformat(), session_id),
-            )
-            conn.commit()
+                conn.commit()
+        return True
 
     async def replace_history(self, session_id: str, messages: List[BaseMessage]) -> None:
         """原子替换会话历史（压缩/截断后持久化，v8.3.1）。事务内 DELETE+INSERT，失败不改动原数据。"""
@@ -242,20 +311,22 @@ class SessionManager:
 
     def _replace_history_sync(self, session_id: str, messages: List[BaseMessage]):
         import sqlite3
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-            for msg in messages:
+        lock = _get_session_lock(session_id)
+        with lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+                for msg in messages:
+                    conn.execute(
+                        "INSERT INTO messages "
+                        "(session_id, msg_type, content, tool_call_id, tool_calls_json, name) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (session_id, *self._serialize_message(msg)),
+                    )
                 conn.execute(
-                    "INSERT INTO messages "
-                    "(session_id, msg_type, content, tool_call_id, tool_calls_json, name) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (session_id, *self._serialize_message(msg)),
+                    "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
+                    (datetime.now().isoformat(), session_id),
                 )
-            conn.execute(
-                "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
-                (datetime.now().isoformat(), session_id),
-            )
-            conn.commit()
+                conn.commit()
 
     async def clear_session(self, session_id: str):
         await asyncio.to_thread(self._clear_session_sync, session_id)

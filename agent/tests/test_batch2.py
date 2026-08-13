@@ -456,6 +456,69 @@ def test_ag25_truncation_transparency():
     check("无完整块 → 前缀+标记", "已截断" in tiny)
 
 
+def test_ag27_idempotency():
+    print("[AG-27] 历史幂等 + 会话写锁 + query 上限（M1）")
+    from src.session.manager import (session_manager, compute_idempotency_key,
+                                     _get_session_lock)
+    from langchain_core.messages import HumanMessage, AIMessage
+
+    check("幂等键稳定（client_request_id）",
+          compute_idempotency_key("s1", "q1", "crid-1") == compute_idempotency_key("s1", "q1", "crid-1"))
+    check("同 key 同 query 重放幂等（重试语义）",
+          compute_idempotency_key("s1", "q2", "crid-1") == compute_idempotency_key("s1", "q1", "crid-1"))
+    check("不同 client_request_id 区分",
+          compute_idempotency_key("s1", "q1", "crid-1") != compute_idempotency_key("s1", "q1", "crid-2"))
+    check("同 session 同锁", _get_session_lock("sx") is _get_session_lock("sx"))
+    check("不同 session 不同锁", _get_session_lock("sa") is not _get_session_lock("sb"))
+
+    loop = asyncio.new_event_loop()
+    sid = f"idem-{uuid.uuid4().hex[:8]}"
+    key = "crid-test-idem-1"
+    msgs = [HumanMessage(content="q"), AIMessage(content="a")]
+    w1 = loop.run_until_complete(session_manager.save_messages(sid, msgs, key))
+    w2 = loop.run_until_complete(session_manager.save_messages(sid, msgs, key))
+    check("首次写入 True", w1 is True)
+    check("同 key 重放被跳过", w2 is False)
+    hist = loop.run_until_complete(session_manager.get_messages(sid))
+    check("历史无重复轮次", len(hist) == 2, f"len={len(hist)}")
+    loop.run_until_complete(session_manager.clear_session(sid))
+
+    # 并发写不抛异常（save vs replace 走同一会话锁）
+    sid2 = f"conc-{uuid.uuid4().hex[:8]}"
+    import concurrent.futures
+    def do_save(i):
+        ms = [HumanMessage(content=f"s{i}")]
+        import asyncio as _a
+        _l = _a.new_event_loop()
+        _l.run_until_complete(session_manager.save_messages(sid2, ms, f"k{i}"))
+        _l.close()
+    def do_replace(i):
+        ms = [HumanMessage(content=f"r{i}a"), AIMessage(content=f"r{i}b")]
+        import asyncio as _a
+        _l = _a.new_event_loop()
+        _l.run_until_complete(session_manager.replace_history(sid2, ms))
+        _l.close()
+    with concurrent.futures.ThreadPoolExecutor(4) as ex:
+        fs = [ex.submit(do_save, i) for i in range(4)] + [ex.submit(do_replace, i) for i in range(4)]
+        for f in fs:
+            f.result(timeout=30)
+    hist2 = loop.run_until_complete(session_manager.get_messages(sid2))
+    check("并发写后可稳定加载且条数合理", len(hist2) in (1, 2), f"len={len(hist2)}")
+    loop.run_until_complete(session_manager.clear_session(sid2))
+    loop.close()
+
+    # query 长度上限
+    from src.api.main import ChatRequest
+    try:
+        from pydantic import ValidationError
+        ChatRequest(query="x" * 20001)
+        check("超长 query 被拒绝", False, "未抛异常")
+    except ValidationError:
+        check("超长 query 被拒绝", True)
+    ok_req = ChatRequest(query="正常问题", client_request_id="crid-abc")
+    check("正常请求通过（含幂等 ID）", ok_req.client_request_id == "crid-abc")
+
+
 if __name__ == "__main__":
     test_ag4_session_new()
     test_ag7_timeout_retry()
@@ -476,6 +539,7 @@ if __name__ == "__main__":
     test_ag24_circuit_breaker()
     test_ag25_truncation_transparency()
     test_ag26_budget_forward()
+    test_ag27_idempotency()
     print(f"\n结果: {len(passed)} passed / {len(failed)} failed")
     if failed:
         print("失败项:", failed)

@@ -10,6 +10,8 @@ class AgentState(TypedDict, total=False):
     query: str
     session_id: str
     mode: str
+    # v8.3.7: 幂等键（save 节点写入历史时用，防重发重复）
+    idempotency_key: str
 
     answer: str
     gen_time_ms: float
