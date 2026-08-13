@@ -264,12 +264,19 @@ async def chat_v2(req: ChatRequest):
                             ans = output.get("answer", "")
                             if ans:
                                 await asyncio.sleep(0.5)
-                                await emit_to_client(_encode_event("done", {
+                                done_payload = {
                                     "session_id": sid,
                                     "answer": ans,
                                     "job_id": job_id,
                                     "gen_time_ms": int((time.perf_counter() - t0) * 1000),
-                                }))
+                                }
+                                # v8.3.7 M3: 假完成检测元数据（前端可提示"引用未检索支撑"）
+                                cit = output.get("citation_info")
+                                if cit:
+                                    done_payload.update(cit)
+                                if output.get("tools_called"):
+                                    done_payload["tools_called"] = output["tools_called"]
+                                await emit_to_client(_encode_event("done", done_payload))
                                 # v8.3.7 M2: 任务完成落状态
                                 jobs_mod.update_job(job_id, status="completed",
                                                     progress_summary=ans[:200])

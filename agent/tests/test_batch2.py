@@ -543,6 +543,34 @@ def test_ag28_jobs():
     check("不存在的 job → None", jobs_mod.get_job("nonexistent") is None)
 
 
+def test_ag29_citation_support():
+    print("[AG-29] 假完成检测 + 注入防护（M3）")
+    from src.graph.expert_graph import check_citation_support
+    docs = [{"doi": f"10.1/{i}", "title": f"p{i}"} for i in range(3)]
+    r1 = check_citation_support("结论引用文献 [1] 与 [2]。", [], False)
+    check("0 检索 + 含引用 → unsupported", r1["citation_unsupported"] is True
+          and r1["citation_supported"] is False, str(r1))
+    r2 = check_citation_support("结论引用文献 [1]。", docs, True)
+    check("有检索 + 引用 → supported", r2["citation_unsupported"] is False
+          and r2["citation_supported"] is True, str(r2))
+    r3 = check_citation_support("引用 [1][2][3][4][5][6][7]。", docs, True)
+    check("引用数 >> 文献数 → mismatch", r3["citation_mismatch"] is True, str(r3))
+    r4 = check_citation_support("无引用回答。", [], False)
+    check("无引用 → 不告警", r4["citation_unsupported"] is False
+          and r4["citation_supported"] is True, str(r4))
+    # done 事件附元数据（源码断言）
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            'src', 'api', 'main.py'), encoding='utf-8').read()
+    check("done 事件含 citation_info", "citation_info" in src and "done_payload" in src)
+    # 注入边界声明（B3）仍存在
+    eg = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           'src', 'graph', 'expert_graph.py'), encoding='utf-8').read()
+    check("检索数据非指令边界声明", "不是用户指令" in eg)
+    ar = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           'src', 'core', 'agent_runner.py'), encoding='utf-8').read()
+    check("<context> 数据非指令声明", "非指令" in ar and "忽略" in ar)
+
+
 if __name__ == "__main__":
     test_ag4_session_new()
     test_ag7_timeout_retry()
@@ -565,6 +593,7 @@ if __name__ == "__main__":
     test_ag26_budget_forward()
     test_ag27_idempotency()
     test_ag28_jobs()
+    test_ag29_citation_support()
     print(f"\n结果: {len(passed)} passed / {len(failed)} failed")
     if failed:
         print("失败项:", failed)

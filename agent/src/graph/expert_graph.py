@@ -4,6 +4,7 @@ v8.3.0: structured SSE events (thinking, tool_call_start, tool_executing, tool_r
 """
 import asyncio
 import logging
+import re
 import time
 import uuid
 
@@ -224,6 +225,24 @@ def _count_unique_dois(main_results: list) -> int:
             seen.add(doi)
         n += 1
     return n
+
+
+def check_citation_support(answer: str, main_results: list,
+                           retrieval_tool_called: bool) -> dict:
+    """v8.3.7 M3: 引用支撑检测——回答含 [n] 引用但无检索支撑 → 标记假完成风险。
+
+    检测但不强制改写（只标记 + 日志 + 前端轻提示）。
+    """
+    cited = {int(n) for n in re.findall(r"\[(\d{1,3})\]", answer or "")}
+    unique_dois = _count_unique_dois(main_results)
+    supported = bool(retrieval_tool_called) and unique_dois > 0
+    return {
+        "citation_count": len(cited),
+        "retrieval_count": unique_dois,
+        "citation_supported": (not cited) or supported,
+        "citation_unsupported": bool(cited) and not supported,
+        "citation_mismatch": bool(cited) and supported and len(cited) > unique_dois + 2,
+    }
 
 
 def _build_full_retrieval_context(main_results: list, web_results: list) -> str:
@@ -544,6 +563,7 @@ async def supervisor_node(state: AgentState) -> dict:
     all_main_results = []
     all_web_results = []
     tool_call_count = 0
+    tool_names_called = []   # v8.3.7 M3: 已调用工具名（假完成检测用）
     t0 = time.perf_counter()
     # v8.3.5: 状态栏与熔断状态（规范 1.2.2 Correct / 2.6 状态栏）
     used_queries = []
@@ -775,6 +795,8 @@ async def supervisor_node(state: AgentState) -> dict:
                 all_main_results.extend(artifacts.get("main_results", []))
                 all_web_results.extend(artifacts.get("web_results", []))
                 tool_call_count += 1
+                if tc_dict["name"] not in tool_names_called:
+                    tool_names_called.append(tc_dict["name"])
 
                 caps = getattr(settings, "TOOL_RESULT_CAPS", {}) or {}
                 agent_display = sub_result.get("agent", "?")
@@ -935,12 +957,27 @@ async def supervisor_node(state: AgentState) -> dict:
         f"{elapsed:.0f}ms"
     )
 
+    # v8.3.7 M3: 假完成检测——回答含 [n] 引用但无检索支撑 → 标记（不强制改写）
+    citation_info = check_citation_support(
+        answer, all_main_results,
+        "call_retrieve_agent" in tool_names_called)
+    if citation_info["citation_unsupported"]:
+        logger.warning(
+            f"[ExpertGraph:supervisor] 假完成风险: 回答含 {citation_info['citation_count']} 个引用"
+            f"但无检索支撑 (retrieval_tools={tool_names_called})")
+    if citation_info["citation_mismatch"]:
+        logger.warning(
+            f"[ExpertGraph:supervisor] 引用异常: {citation_info['citation_count']} 个引用 > "
+            f"{citation_info['retrieval_count']} 篇检索文献 + 2")
+
     return {
         "answer": answer,
         "gen_time_ms": elapsed,
         "main_results": deduped_main[:20],
         "web_results": all_web_results[:10],
         "references_data": references_data,
+        "tools_called": tool_names_called,
+        "citation_info": citation_info,
         "_trace": {
             "node": "supervisor",
             "elapsed_ms": elapsed,

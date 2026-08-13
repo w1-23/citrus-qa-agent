@@ -1471,6 +1471,12 @@ async function sendMsg(isFollowUp) {
         break;
       case 'done':
         clearTimeout(spinnerTimeout); isCancelled=true; answerDiv.style.display=''; clearStatus();
+        // v8.3.7 M3: 引用无检索支撑 → 轻提示（不阻断回答）
+        if (data.citation_unsupported) {
+          showBanner('⚠ 回答包含文献引用，但本轮未检测到检索支撑（可能为模型记忆），请谨慎引用');
+        } else if (data.citation_mismatch) {
+          showBanner('⚠ 回答引用编号(' + (data.citation_count||0) + ')多于检索文献(' + (data.retrieval_count||0) + ')');
+        }
         if (!fullText&&data.answer) fullText=data.answer;
         if (fullText) answerDiv.innerHTML=renderMarkdownSafe(fullText.replace(/__NEED_COMPLEX__/g,''));
         if (fullText.indexOf('__NEED_COMPLEX__')>=0) {
