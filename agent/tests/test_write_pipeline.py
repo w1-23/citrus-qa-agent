@@ -347,6 +347,33 @@ def test_react_fallback():
     check("全部失败 → 提示文本", r2["mode"] == "react_fallback" and "回退" in r2["result"])
 
 
+def test_output_path_fallback():
+    import json
+    print("[入口] output_path 缺失 → 默认路径兜底（复测发现 P1）")
+    plan_obj = {"title": "黄龙病防控策略综述", "abstract_draft": "A", "keywords": ["k"],
+                "total_target_chars": 0,
+                "sections": [{"heading": "s1", "points": ["p"], "target_chars": 800,
+                              "refs": ["DOI:1"]},
+                             {"heading": "s2", "points": ["p"], "target_chars": 800,
+                              "refs": ["DOI:1"]}]}
+    plan_json = json.dumps(plan_obj, ensure_ascii=False)
+    llm = FakeLLM([plan_json,
+                   "## s1\n第一张内容。<summary>s1</summary>",
+                   "## s2\n第二章内容。<summary>s2</summary>"])
+    r = run(wp.run_write_pipeline({"goal": "写一篇综述", "output_path": ""},
+                                  [{"doi": "1", "title": "X"}],
+                                  llm_factory=lambda: llm, session_id="t-nopath"))
+    check("无 output_path 仍成功执行", r["mode"] == "plan_execute" and not r["missing_sections"],
+          f"mode={r['mode']} missing={r['missing_sections']}")
+    # 生成的默认文件应存在且含标题
+    out_dir = PROJECT_ROOT / "workspace" / "output"
+    hits = list(out_dir.glob("黄龙病防控策略综述_*.md"))
+    check("默认文件名落盘", len(hits) >= 1, str([h.name for h in hits[:3]]))
+    if hits:
+        for h in hits:
+            h.unlink()
+
+
 def json_doc(obj):
     import json
     return json.dumps(obj, ensure_ascii=False)
@@ -365,6 +392,7 @@ if __name__ == "__main__":
     test_pipeline_state()
     test_verify_functions()
     test_react_fallback()
+    test_output_path_fallback()
     print(f"\n结果: {len(passed)} passed / {len(failed)} failed")
     if failed:
         print("失败项:", failed)

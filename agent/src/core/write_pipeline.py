@@ -707,6 +707,15 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
         return await _react_fallback_write(llm, goal, plan_text, material_pack,
                                            output_path, gap)
 
+    # v8.3.7: output_path 缺失兜底——supervisor 可能不传路径（LLM 漏参），
+    # 此时路径解析会落到 workspace/output 目录本身 → os.replace 覆盖目录失败。
+    # 用大纲标题生成默认文件名。
+    if not output_path:
+        safe_title = re.sub(r'[\\/:*?"<>|\r\n]+', '_',
+                            (plan.get("title") or "综述").strip())[:40] or "综述"
+        output_path = f"{safe_title}_{uuid.uuid4().hex[:6]}.md"
+        logger.info(f"[WritePipeline] output_path 缺失，生成默认路径: {output_path}")
+
     if not task_id:
         try:
             from src.core.write_pipeline_state import start_task
