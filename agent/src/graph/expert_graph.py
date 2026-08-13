@@ -688,6 +688,27 @@ async def supervisor_node(state: AgentState) -> dict:
             pending_calls = list(response.tool_calls)
             skipped_calls = pending_calls[max_tools_per_turn:]
             pending_calls = pending_calls[:max_tools_per_turn]
+            # v8.3.8: 同轮至多一个检索子代理（其内部已并行多角度检索，
+            # supervisor 一轮发多个 retrieve 是冗余决策——实测 22 工具/轮的主因）
+            extra_retrieves = []
+            if sum(1 for tc in pending_calls
+                   if _make_tool_call(tc)["name"] == "call_retrieve_agent") > 1:
+                seen_retrieve = False
+                kept = []
+                for tc in pending_calls:
+                    if _make_tool_call(tc)["name"] == "call_retrieve_agent":
+                        if not seen_retrieve:
+                            seen_retrieve = True
+                            kept.append(tc)
+                        else:
+                            extra_retrieves.append(tc)
+                    else:
+                        kept.append(tc)
+                pending_calls = kept
+            skipped_calls = skipped_calls + extra_retrieves
+            if extra_retrieves:
+                logger.warning(f"[ExpertGraph:supervisor] turn{turn}: 同轮多个检索子代理，"
+                               f"保留 1 个，推迟 {len(extra_retrieves)} 个")
             if skipped_calls:
                 skipped_names = []
                 for sk in skipped_calls:

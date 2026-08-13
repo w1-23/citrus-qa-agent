@@ -16,6 +16,10 @@ class AgentState(TypedDict, total=False):
     turn_trace: list[BaseMessage]
     # v8.3.8: 历史检索证据块（跨轮复用，load 注入）
     history_evidence_block: Optional[str]
+    # v8.3.8 修复: main_results/web_results 必须声明——langgraph 对未声明键不合并进
+    # 下游节点 state，导致 save 节点证据账本为空（复测发现）
+    main_results: list
+    web_results: list
 
     answer: str
     gen_time_ms: float
