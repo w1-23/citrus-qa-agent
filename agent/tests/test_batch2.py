@@ -519,6 +519,30 @@ def test_ag27_idempotency():
     check("正常请求通过（含幂等 ID）", ok_req.client_request_id == "crid-abc")
 
 
+def test_ag28_jobs():
+    print("[AG-28] task_jobs 最小闭环（M2）")
+    from src.core import jobs as jobs_mod
+    jid = jobs_mod.create_job("s-job", "r-1", "chat")
+    check("create_job 返回 id", bool(jid) and len(jid) == 12, jid)
+    job = jobs_mod.get_job(jid)
+    check("初始 status=running", job is not None and job["status"] == "running", str(job))
+    check("初始非 write 任务", not jobs_mod.is_write_job(jid))
+    jobs_mod.update_job(jid, job_type="write", current_step="plan_ready 4sections",
+                        progress_summary="标题T")
+    job2 = jobs_mod.get_job(jid)
+    check("升级为 write 任务", jobs_mod.is_write_job(jid) and job2["job_type"] == "write")
+    check("步骤更新", job2["current_step"] == "plan_ready 4sections")
+    jobs_mod.update_job(jid, status="completed", progress_summary="完成摘要")
+    job3 = jobs_mod.get_job(jid)
+    check("completed + finished_at", job3["status"] == "completed" and bool(job3.get("finished_at")))
+    jobs_mod.update_job(jid, status="failed", error="boom")
+    job4 = jobs_mod.get_job(jid)
+    check("failed 可读", job4["status"] == "failed" and job4["error"] == "boom")
+    lst = jobs_mod.list_for_session("s-job")
+    check("会话任务列表", any(j["job_id"] == jid for j in lst), f"len={len(lst)}")
+    check("不存在的 job → None", jobs_mod.get_job("nonexistent") is None)
+
+
 if __name__ == "__main__":
     test_ag4_session_new()
     test_ag7_timeout_retry()
@@ -540,6 +564,7 @@ if __name__ == "__main__":
     test_ag25_truncation_transparency()
     test_ag26_budget_forward()
     test_ag27_idempotency()
+    test_ag28_jobs()
     print(f"\n结果: {len(passed)} passed / {len(failed)} failed")
     if failed:
         print("失败项:", failed)

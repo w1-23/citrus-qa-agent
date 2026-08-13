@@ -151,6 +151,11 @@ async def chat_v2(req: ChatRequest):
     from src.graph.state import AgentState
 
     graph = build_graph(mode)
+    # v8.3.7 M2: 任务 job（write 类长任务断连保活，状态可查）
+    from src.core import jobs as jobs_mod
+    job_id = jobs_mod.create_job(sid, rid, "chat")
+    from src.core.tracing import set_job_id
+    set_job_id(job_id)
     initial_state: AgentState = {
         "query": query,
         "session_id": sid,
@@ -224,6 +229,15 @@ async def chat_v2(req: ChatRequest):
         log_task = asyncio.create_task(bridge_logs())
         heartbeat_task = asyncio.create_task(tool_heartbeat())
 
+        # v8.3.7 M2: 观察者标志——write 类任务断连保活后丢弃后续事件（防队列堆积）
+        observer_connected = True
+        keep_alive = False
+
+        async def emit_to_client(evt) -> None:
+            """仅在客户端在线时投递事件（保活后丢弃）。"""
+            if observer_connected:
+                await event_queue.put(evt)
+
         async def process_graph():
             try:
                 async for node_output in graph.astream(initial_state, stream_mode="updates",
@@ -241,7 +255,7 @@ async def chat_v2(req: ChatRequest):
                             continue
 
                         if node_name in ("light_retrieve",):
-                            await event_queue.put(_encode_event("status", {
+                            await emit_to_client(_encode_event("status", {
                                 "stage": "retrieval_done",
                                 "main_count": len(output.get("main_results", [])),
                             }))
@@ -250,30 +264,38 @@ async def chat_v2(req: ChatRequest):
                             ans = output.get("answer", "")
                             if ans:
                                 await asyncio.sleep(0.5)
-                                await event_queue.put(_encode_event("done", {
+                                await emit_to_client(_encode_event("done", {
                                     "session_id": sid,
                                     "answer": ans,
+                                    "job_id": job_id,
                                     "gen_time_ms": int((time.perf_counter() - t0) * 1000),
                                 }))
+                                # v8.3.7 M2: 任务完成落状态
+                                jobs_mod.update_job(job_id, status="completed",
+                                                    progress_summary=ans[:200])
                         elif node_name not in ("light_retrieve",):
                             ans = output.get("answer", "")
                             if ans:
-                                await event_queue.put(_encode_event("done", {
+                                await emit_to_client(_encode_event("done", {
                                     "session_id": sid,
                                     "answer": ans,
+                                    "job_id": job_id,
                                     "gen_time_ms": int((time.perf_counter() - t0) * 1000),
                                 }))
 
                         ref_data = output.get("references_data")
                         if ref_data:
-                            await event_queue.put(_encode_event("citations", ref_data))
+                            await emit_to_client(_encode_event("citations", ref_data))
             except asyncio.CancelledError:
+                # 仅普通问答被 cancel（write 保活任务不会到这里）
+                jobs_mod.update_job(job_id, status="cancelled")
                 pass
             except Exception as e:
                 logger.error(f"[SSE v2] graph processing error: {e}")
+                jobs_mod.update_job(job_id, status="failed", error=str(e)[:500])
                 try:
                     # v8.3.3: 错误脱敏——详细异常只进日志，SSE 只发用户可读信息
-                    await event_queue.put(_encode_event("error", {
+                    await emit_to_client(_encode_event("error", {
                         "message": "处理请求时发生内部错误，请稍后重试",
                     }))
                 except Exception:
@@ -285,7 +307,13 @@ async def chat_v2(req: ChatRequest):
                         break
                     await asyncio.sleep(0.1)
                 heartbeat_task.cancel()
-                await event_queue.put(None)
+                if observer_connected:
+                    await event_queue.put(None)
+                else:
+                    # 保活完成：标记任务结束（不推 sentinel，无人消费）
+                    jobs_mod.update_job(job_id, status="completed",
+                                        progress_summary="(断连保活完成)")
+                    logger.info(f"[SSE v2] write job {job_id} 断连保活执行完成")
 
         graph_task = asyncio.create_task(process_graph())
 
@@ -305,15 +333,24 @@ async def chat_v2(req: ChatRequest):
                 yield event
         except asyncio.CancelledError:
             logger.warning(f"[SSE v2] Client disconnected (session={sid[:8]})")
-            graph_task.cancel()
-            try:
-                await graph_task
-            except Exception:
-                pass
+            # v8.3.7 M2: write 类任务断连保活——转交后台继续执行；普通问答仍取消
+            if jobs_mod.is_write_job(job_id):
+                from src.core.background import adopt
+                observer_connected = False
+                keep_alive = True
+                adopt(graph_task)
+                logger.info(f"[SSE v2] write job {job_id} 转入后台保活（断连不杀任务）")
+            else:
+                graph_task.cancel()
+                try:
+                    await graph_task
+                except Exception:
+                    pass
             raise
         finally:
-            if not graph_task.done():
-                graph_task.cancel()
+            if not keep_alive:
+                if not graph_task.done():
+                    graph_task.cancel()
             if not progress_task.done():
                 progress_task.cancel()
             if not log_task.done():
@@ -323,6 +360,23 @@ async def chat_v2(req: ChatRequest):
             clear_request_queue()
 
     return EventSourceResponse(event_generator())
+
+
+@app.get("/jobs/{job_id}")
+async def get_job_status(job_id: str):
+    """v8.3.7 M2: 任务状态查询（断连保活后可查 running/completed/failed）。"""
+    from src.core import jobs as jobs_mod
+    job = jobs_mod.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
+    return job
+
+
+@app.get("/sessions/{session_id}/jobs")
+async def list_session_jobs(session_id: str):
+    """v8.3.7 M2: 会话最近任务列表。"""
+    from src.core import jobs as jobs_mod
+    return {"jobs": jobs_mod.list_for_session(session_id)}
 
 
 @app.get("/api/v1/flags")

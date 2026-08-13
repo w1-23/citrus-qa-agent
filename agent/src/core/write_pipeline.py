@@ -275,6 +275,19 @@ async def _react_fallback_write(llm, goal: str, plan_text: str, material_pack: l
 # 3. Stage 2: Execute（逐章生成）
 # ─────────────────────────────────────────────
 
+def _update_job(step: str, summary: str = "") -> None:
+    """v8.3.7 M2: 同步任务进度到 task_jobs（断连保活后可查询）。"""
+    try:
+        from src.core.jobs import update_job
+        from src.core.tracing import get_job_id
+        fields = {"current_step": step}
+        if summary:
+            fields["progress_summary"] = summary
+        update_job(get_job_id(), **fields)
+    except Exception:
+        pass
+
+
 def extract_summary(resp: str) -> tuple[str, str]:
     """分离正文与 <summary> 标签。返回 (body, summary)。"""
     m = SUMMARY_TAG_RE.search(resp)
@@ -418,6 +431,7 @@ async def run_stage2_execute(llm, plan: dict, material_pack: list[dict],
                                            "index": idx + 1, "total": len(sections)})
         except Exception:
             pass
+        _update_job(f"writing {idx+1}/{len(sections)}", section.get("heading", ""))
         prompt = _build_section_prompt(plan, idx, section, running_context, material_pack)
         resp_content = ""
         for attempt in range(3):
@@ -498,6 +512,7 @@ async def run_stage2_execute(llm, plan: dict, material_pack: list[dict],
                                           "index": idx + 1, "total": len(sections)})
         except Exception:
             pass
+        _update_job(f"done {idx+1}/{len(sections)}", "")
 
     return {"chapters": len(sections) - len(missing) - len(resume_completed),
             "total_chars": total_chars, "missing_sections": missing,
@@ -707,6 +722,8 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
         })
     except Exception:
         pass
+    _update_job(f"plan_ready {len(plan.get('sections', []))}sections",
+                plan.get("title", ""))
 
     exec_result = await run_stage2_execute(llm, plan, material_pack, output_path,
                                            task_id=task_id, resume_completed=resume_completed)

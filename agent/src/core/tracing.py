@@ -10,6 +10,10 @@ import contextvars
 _request_id: contextvars.ContextVar = contextvars.ContextVar(
     "request_id", default="-")
 
+# v8.3.7: 任务 job_id（write 流水线挂钩任务状态更新）
+_job_id: contextvars.ContextVar = contextvars.ContextVar(
+    "job_id", default="")
+
 
 def set_request_id(request_id: str) -> None:
     _request_id.set(request_id)
@@ -17,6 +21,14 @@ def set_request_id(request_id: str) -> None:
 
 def get_request_id() -> str:
     return _request_id.get()
+
+
+def set_job_id(job_id: str) -> None:
+    _job_id.set(job_id)
+
+
+def get_job_id() -> str:
+    return _job_id.get()
 
 
 def new_request_id() -> str:

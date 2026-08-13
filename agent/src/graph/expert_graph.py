@@ -794,6 +794,14 @@ async def supervisor_node(state: AgentState) -> dict:
                     name=tc_dict["name"],
                 ))
 
+                # v8.3.7 M2: write 类工具执行 → job 升级为 write（断连保活判定依据）
+                if tc_dict["name"] in ("call_write_agent", "write_local_file"):
+                    try:
+                        from src.core.jobs import update_job
+                        from src.core.tracing import get_job_id
+                        update_job(get_job_id(), job_type="write")
+                    except Exception:
+                        pass
                 # v8.3.5 状态栏: 已用检索关键词（模型可见，防重复检索）
                 if tc_dict["name"] == "call_retrieve_agent":
                     q = str((tc_dict.get("args") or {}).get("query", ""))

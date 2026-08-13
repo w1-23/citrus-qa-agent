@@ -33,6 +33,12 @@ def spawn(coro) -> None:
     t.add_done_callback(_on_done)
 
 
+def adopt(t: asyncio.Task) -> None:
+    """接管已有 Task（SSE 断连保活：graph_task 转交后台持有引用，防 GC 取消）。"""
+    _tasks.add(t)
+    t.add_done_callback(_on_done)
+
+
 def pending_count() -> int:
     return len(_tasks)
 
