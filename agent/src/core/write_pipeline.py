@@ -385,6 +385,165 @@ def verify_reference_integrity(output_path: str) -> list:
     return issues
 
 
+# ── v8.4.1 分章写作后统一引用（代码提取暂存 → 全局重编号 → 文末合并）──
+
+_REF_MARKER_RE = re.compile(
+    r"^(?:#{1,3}\s*)?\*{0,2}(?:本章)?参考文献\*{0,2}\s*$")
+_REF_ENTRY_RE = re.compile(
+    r"^\s*(?:\[(\d{1,3})\]|(\d{1,3})[.、）)])\s*(.*)$")
+_CITE_MARKER_RE = re.compile(r"\[(\d{1,3}(?:\s*[,，]\s*\d{1,3})*)\]")
+_DOI_RE = re.compile(r"10\.\d{4,9}/[^\s\]\[)）,，;；]+")
+
+
+def _unify_references(output_path: str) -> dict:
+    """分章写作后统一引用: 提取各章"本章参考文献"→ 全局重编号 → 文末合并。
+
+    背景: 每章 LLM 独立编号（各章都从 [1] 起），正文 [n] 与本章引用区一一对应。
+    统一策略: 按正文引用出现顺序分配全局号；跨章重复条目（DOI 或文本相同）合并
+    为同一全局号；重写正文标记；删除各章引用区；文末追加统一 "## 参考文献"。
+
+    Returns: {"unified": int, "chapters": int, "dropped": [str]}（unified=0 表示
+    未找到任何引用区，文件保持不变）。
+    """
+    target = (_WORKSPACE_ROOT / output_path).resolve()
+    try:
+        content = target.read_text(encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"[WritePipeline] unify refs read failed: {e}")
+        return {"unified": 0, "chapters": 0, "dropped": [str(e)]}
+
+    lines = content.split("\n")
+    preamble: list[str] = []          # # 标题 / ## 摘要 / ## 关键词 等前置块
+    chapters: list[dict] = []         # {"heading": str, "body": [str], "refs": [str]}
+    current: dict | None = None
+    in_refs = False
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            if current is None and (stripped.startswith("## 摘要")
+                                    or stripped.startswith("## 关键词")):
+                preamble.append(line)
+                continue
+            if _REF_MARKER_RE.match(stripped) and current is not None:
+                # "## 本章参考文献" 这类带标题级标记的引用区 → 并入当前章
+                in_refs = True
+                continue
+            if current is not None:
+                chapters.append(current)
+            current = {"heading": line, "body": [], "refs": []}
+            in_refs = False
+            continue
+        if stripped.startswith("# ") and current is None:
+            # 文档标题（## 章级以下才分段）
+            preamble.append(line)
+            continue
+        if current is None:
+            preamble.append(line)
+            continue
+        if not in_refs and _REF_MARKER_RE.match(stripped):
+            in_refs = True
+            continue
+        if in_refs:
+            current["refs"].append(line)
+        else:
+            current["body"].append(line)
+    if current is not None:
+        chapters.append(current)
+
+    # 解析每章引用条目: {local_num: entry_text}
+    chapter_entries: list[dict] = []
+    for ch in chapters:
+        entries: dict[int, str] = {}
+        cur_num: int | None = None
+        cur_text: list[str] = []
+        for line in ch["refs"]:
+            m = _REF_ENTRY_RE.match(line)
+            if m and (m.group(1) or m.group(2)):
+                if cur_num is not None:
+                    entries[cur_num] = "\n".join(cur_text).strip()
+                cur_num = int(m.group(1) or m.group(2))
+                cur_text = [m.group(3)]
+            elif cur_num is not None:
+                cur_text.append(line)
+        if cur_num is not None:
+            entries[cur_num] = "\n".join(cur_text).strip()
+        chapter_entries.append(entries)
+
+    # 全局编号: 按正文引用出现顺序；跨章重复引用（DOI/文本）合并
+    doi_map: dict[str, int] = {}
+    text_map: dict[str, int] = {}
+    global_entries: list[str] = []
+    global_counter = 0
+    dropped: list[str] = []
+
+    new_chapter_bodies: list[str] = []
+    for ch, entries in zip(chapters, chapter_entries):
+        local_map: dict[int, int] = {}
+        body_text = "\n".join(ch["body"])
+
+        def _assign(local: int) -> int:
+            nonlocal global_counter
+            if local in local_map:
+                return local_map[local]
+            entry = entries.get(local)
+            if not entry:
+                dropped.append(f"{ch['heading'][:30]}: 引用[{local}] 无条目，保留原编号")
+                local_map[local] = local
+                return local
+            doi_m = _DOI_RE.search(entry)
+            doi = doi_m.group(0).rstrip(".,;。，；") if doi_m else ""
+            norm = re.sub(r"\s+", " ", entry)[:120]
+            if doi and doi in doi_map:
+                g = doi_map[doi]
+            elif norm and norm in text_map:
+                g = text_map[norm]
+            else:
+                global_counter += 1
+                g = global_counter
+                global_entries.append(entry)
+                if doi:
+                    doi_map[doi] = g
+                if norm:
+                    text_map[norm] = g
+            local_map[local] = g
+            return g
+
+        def _rewrite(m: re.Match) -> str:
+            nums = [int(x) for x in re.split(r"[,，\s]+", m.group(1)) if x.strip()]
+            mapped = [str(_assign(n)) for n in nums]
+            return "[" + ",".join(mapped) + "]"
+
+        new_body = _CITE_MARKER_RE.sub(_rewrite, body_text)
+        # 去掉引用区前残留的分隔线
+        new_body = new_body.rstrip()
+        new_body = re.sub(r"\n*-{3,}\s*$", "", new_body)
+        new_chapter_bodies.append(ch["heading"] + "\n\n" + new_body.strip())
+
+    if global_counter == 0:
+        # 未找到任何引用条目 → 文件保持原样
+        return {"unified": 0, "chapters": len(chapters), "dropped": dropped}
+
+    out = "\n".join(preamble).rstrip() + "\n\n"
+    out += "\n\n".join(new_chapter_bodies)
+    out += "\n\n---\n\n## 参考文献\n\n"
+    out += "\n\n".join(f"[{i+1}] {e}" for i, e in enumerate(global_entries))
+    out += "\n"
+
+    try:
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        tmp.write_text(out, encoding="utf-8")
+        os.replace(tmp, target)
+        logger.info(
+            f"[WritePipeline] 引用统一: {len(global_entries)} 条全局引用, "
+            f"{len(chapters)} 章合并, dropped={len(dropped)}")
+        return {"unified": len(global_entries), "chapters": len(chapters),
+                "dropped": dropped}
+    except Exception as e:
+        logger.warning(f"[WritePipeline] unify refs write failed: {e}")
+        return {"unified": 0, "chapters": len(chapters), "dropped": [str(e)]}
+
+
 def _extract_material_subsets(plan_section: dict, material_pack: list[dict]) -> str:
     """按 refs 从材料包抽取子集（DOI 精确 → 标题模糊 fallback），累计 ≤8000 字符。
 
@@ -566,6 +725,14 @@ async def run_stage2_execute(llm, plan: dict, material_pack: list[dict],
         except Exception:
             pass
         _update_job(f"done {idx+1}/{len(sections)}", "")
+        # v8.4.1: 业务日志——单章完成
+        try:
+            from src.core.business_logger import blog
+            blog("section_done", idx=idx + 1, total=len(sections),
+                 heading=str(section.get("heading", ""))[:40],
+                 chars=len(body), attempts=attempt + 1)
+        except Exception:
+            pass
 
     return {"chapters": len(sections) - len(missing) - len(resume_completed),
             "total_chars": total_chars, "missing_sections": missing,
@@ -794,12 +961,28 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
 
     exec_result = await run_stage2_execute(llm, plan, material_pack, output_path,
                                            task_id=task_id, resume_completed=resume_completed)
+    # v8.4.1: 分章写作后统一引用——各章"本章参考文献"提取合并为文末全局引用
+    unify_info = {"unified": 0}
+    if exec_result["chapters"] > 0 and output_path:
+        try:
+            unify_info = _unify_references(output_path)
+        except Exception as e:
+            logger.warning(f"[WritePipeline] unify refs failed: {e}")
+    try:
+        from src.core.business_logger import blog
+        blog("pipeline_done", chapters=exec_result["chapters"],
+             total_chars=exec_result["total_chars"],
+             missing=len(exec_result["missing_sections"]),
+             refs_unified=unify_info.get("unified", 0),
+             output=output_path[:80])
+    except Exception:
+        pass
     try:
         from src.core.write_pipeline_state import finish_task
         finish_task(task_id, "done" if not exec_result["missing_sections"] else "partial")
     except Exception:
         pass
-    # v8.3.3 写后引用完整性校验（正文 [n] vs 参考文献列表）
+    # v8.3.3 写后引用完整性校验（正文 [n] vs 参考文献列表；统一引用后再校验）
     ref_issues = []
     if exec_result["chapters"] > 0 and output_path:
         ref_issues = verify_reference_integrity(output_path)

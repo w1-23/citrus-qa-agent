@@ -319,7 +319,7 @@ async def expert_load_node(state: AgentState) -> dict:
         ctx = await ctx_mgr.load(session_id, query, mode)
         # v8.4: 收尾装配收敛至 context_manager.finalize_load_result
         # （与 light 图共用，消除双实现漂移）
-        return finalize_load_result(
+        result = finalize_load_result(
             ctx,
             session_manager=session_manager,
             session_id=session_id,
@@ -327,9 +327,25 @@ async def expert_load_node(state: AgentState) -> dict:
             node_label="expert_load",
             log_prefix="ExpertGraph",
         )
+        # v8.4.1: 业务日志——load 结果（排查"看不到历史"类问题的第一现场）
+        try:
+            from src.core.business_logger import blog
+            blog("load_done", raw_msgs=len(ctx.history_messages),
+                 compacted=ctx.compacted,
+                 ltm=bool(ctx.long_term_memory),
+                 resident=bool(ctx.resident_cards),
+                 evidence=bool(result.get("history_evidence_block")))
+        except Exception:
+            pass
+        return result
 
     except Exception as e:
         logger.warning(f"[ExpertGraph:load] failed: {e}")
+        try:
+            from src.core.business_logger import blog
+            blog("load_failed", err=str(e)[:200])
+        except Exception:
+            pass
         result["_trace"] = {"node": "expert_load", "elapsed_ms": 0, "summary": "unavailable"}
         return result
 
@@ -862,6 +878,17 @@ async def supervisor_node(state: AgentState) -> dict:
         f"{len(deduped_main)} main + {len(all_web_results)} web results, "
         f"{elapsed:.0f}ms"
     )
+
+    # v8.4.1: 业务日志——supervisor 完成（回答长度/工具/证据量，排查"回答太短"类问题）
+    try:
+        from src.core.business_logger import blog
+        blog("supervisor_done", answer_chars=len(answer),
+             tools=tool_call_count,
+             tool_names=",".join(tool_names_called[:8]) or "-",
+             main_results=len(deduped_main), web_results=len(all_web_results),
+             ms=int(elapsed))
+    except Exception:
+        pass
 
     # v8.3.7 M3: 假完成检测——回答含 [n] 引用但无检索支撑 → 标记（不强制改写）
     citation_info = check_citation_support(

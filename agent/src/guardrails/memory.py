@@ -10,6 +10,7 @@ Memory System — 多类型记忆存储
 import json
 import logging
 import re
+import sqlite3
 import threading
 from datetime import datetime
 from typing import Dict, List, Optional, Set, Tuple
@@ -231,7 +232,7 @@ class MemoryStore:
             import sqlite3
             from pathlib import Path
             from src.config import PROJECT_ROOT
-            db_path = self.db_path
+            db_path = Path(self.db_path)
             if not db_path.exists():
                 return ""
             with sqlite3.connect(str(db_path)) as conn:
@@ -318,9 +319,8 @@ class MemoryStore:
         import numpy as np
         import sqlite3
         from pathlib import Path
-        from src.config import PROJECT_ROOT
 
-        db_path = self.db_path
+        db_path = Path(self.db_path)
         if not db_path.exists():
             return ""
         with sqlite3.connect(str(db_path)) as conn:
@@ -390,7 +390,7 @@ class MemoryStore:
             import sqlite3
             from pathlib import Path
             from src.config import PROJECT_ROOT
-            db_path = self.db_path
+            db_path = Path(self.db_path)
             if not db_path.exists():
                 return ""
             with sqlite3.connect(str(db_path)) as conn:
@@ -472,7 +472,7 @@ class MemoryStore:
             import sqlite3
             from pathlib import Path
             from src.config import PROJECT_ROOT
-            db_path = self.db_path
+            db_path = Path(self.db_path)
             if not db_path.exists():
                 return {}
             with sqlite3.connect(str(db_path)) as conn:
@@ -494,7 +494,7 @@ class MemoryStore:
             import sqlite3
             from pathlib import Path
             from src.config import PROJECT_ROOT
-            db_path = self.db_path
+            db_path = Path(self.db_path)
             with sqlite3.connect(str(db_path)) as conn:
                 conn.execute(
                     "CREATE TABLE IF NOT EXISTS memory_store ("
@@ -519,7 +519,7 @@ class MemoryStore:
             import sqlite3
             from pathlib import Path
             from src.config import PROJECT_ROOT
-            db_path = self.db_path
+            db_path = Path(self.db_path)
             with sqlite3.connect(str(db_path)) as conn:
                 conn.execute(
                     "CREATE TABLE IF NOT EXISTS memory_store ("

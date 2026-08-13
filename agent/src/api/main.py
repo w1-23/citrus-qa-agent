@@ -147,6 +147,14 @@ async def chat_v2(req: ChatRequest):
 
     logger.info(f"[API v2] mode={mode} session={sid[:8]}... query={query[:60]} req={rid}")
 
+    # v8.4.1: 业务日志（logs/business.log）——按 req= 可串出整条请求链路
+    try:
+        from src.core.business_logger import blog
+        blog("request_start", session=sid[:8], mode=mode,
+             query=query[:120], idem=idem_key[:16])
+    except Exception:
+        pass
+
     from src.graph.graph import build_graph
     from src.graph.state import AgentState
 
@@ -280,6 +288,15 @@ async def chat_v2(req: ChatRequest):
                                 # v8.3.7 M2: 任务完成落状态
                                 jobs_mod.update_job(job_id, status="completed",
                                                     progress_summary=ans[:200])
+                                # v8.4.1: 业务日志
+                                try:
+                                    from src.core.business_logger import blog
+                                    blog("request_done", answer_chars=len(ans),
+                                         tools=output.get("tools_called", 0),
+                                         ms=int((time.perf_counter() - t0) * 1000),
+                                         job=job_id[:12])
+                                except Exception:
+                                    pass
                         elif node_name not in ("light_retrieve",):
                             ans = output.get("answer", "")
                             if ans:
@@ -300,6 +317,11 @@ async def chat_v2(req: ChatRequest):
             except Exception as e:
                 logger.error(f"[SSE v2] graph processing error: {e}")
                 jobs_mod.update_job(job_id, status="failed", error=str(e)[:500])
+                try:
+                    from src.core.business_logger import blog
+                    blog("request_error", err=str(e)[:200])
+                except Exception:
+                    pass
                 try:
                     # v8.3.3: 错误脱敏——详细异常只进日志，SSE 只发用户可读信息
                     await emit_to_client(_encode_event("error", {

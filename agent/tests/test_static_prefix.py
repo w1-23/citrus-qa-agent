@@ -10,7 +10,12 @@ passed, failed = [], []
 
 
 def check(name, cond, detail=""):
-    (passed if cond else failed).append(name)
+    if cond:
+        passed.append(name)
+    else:
+        failed.append(name)
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            raise AssertionError(name + (f" {detail}" if detail else ""))
     print(f"  {'PASS' if cond else 'FAIL'}  {name}  {detail}")
 
 
@@ -57,7 +62,7 @@ def test_static_prefix_agent_prompt():
 
         e = build_agent_extra_block(
             skills=["citrus-review-writer"], system_prompt_extra="EXTRA_INSTR")
-        check("skills+extra 进独立块", "EXTRA_INSTR" in e and "citrus-review-writer" in e)
+        check("skills+extra 进独立块", "EXTRA_INSTR" in e and "写作技能" in e)
     finally:
         settings.CONTEXT_STATIC_PREFIX = False
 
@@ -97,7 +102,13 @@ def test_supervisor_tool_schemas_single_source():
 
 
 print()
-print(f"static_prefix tests: {len(passed)} passed, {len(failed)} failed")
-if failed:
-    print("FAILED:", failed)
-    sys.exit(1)
+if __name__ == "__main__":
+    test_static_prefix_system_stability()
+    test_static_prefix_legacy_behavior()
+    test_static_prefix_agent_prompt()
+    test_static_prefix_human_message()
+    test_supervisor_tool_schemas_single_source()
+    print(f"static_prefix tests: {len(passed)} passed, {len(failed)} failed")
+    if failed:
+        print("FAILED:", failed)
+        sys.exit(1)

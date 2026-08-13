@@ -52,21 +52,28 @@ def _fallback_summary(messages: list) -> str:
 
 
 def _build_prompt(dialogue: str, query: str, prior_summary: str) -> str:
+    # 注意: f-string 表达式不得跨行（Python 3.10/3.11 兼容，PEP 701 3.12 才放开）
+    prior_block = ""
+    if prior_summary:
+        prior_block = (
+            "已有摘要（增量更新，基于它继续整合，不要重复它已覆盖的内容）:\n"
+            + prior_summary[:2000]
+            + "\n"
+        )
     return (
         "你是科研对话压缩专家。将以下多轮对话压缩为一段结构化摘要。\n\n"
         f"Given the user query (当前研究意图): {query[:500] or '(无)'}\n\n"
-        f"{'已有摘要（增量更新，基于它继续整合，不要重复它已覆盖的内容）:\n'
-         + prior_summary[:2000] + chr(10) if prior_summary else ''}"
-        "要求:\n"
-        "1. 保留所有关键科研实体(基因名、病害名、品种名、化合物名等)\n"
-        "2. 保留所有具体数值(浓度、倍数、p值、百分比等)\n"
-        "3. 保留用户的核心研究意图、已达成的共识与关键决策\n"
-        "4. 必须原样保留所有标识符: DOI、evidence_id、artifact_id、chunk_id、"
-        "文件路径、引用编号\n"
-        "5. 保留被引用证据的结论与验证状态(pass/fail)\n"
-        "6. 可丢弃: 工具调用过程细节、错误日志、低相关检索中间结果\n"
-        "7. 仅输出摘要内容, 不要前缀说明\n\n"
-        f"对话历史:\n{dialogue}"
+        + prior_block
+        + "要求:\n"
+        + "1. 保留所有关键科研实体(基因名、病害名、品种名、化合物名等)\n"
+        + "2. 保留所有具体数值(浓度、倍数、p值、百分比等)\n"
+        + "3. 保留用户的核心研究意图、已达成的共识与关键决策\n"
+        + "4. 必须原样保留所有标识符: DOI、evidence_id、artifact_id、chunk_id、"
+        + "文件路径、引用编号\n"
+        + "5. 保留被引用证据的结论与验证状态(pass/fail)\n"
+        + "6. 可丢弃: 工具调用过程细节、错误日志、低相关检索中间结果\n"
+        + "7. 仅输出摘要内容, 不要前缀说明\n\n"
+        + f"对话历史:\n{dialogue}"
     )
 
 

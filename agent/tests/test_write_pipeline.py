@@ -15,7 +15,12 @@ passed, failed = [], []
 
 
 def check(name, cond, detail=""):
-    (passed if cond else failed).append(name)
+    if cond:
+        passed.append(name)
+    else:
+        failed.append(name)
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            raise AssertionError(name + (f" {detail}" if detail else ""))
     print(f"  {'PASS' if cond else 'FAIL'}  {name}  {detail}")
 
 
@@ -402,6 +407,60 @@ def test_evidence_fidelity():
     finish_task(tid, "done")
 
 
+def test_unify_references():
+    import re
+    print("[引用统一] v8.4.1 分章引用 → 文末全局合并")
+    import tempfile
+    from pathlib import Path
+
+    tmp_dir = Path(tempfile.mkdtemp())
+    out_path = f"unify_test_{uuid.uuid4().hex[:6]}.md"
+    target = wp._WORKSPACE_ROOT / out_path
+    sample = (
+        "# 测试综述\n\n## 摘要\n摘要文本\n\n## 关键词\nA, B\n\n"
+        "## 1 第一章\n\n正文提到苹果 [1] 和梨 [2]，还提到苹果与梨 [1,2]。\n\n"
+        "本章参考文献\n\n"
+        "[1] Apple paper. DOI: 10.1000/aaa\n\n"
+        "[2] Pear paper. DOI: 10.1000/bbb\n\n"
+        "## 2 第二章\n\n再次引用苹果 [1]，新增葡萄 [2]。\n\n"
+        "## 本章参考文献\n\n"
+        "[1] Apple paper. DOI: 10.1000/aaa\n\n"
+        "[2] Grape paper. DOI: 10.1000/ccc\n"
+    )
+    target.write_text(sample, encoding="utf-8")
+    try:
+        r = wp._unify_references(out_path)
+        check("统一成功", r["unified"] == 3, f"unified={r['unified']}")
+        final = target.read_text(encoding="utf-8")
+        check("各章引用区已移除", final.count("本章参考文献") == 0)
+        check("文末统一参考文献存在", "## 参考文献" in final)
+        check("苹果跨章合并为同一编号",
+              "Apple paper" in final and final.count("Apple paper") == 1)
+        check("第一章正文标记被重写", "苹果 [1]" in final and "梨 [2]" in final)
+        check("第二章引用重编号（葡萄=3）",
+              "新增葡萄 [3]" in final and "再次引用苹果 [1]" in final)
+        check("复合引用重写", "苹果与梨 [1,2]" in final)
+        check("文献区含 3 条条目",
+              len(re.findall(r"^\[\d\] ", final.split("## 参考文献")[1], re.M)) == 3)
+        check("文献编号与正文一致",
+              "Grape paper" in final and "[3] Grape paper" in final)
+    finally:
+        if target.exists():
+            target.unlink()
+
+    # 无引用章节 → 文件保持原样
+    out_path2 = f"unify_none_{uuid.uuid4().hex[:6]}.md"
+    target2 = wp._WORKSPACE_ROOT / out_path2
+    target2.write_text("# 无引用\n\n## 1 章\n\n正文无引用。\n", encoding="utf-8")
+    try:
+        r2 = wp._unify_references(out_path2)
+        check("无引用不改写", r2["unified"] == 0
+              and "正文无引用" in target2.read_text(encoding="utf-8"))
+    finally:
+        if target2.exists():
+            target2.unlink()
+
+
 def json_doc(obj):
     import json
     return json.dumps(obj, ensure_ascii=False)
@@ -422,6 +481,7 @@ if __name__ == "__main__":
     test_react_fallback()
     test_output_path_fallback()
     test_evidence_fidelity()
+    test_unify_references()
     print(f"\n结果: {len(passed)} passed / {len(failed)} failed")
     if failed:
         print("失败项:", failed)

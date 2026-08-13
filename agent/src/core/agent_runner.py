@@ -178,6 +178,13 @@ async def run_agent(
     llm_error: str = ""
     t_start = time.perf_counter()
 
+    # v8.4.1: 业务日志——子 Agent 启动
+    try:
+        from src.core.business_logger import blog
+        blog("agent_start", agent=agent_name, goal=str(goal)[:100])
+    except Exception:
+        pass
+
     result_content = ""
     turns_taken = 0
 
@@ -374,6 +381,16 @@ async def run_agent(
         f"{len(result_content)} chars, {tool_count} tools, "
         f"{total_time:.0f}ms"
     )
+
+    # v8.4.1: 业务日志——子 Agent 完成
+    try:
+        from src.core.business_logger import blog
+        blog("agent_done", agent=agent_name,
+             turns=turns_taken, tools=tool_count,
+             chars=len(result_content),
+             docs=len(unique_dois), ms=int(total_time))
+    except Exception:
+        pass
 
     return {
         "agent": agent_name,

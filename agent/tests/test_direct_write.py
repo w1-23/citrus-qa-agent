@@ -15,7 +15,12 @@ passed, failed = [], []
 
 
 def check(name, cond, detail=""):
-    (passed if cond else failed).append(name)
+    if cond:
+        passed.append(name)
+    else:
+        failed.append(name)
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            raise AssertionError(name + (f" {detail}" if detail else ""))
     print(f"  {'PASS' if cond else 'FAIL'}  {name}  {detail}")
 
 

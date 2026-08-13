@@ -15,7 +15,12 @@ passed, failed = [], []
 
 
 def check(name, cond, detail=""):
-    (passed if cond else failed).append(name)
+    if cond:
+        passed.append(name)
+    else:
+        failed.append(name)
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            raise AssertionError(name + (f" {detail}" if detail else ""))
     print(f"  {'PASS' if cond else 'FAIL'}  {name}  {detail}")
 
 
@@ -31,9 +36,11 @@ def test_no_fallback():
 def test_supervisor_direct_write():
     print("[职责] supervisor 直写工具")
     expert = open(os.path.join(BASE, 'src', 'graph', 'expert_graph.py'), encoding='utf-8').read()
-    check("_AGENT_TOOLS 含 write_local_file", '"name": "write_local_file"' in expert)
+    # v8.4: 工具 schema 单一来源迁至 tools/supervisor_tools.py
+    schemas = open(os.path.join(BASE, 'src', 'tools', 'supervisor_tools.py'), encoding='utf-8').read()
+    check("_AGENT_TOOLS 含 write_local_file", '"name": "write_local_file"' in schemas)
     check("处理分支存在", 'tc_dict["name"] == "write_local_file"' in expert)
-    check("描述含'原样保存/verbatim'", "verbatim" in expert and "call_write_agent instead" in expert)
+    check("描述含'原样保存/verbatim'", "verbatim" in schemas and "call_write_agent instead" in schemas)
     check("write_local_file 分支执行写盘", "write_local_file.func, path, content, mode" in expert)
 
 

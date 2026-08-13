@@ -13,7 +13,12 @@ passed, failed = [], []
 
 
 def check(name, cond, detail=""):
-    (passed if cond else failed).append(name)
+    if cond:
+        passed.append(name)
+    else:
+        failed.append(name)
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            raise AssertionError(name + (f" {detail}" if detail else ""))
     print(f"  {'PASS' if cond else 'FAIL'}  {name}  {detail}")
 
 
@@ -60,10 +65,24 @@ def test_ag3_early_compaction():
     check("压缩后消息数显著下降", len(r2.messages) < len(long) * 0.35,
           f"{len(r2.messages)} < {len(long)*0.35:.0f}")
 
-    huge = build_history(500)   # 500 轮 ≈ 1.8M tokens → ratio > 93% → TRUNCATE
+    # v8.4 语义: 500 轮(预压缩比 3.5×) → 批量压缩成功 → 视图已收敛 → SUMMARIZE
+    # (TRUNCATE 仅当压缩后视图仍超硬阈值)
+    huge = build_history(500)
     r3 = asyncio.get_event_loop().run_until_complete(budget.check(huge))
-    check("500 轮触发 TRUNCATE", r3.level == ContextBudgetLevel.TRUNCATE,
+    check("500 轮压缩成功 → SUMMARIZE", r3.level == ContextBudgetLevel.SUMMARIZE,
           f"level={r3.level.value}")
+
+    # 真实 TRUNCATE 路径: 压缩产出超长摘要 → 压缩后视图仍 ≥ hard → 硬截断
+    budget2 = ContextBudget(cfg)
+
+    async def huge_summary(msgs, query="", prior_summary=""):
+        return "超长摘要" * 400000   # ~160 万字符 CJK ≈ 192 万 token > 93% 预算
+
+    budget2.set_compact_fn(huge_summary)
+    r4 = asyncio.get_event_loop().run_until_complete(budget2.check(huge))
+    check("压缩后仍超限 → TRUNCATE", r4.level == ContextBudgetLevel.TRUNCATE,
+          f"level={r4.level.value}")
+    check("硬截断后消息数收敛", len(r4.messages) <= 10, f"got {len(r4.messages)}")
 
 
 def test_ag6_persistence_schema():

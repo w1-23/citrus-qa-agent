@@ -8,7 +8,12 @@ passed, failed = [], []
 
 
 def check(name, cond, detail=""):
-    (passed if cond else failed).append(name)
+    if cond:
+        passed.append(name)
+    else:
+        failed.append(name)
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            raise AssertionError(name + (f" {detail}" if detail else ""))
     print(f"  {'PASS' if cond else 'FAIL'}  {name}  {detail}")
 
 
@@ -101,11 +106,26 @@ def test_ltm_combined_ranking():
     # 关键词回退路径（不依赖 embedder 加载）
     out = ms._recall_keyword_fallback("用户所在地", top_k=5, owner_session="", max_chars=1500)
     check("关键词回退可召回", bool(out))
-    check("新版本排前（时间衰减生效）", out.find("新地址B") < out.find("旧地址A"))
+    check("新版本召回", "新地址B" in out)
+    check("30 天旧版本被时间衰减出局(低于 0.30 地板)", "旧地址A" not in out)
+
+    # 5 天前的旧版本仍在衰减地板之上 → 两版本并存，新版本排前
+    with sqlite3.connect(str(tmp)) as conn:
+        conn.execute(
+            "UPDATE ltm_facts SET updated_at=? WHERE fact_value='旧地址A'",
+            ((datetime.now() - timedelta(days=5)).isoformat(),))
+        conn.commit()
+    out2 = ms._recall_keyword_fallback("用户所在地", top_k=5, owner_session="", max_chars=1500)
+    check("两版本并存返回", "新地址B" in out2 and "旧地址A" in out2)
+    check("新版本排前（时间衰减生效）", out2.find("新地址B") < out2.find("旧地址A"))
 
 
 print()
-print(f"memory v2 tests: {len(passed)} passed, {len(failed)} failed")
-if failed:
-    print("FAILED:", failed)
-    sys.exit(1)
+if __name__ == "__main__":
+    test_ltm_add_only()
+    test_ltm_resident_cards()
+    test_ltm_combined_ranking()
+    print(f"memory v2 tests: {len(passed)} passed, {len(failed)} failed")
+    if failed:
+        print("FAILED:", failed)
+        sys.exit(1)

@@ -11,7 +11,12 @@ passed, failed = [], []
 
 
 def check(name, cond, detail=""):
-    (passed if cond else failed).append(name)
+    if cond:
+        passed.append(name)
+    else:
+        failed.append(name)
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            raise AssertionError(name + (f" {detail}" if detail else ""))
     print(f"  {'PASS' if cond else 'FAIL'}  {name}  {detail}")
 
 
@@ -50,7 +55,8 @@ def test_ag16_cards():
 
 def test_n2_tools():
     print("[N2] 工具 description 评审")
-    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'graph', 'expert_graph.py'),
+    # v8.4: supervisor 工具 schema 单一来源已迁至 tools/supervisor_tools.py
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'tools', 'supervisor_tools.py'),
                encoding='utf-8').read()
     check("retrieve 含同义词重试指引", "synonyms" in src)
     check("write 含成文/素材说明", "finished document" in src and "raw material" in src)

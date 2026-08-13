@@ -13,7 +13,12 @@ passed, failed = [], []
 
 
 def check(name, cond, detail=""):
-    (passed if cond else failed).append(name)
+    if cond:
+        passed.append(name)
+    else:
+        failed.append(name)
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            raise AssertionError(name + (f" {detail}" if detail else ""))
     print(f"  {'PASS' if cond else 'FAIL'}  {name}  {detail}")
 
 
@@ -240,7 +245,9 @@ def test_ag5_ltm():
     check("recall 含 max_chars 截断", "max_chars" in src)
     g1 = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'graph', 'expert_graph.py'),
               encoding='utf-8').read()
-    check("save 节点 to_thread 异步化", "asyncio.to_thread(memory_store.extract_key_facts" in g1)
+    # v8.4: LTM 提取转后台 spawn（不阻塞响应），原 to_thread 内联断言更新
+    check("save 节点 LTM 提取后台化", "_extract_and_save_ltm" in g1
+          and "spawn(asyncio.to_thread(" in g1)
     c = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'prompts', 'system', 'constraints.md'),
              encoding='utf-8').read()
     check("constraints 含冲突规则", "跨会话记忆规则" in c)
@@ -418,8 +425,11 @@ def test_ag23_converge_behavior():
                             artifact={"main_results": results})]
 
     ar.PartitionedToolNode.execute_tools = fake_exec
-    orig_chat = ar.ChatOpenAI
-    ar.ChatOpenAI = FakeChat
+    # v8.4: agent_runner 经 llm_pool.get_llm 创建客户端（不再直接用 ChatOpenAI），
+    # 测试改 patch llm_pool 入口
+    import src.core.llm_pool as pool
+    orig_get_llm = pool.get_llm
+    pool.get_llm = lambda **kw: FakeChat(**kw)
     try:
         loop = asyncio.new_event_loop()
         r = loop.run_until_complete(ar.run_agent(
@@ -430,7 +440,7 @@ def test_ag23_converge_behavior():
         check("结果含报告", "检索报告" in r.get("result", ""))
     finally:
         ar.PartitionedToolNode.execute_tools = orig_exec
-        ar.ChatOpenAI = orig_chat
+        pool.get_llm = orig_get_llm
 
 
 def test_ag24_circuit_breaker():

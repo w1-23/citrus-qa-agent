@@ -11,7 +11,12 @@ passed, failed = [], []
 
 
 def check(name, cond, detail=""):
-    (passed if cond else failed).append(name)
+    if cond:
+        passed.append(name)
+    else:
+        failed.append(name)
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            raise AssertionError(name + (f" {detail}" if detail else ""))
     print(f"  {'PASS' if cond else 'FAIL'}  {name}  {detail}")
 
 
@@ -139,7 +144,12 @@ def test_circuit_breaker():
 
 
 print()
-print(f"compaction v2 tests: {len(passed)} passed, {len(failed)} failed")
-if failed:
-    print("FAILED:", failed)
-    sys.exit(1)
+if __name__ == "__main__":
+    test_checkpoint_persistence_append_only()
+    test_batch_compression_and_protection()
+    test_noise_trim_and_identifiers()
+    test_circuit_breaker()
+    print(f"compaction v2 tests: {len(passed)} passed, {len(failed)} failed")
+    if failed:
+        print("FAILED:", failed)
+        sys.exit(1)

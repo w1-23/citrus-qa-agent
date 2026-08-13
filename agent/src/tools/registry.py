@@ -235,6 +235,16 @@ class PartitionedToolNode:
             msg = await _run_single_tool(tool, tc)
             dt_tool = (time.perf_counter() - t_tool) * 1000
             logger.info(f"[PartitionedNode] tool {tool.name} done ({dt_tool:.0f}ms)")
+            # v8.4.1: 业务日志——工具级事件（成功/失败/结果长度，排查检索与工具问题）
+            try:
+                from src.core.business_logger import blog
+                content = str(getattr(msg, "content", ""))
+                blog("tool_done", name=tool.name,
+                     ms=int(dt_tool),
+                     err=content.startswith("[ERR") or content.startswith("[Error"),
+                     chars=len(content))
+            except Exception:
+                pass
             results.append(msg)
         return results
 
