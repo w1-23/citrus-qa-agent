@@ -1055,16 +1055,18 @@ async def expert_save_node(state: AgentState) -> dict:
         spawn(session_manager.save_messages(
             session_id, trace, state.get("idempotency_key", "")))
         # v8.3.8: 证据账本（检索报告 + 结构化清单，跨轮复用）
-        report_text = ""
+        # v8.3.9: 合并全部检索报告（多轮检索不丢） + evidence 保留 chunk_id 可回查原文
+        report_parts = []
         for m in trace:
             if isinstance(m, ToolMessage) and getattr(m, "name", "") == "call_retrieve_agent":
-                report_text = str(m.content)
-                break
+                report_parts.append(str(m.content))
+        report_text = "\n\n---\n\n".join(report_parts)
         main_results = state.get("main_results") or []
         if report_text or main_results:
             evidence = [
                 {
                     "doi": r.get("doi", ""),
+                    "chunk_id": f"{r.get('paper_id', '')}:{r.get('chunk_index', '')}",
                     "title": str(r.get("title", ""))[:150],
                     "score": r.get("score", r.get("rerank_score", 0)) or 0,
                     "snippet": str(r.get("text", "") or r.get("abstract", ""))[:500],

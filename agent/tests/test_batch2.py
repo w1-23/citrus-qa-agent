@@ -665,6 +665,73 @@ def test_ag35_material_fidelity():
     check("单条正文未砍", "x" * 2500 in out2)
 
 
+def test_ag36_compression_pairing():
+    print("[AG-36] 强制压缩后协议配对完整（INV-01/10 压缩路径）")
+    from langchain_core.messages import (HumanMessage, AIMessage,
+                                         ToolMessage, SystemMessage)
+    from src.core.context_budget import ContextBudget, ContextBudgetConfig
+
+    msgs = [SystemMessage(content="sys")]
+    for i in range(6):
+        msgs.append(HumanMessage(content="q%d" % i + "长" * 200))
+        msgs.append(AIMessage(content="", tool_calls=[
+            {"id": "c%d" % i, "name": "call_retrieve_agent", "args": {}}]))
+        msgs.append(ToolMessage(
+            content="[retrieve-agent result] report %d " % i + "证据" * 300,
+            tool_call_id="c%d" % i, name="call_retrieve_agent"))
+        msgs.append(AIMessage(content="answer %d" % i + "回" * 200))
+
+    def check_pairing(r, label):
+        valid = set()
+        for m in r:
+            for tc in (getattr(m, "tool_calls", None) or []):
+                valid.add(tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", ""))
+        orphans = [m for m in r if isinstance(m, ToolMessage)
+                   and m.tool_call_id not in valid]
+        ok = True
+        for i, m in enumerate(r):
+            for tc in (getattr(m, "tool_calls", None) or []):
+                tid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", "")
+                nxt = r[i + 1] if i + 1 < len(r) else None
+                if not (isinstance(nxt, ToolMessage) and nxt.tool_call_id == tid):
+                    ok = False
+        return len(orphans) == 0 and ok
+
+    loop = asyncio.new_event_loop()
+    r1 = loop.run_until_complete(ContextBudget(ContextBudgetConfig(
+        max_tokens=3000, soft_threshold=0.3, hard_threshold=0.6)).check(msgs))
+    r2 = loop.run_until_complete(ContextBudget(ContextBudgetConfig(
+        max_tokens=3000, soft_threshold=0.3, hard_threshold=0.4)).check(msgs))
+    check("SUMMARIZE 后配对完整", check_pairing(r1.messages, "sum"),
+          f"level={r1.level.value} msgs={len(r1.messages)}")
+    check("TRUNCATE 后配对完整", check_pairing(r2.messages, "trunc"),
+          f"level={r2.level.value} msgs={len(r2.messages)}")
+    loop.close()
+
+
+def test_ag37_chunk_id_traceable():
+    print("[AG-37] 证据账本 chunk_id 可回查（INV-09）")
+    from src.session.manager import session_manager
+    from src.core import progress_bus as pb
+    loop = asyncio.new_event_loop()
+    sid = f"cid-{uuid.uuid4().hex[:8]}"
+    evd = [{"doi": "10.1/x", "chunk_id": "P1:3", "title": "T", "score": 0.9,
+            "snippet": "s"}]
+    loop.run_until_complete(session_manager.save_evidence(sid, "q", evd, "报告"))
+    block = session_manager.build_evidence_block(sid, limit=1)
+    check("证据块含 chunk_id", "chunk: P1:3" in block, block[:200])
+    loop.run_until_complete(session_manager.clear_session(sid))
+    loop.close()
+    # 源码断言: save 节点构建 evidence 含 chunk_id
+    eg = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           'src', 'graph', 'expert_graph.py'), encoding='utf-8').read()
+    check("save 节点保留 chunk_id", "chunk_id" in eg and "paper_id" in eg)
+    # 报告合并（多轮检索不丢）
+    lg = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           'src', 'graph', 'light_graph.py'), encoding='utf-8').read()
+    check("报告合并逻辑", "report_parts" in eg and "report_parts" in lg)
+
+
 if __name__ == "__main__":
     test_ag4_session_new()
     test_ag7_timeout_retry()
@@ -692,6 +759,8 @@ if __name__ == "__main__":
     test_ag33_noise_trim()
     test_ag34_evidence_ledger()
     test_ag35_material_fidelity()
+    test_ag36_compression_pairing()
+    test_ag37_chunk_id_traceable()
     print(f"\n结果: {len(passed)} passed / {len(failed)} failed")
     if failed:
         print("失败项:", failed)

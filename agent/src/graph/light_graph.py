@@ -359,16 +359,17 @@ async def save_context_node(state: AgentState) -> dict:
             trace.append(AIMessage(content=answer))
         spawn(session_manager.save_messages(
             session_id, trace, state.get("idempotency_key", "")))
-        # v8.3.8: 证据账本
-        report_text = ""
+        # v8.3.8: 证据账本（v8.3.9: 合并全部报告 + chunk_id 可回查）
+        report_parts = []
         for m in trace:
             if isinstance(m, ToolMessage) and getattr(m, "name", "") == "call_retrieve_agent":
-                report_text = str(m.content)
-                break
+                report_parts.append(str(m.content))
+        report_text = "\n\n---\n\n".join(report_parts)
         main_results = state.get("main_results") or []
         if report_text or main_results:
             evidence = [
                 {"doi": r.get("doi", ""),
+                 "chunk_id": f"{r.get('paper_id', '')}:{r.get('chunk_index', '')}",
                  "title": str(r.get("title", ""))[:150],
                  "score": r.get("score", r.get("rerank_score", 0)) or 0,
                  "snippet": str(r.get("text", "") or r.get("abstract", ""))[:500]}

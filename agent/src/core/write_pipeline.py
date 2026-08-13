@@ -370,7 +370,11 @@ def verify_reference_integrity(output_path: str) -> list:
 
 
 def _extract_material_subsets(plan_section: dict, material_pack: list[dict]) -> str:
-    """按 refs 从材料包抽取子集（DOI 精确 → 标题模糊 fallback），≤2000 字。"""
+    """按 refs 从材料包抽取子集（DOI 精确 → 标题模糊 fallback），累计 ≤8000 字符。
+
+    v8.3.9: 单条正文 3000 安全阀（当前语料零截断），累计 8000 超限截断条数并标记；
+    refs 未匹配项显式反馈（LLM 明确证据缺口）。
+    """
     refs = plan_section.get("refs") or []
     by_doi = {}
     for r in material_pack:

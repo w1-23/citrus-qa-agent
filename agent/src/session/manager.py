@@ -435,14 +435,16 @@ class SessionManager:
             parts.append(f"第 {row['turn_seq']} 轮问题: {row['query'][:120]}")
             if row["report_text"]:
                 parts.append(f"检索报告: {row['report_text'][:1500]}")
-            elif row["evidence_json"]:
-                try:
-                    evd = json.loads(row["evidence_json"])
-                    for i, e in enumerate(evd[:5], 1):
-                        parts.append(
-                            f"  证据[{i}] {e.get('title', '')[:80]} | DOI: {e.get('doi', 'N/A')}")
-                except Exception:
-                    pass
+            try:
+                evd = json.loads(row["evidence_json"])
+            except Exception:
+                evd = []
+            # v8.3.9: 结构化证据概览（标题/DOI 列表，报告之外补充可引用条目）
+            if evd:
+                for i, e in enumerate(evd[:5], 1):
+                    parts.append(
+                        f"  证据[{i}] {e.get('title', '')[:80]} | "
+                        f"DOI: {e.get('doi', 'N/A')} | chunk: {e.get('chunk_id', 'N/A')}")
         return "\n".join(parts)
 
 
