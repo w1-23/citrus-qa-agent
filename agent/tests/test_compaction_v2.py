@@ -122,7 +122,9 @@ def test_circuit_breaker():
         _reset_compaction_failures, _record_compaction_failure)
 
     _reset_compaction_failures("cb_test")
-    async def failing_fn(msgs, query=""):
+    # v8.4.3 工单10: 签名对齐 compact_fn（query/prior_summary 关键字参数），
+    # 熔断必须因设计原因（抛 RuntimeError）触发，而非 TypeError
+    async def failing_fn(msgs, query="", prior_summary=""):
         raise RuntimeError("boom")
 
     budget = ContextBudget(ContextBudgetConfig(max_tokens=1000, soft_threshold=0.0,

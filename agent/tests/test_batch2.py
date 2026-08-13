@@ -289,15 +289,15 @@ def test_ag18_budget_and_converge():
     print("[AG-18] supervisor 工具预算 + retrieve-agent 收敛")
     check("config supervisor.max_tools_per_turn=2", settings.SUPERVISOR_MAX_TOOLS_PER_TURN == 2,
           str(settings.SUPERVISOR_MAX_TOOLS_PER_TURN))
-    check("config retrieve.converge_min_docs=6", settings.RETRIEVE_CONVERGE_MIN_DOCS == 6,
-          str(settings.RETRIEVE_CONVERGE_MIN_DOCS))
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             'src', 'graph', 'expert_graph.py'), encoding='utf-8').read()
     check("expert_graph 含预算截断逻辑", "SUPERVISOR_MAX_TOOLS_PER_TURN" in src
           and "budget" in src)
     runner = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                'src', 'core', 'agent_runner.py'), encoding='utf-8').read()
-    check("agent_runner 含收敛判断", "提前收敛" in runner or "converge" in runner)
+    # v8.4.3 指令A: 移除"≥6 篇强制收敛"（动态阈值已过滤，全部证据应入报告）
+    check("agent_runner 已移除代码级收敛",
+          "提前收敛" not in runner and "RETRIEVE_CONVERGE_MIN_DOCS" not in runner)
 
     from src.core.agent_runner import _count_unique_docs
     docs = [
@@ -367,8 +367,9 @@ def test_ag22_output_routing():
     prom = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                              'src', 'prompts', 'agents', 'retrieve-agent.md'), encoding='utf-8').read()
     check("retrieve 证据清单格式", "核心结论与证据点" in prom)
+    # v8.4.3 指令A: 收敛由模型自然判断（不再按文献数代码强制），保留三阶段与轮次上限
     check("retrieve 三阶段工作流", "阶段 1" in prom and "阶段 3" in prom
-          and "由代码检查进入条件" in prom)
+          and "轮次上限 3 轮" in prom)
     guide = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                               'src', 'prompts', 'system', 'decision_guide.md'), encoding='utf-8').read()
     check("决策指南深度规则", "逐证据引用" in guide and "深度问题生成策略" in guide)
@@ -435,7 +436,7 @@ def test_ag23_converge_behavior():
         r = loop.run_until_complete(ar.run_agent(
             "retrieve-agent", {"goal": "g", "query": "q"}))
         loop.close()
-        check("首轮收集 ≥6 篇 → 提前收敛（第 2 次调用即最终报告）", calls["n"] == 2,
+        check("证据充分后自然完成（第 2 次调用即最终报告）", calls["n"] == 2,
               f"calls={calls['n']}")
         check("结果含报告", "检索报告" in r.get("result", ""))
     finally:

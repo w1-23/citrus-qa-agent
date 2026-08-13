@@ -461,6 +461,35 @@ def test_unify_references():
             target2.unlink()
 
 
+def test_write_receipt_extract():
+    print("[回执] v8.4.3 write-agent 回执提取（禁止裸截断）")
+    import tempfile
+    from pathlib import Path
+    from src.graph.expert_graph import _extract_write_receipt
+
+    # 已含回执 → 原样提取
+    r1 = _extract_write_receipt(
+        "已保存到: test_r.md\n总字符数: 123\n章节数: 2\n参考文献条目数: 3\n一句话摘要: x")
+    check("回执原样提取", "已保存到: test_r.md" in r1 and "参考文献条目数: 3" in r1, r1)
+
+    # 超长全文（无回执）→ 从 Success 行定位路径 → 读文件生成摘要
+    import uuid as _u
+    from src.tools.file_ops import write_local_file as _wlf
+    fname = f"rec_{_u.uuid4().hex[:6]}.md"
+    full = "## 章节一\n内容" * 2000
+    _wlf.func(fname, full, "write")
+    r2 = _extract_write_receipt(
+        f"Success: write to {fname}. Total file size now: 12000 chars (11.7 KB).\n内容预览: x",
+        hint_path="")
+    check("超长全文 → 文件摘要回执", "已保存到:" in r2 and "章节数: 1" in r2
+          and "已按落盘文件生成回执摘要" in r2, r2[:120])
+    (wp._WORKSPACE_ROOT / fname).unlink(missing_ok=True)
+
+    # 无法解析 → 空（调用方回退截断+标记）
+    r3 = _extract_write_receipt("乱七八糟的内容", hint_path="")
+    check("无法解析返回空", r3 == "")
+
+
 def json_doc(obj):
     import json
     return json.dumps(obj, ensure_ascii=False)
@@ -482,6 +511,7 @@ if __name__ == "__main__":
     test_output_path_fallback()
     test_evidence_fidelity()
     test_unify_references()
+    test_write_receipt_extract()
     print(f"\n结果: {len(passed)} passed / {len(failed)} failed")
     if failed:
         print("失败项:", failed)

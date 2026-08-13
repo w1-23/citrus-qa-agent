@@ -203,6 +203,69 @@ def test_hyde_english_validation():
         "The Copia retrotransposon insertion into the Ruby promoter (TSS -1,500 bp) drives fruit coloration."))
 
 
+def test_permission_grant_flow():
+    print("[SF-6] 结构化权限（auto_workspace / ask 授权闭环）")
+    import asyncio as _asyncio
+    from src.tools.registry import _check_tool_sandbox, _is_workspace_output_path
+    from src.config import settings
+    from src.session.manager import SessionManager
+
+    check("workspace/output 路径识别", _is_workspace_output_path("a.md"))
+    check("越界路径不识别", not _is_workspace_output_path("E:/outside/x.md"))
+    check("上级路径不识别", not _is_workspace_output_path("../x.md"))
+
+    loop = _asyncio.new_event_loop()
+
+    # auto_workspace（默认）: workspace 内写文件放行，越界拒绝
+    settings.PERMISSION_MODE = "auto_workspace"
+    r1 = loop.run_until_complete(_check_tool_sandbox(
+        "write_local_file", {"path": "test_perm.md"}))
+    check("auto_workspace 内放行", r1 is None, repr(r1))
+    r2 = loop.run_until_complete(_check_tool_sandbox(
+        "write_local_file", {"path": "E:/outside/x.md"}))
+    check("auto_workspace 越界拒绝", r2 is not None and "ERR_HITL_REJECT" in r2, repr(r2))
+    r3 = loop.run_until_complete(_check_tool_sandbox("citrus_rag_search", {"query": "x"}))
+    check("只读工具放行", r3 is None)
+
+    # ask: 无授权拒绝；workspace 授权后放行；once 授权消费
+    settings.PERMISSION_MODE = "ask"
+    from src.session.manager import session_manager
+    import sqlite3, tempfile
+    from pathlib import Path
+    sm = SessionManager()
+    tmp = Path(tempfile.mkdtemp()) / "sessions.db"
+    sm.db_path = str(tmp)
+    sm._init_db_sync()
+    sm._create_session_sync("perm-test")
+
+    r4 = loop.run_until_complete(_check_tool_sandbox(
+        "write_local_file", {"path": "a.md"}))
+    check("ask 无授权拒绝", r4 is not None and "权限未授权" in r4, repr(r4))
+
+    sm.grant_permission("perm-test", "write_local_file", "once")
+    r6 = loop.run_until_complete(_check_tool_sandbox(
+        "write_local_file", {"path": "a.md"}))
+    check("ask+once 授权放行", r6 is None, repr(r6))
+    r7 = loop.run_until_complete(_check_tool_sandbox(
+        "write_local_file", {"path": "a.md"}))
+    check("once 消费后再次拒绝", r7 is not None, repr(r7))
+
+    sm.grant_permission("perm-test", "write_local_file", "workspace")
+    r5 = loop.run_until_complete(_check_tool_sandbox(
+        "write_local_file", {"path": "a.md"}))
+    check("ask+workspace 授权放行", r5 is None, repr(r5))
+    r5b = loop.run_until_complete(_check_tool_sandbox(
+        "write_local_file", {"path": "a.md"}))
+    check("workspace 授权可复用", r5b is None, repr(r5b))
+
+    sm.grant_permission("other-session", "write_local_file", "session")
+    r8 = loop.run_until_complete(_check_tool_sandbox(
+        "write_local_file", {"path": "E:/outside/x.md"}))
+    check("session 范围不跨会话", r8 is not None, repr(r8))
+    sm._clear_session_sync("perm-test")
+    loop.close()
+
+
 def _restore_llm_pool(orig):
     import src.core.llm_pool as pool
     pool.get_llm = orig
@@ -215,6 +278,7 @@ if __name__ == "__main__":
     test_budget_hard_threshold_forces_final()
     test_history_filter_synth_instruction()
     test_hyde_english_validation()
+    test_permission_grant_flow()
     print(f"supervisor final tests: {len(passed)} passed, {len(failed)} failed")
     if failed:
         print("FAILED:", failed)

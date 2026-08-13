@@ -101,11 +101,13 @@ class Settings(BaseSettings):
     TOP_K_FINAL: int = Field(default_factory=lambda: _yaml_val("retrieval", "top_k_final", default=10))
     RRF_K: int = Field(default_factory=lambda: _yaml_val("retrieval", "rrf_k", default=60))
     RERANK_THRESHOLD: float = Field(default_factory=lambda: _yaml_val("retrieval", "rerank_threshold", default=0.25))
+    # v8.4.3 工单6: HyDE 混合路地板阈值（英文 HyDE 与库分数分布不匹配，0.25 全拦）
+    RERANK_THRESHOLD_HYDE: float = Field(default_factory=lambda: _yaml_val("retrieval", "rerank_threshold_hyde", default=0.15))
     MAX_REACT_STEPS: int = Field(default_factory=lambda: _yaml_val("react", "max_steps", default=5))
     DYNAMIC_THRESHOLD_RATIO: float = Field(default_factory=lambda: _yaml_val("retrieval", "dynamic_threshold_ratio", default=0.60))
     RAG_HYDE_ENABLED: bool = Field(default_factory=lambda: _yaml_val("retrieval", "rag_hyde_enabled", default=True))
-    # v8.3.4: retrieve-agent 去重文献数达到此值即代码级收敛（强制收尾，不再换词重试）
-    RETRIEVE_CONVERGE_MIN_DOCS: int = Field(default_factory=lambda: _yaml_val("retrieval", "converge_min_docs", default=6))
+    # v8.4.3 指令A: RETRIEVE_CONVERGE_MIN_DOCS 已移除（动态阈值已过滤 chunk，
+    # 全部证据应进入报告，代码级收敛不再需要）
     HYDE_MAX_TOKENS: int = Field(default_factory=lambda: _yaml_val("retrieval", "hyde_max_tokens", default=512))
     RRF_WEIGHT_ORIG_DENSE: float = Field(default_factory=lambda: _yaml_val("retrieval", "rrf_weights", "orig_dense", default=1.0))
     RRF_WEIGHT_HYDE_DENSE: float = Field(default_factory=lambda: _yaml_val("retrieval", "rrf_weights", "hyde_dense", default=1.0))
@@ -123,13 +125,16 @@ class Settings(BaseSettings):
     # 死配置已删（对应旧 graph.py check_history/compact_history 节点，代码已无引用；
     # 压缩统一走 context_budget 段的 ContextBudgetConfig）
 
-    # Context Budget (v8.4: 存储全量·发送裁剪——512K 发送视图，压缩只在用户轮边界批量执行)
+    # Context Budget (v8.4: 存储全量·发送裁剪——v8.4.3 视图预算=模型窗口 1M)
     CONTEXT_BUDGET_ENABLED: bool = Field(default_factory=lambda: _yaml_val("context_budget", "enabled", default=True))
-    CONTEXT_BUDGET_MAX_TOKENS: int = Field(default_factory=lambda: _yaml_val("context_budget", "max_tokens", default=512000))
+    CONTEXT_BUDGET_MAX_TOKENS: int = Field(default_factory=lambda: _yaml_val("context_budget", "max_tokens", default=1000000))
     CONTEXT_BUDGET_SOFT_THRESHOLD: float = Field(default_factory=lambda: _yaml_val("context_budget", "soft_threshold", default=0.75))
     CONTEXT_BUDGET_HARD_THRESHOLD: float = Field(default_factory=lambda: _yaml_val("context_budget", "hard_threshold", default=0.93))
     CONTEXT_BUDGET_TARGET_RATIO: float = Field(default_factory=lambda: _yaml_val("context_budget", "target_ratio", default=0.50))
     CONTEXT_BUDGET_PROTECT_RECENT_TURNS: int = Field(default_factory=lambda: _yaml_val("context_budget", "protect_recent_turns", default=3))
+
+    # ── Permission (v8.4.3 结构化权限确认) ──
+    PERMISSION_MODE: str = Field(default_factory=lambda: _yaml_val("permission", "mode", default="auto_workspace"))
 
     # ── Context Engineering (阶段1: 静态前缀灰度开关) ──
     # true = SystemMessage 字节级稳定（format 指南/策略卡片/skills 移出前缀，

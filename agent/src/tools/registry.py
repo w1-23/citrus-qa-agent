@@ -106,14 +106,43 @@ def cleanup_offload_files() -> int:
     return count
 
 
-async def _check_tool_sandbox(tool_name: str, args: dict) -> Optional[str]:
-    """沙箱检查（v8.3.3 内置实现，替代缺失的 engine.sandbox 模块）。
+# v8.4.3: 只读/分析类工具白名单（注册表未初始化时替代 spec 放行，
+# 与 config.yaml tools.registrations 的 readonly 语义一致）
+_READONLY_TOOLS = frozenset({
+    "citrus_rag_search", "academic_search", "pdf_read",
+    "read_local_file", "statistical_analysis", "experimental_design",
+})
 
-    fail-closed 策略:
+
+def _is_workspace_output_path(path: str) -> bool:
+    """write_local_file 路径是否落在 workspace/output 内（auto_workspace 免询问依据）。"""
+    from pathlib import Path
+    from src.config import PROJECT_ROOT
+    try:
+        if not path:
+            return False
+        normalized = str(path).replace("\\", "/")
+        while normalized.startswith("output/") or normalized.startswith("./output/"):
+            normalized = normalized[len("output/"):]
+        target = (PROJECT_ROOT / "workspace" / "output" / normalized).resolve()
+        root = (PROJECT_ROOT / "workspace" / "output").resolve()
+        return str(target).startswith(str(root))
+    except Exception:
+        return False
+
+
+async def _check_tool_sandbox(tool_name: str, args: dict) -> Optional[str]:
+    """沙箱/权限检查（v8.3.3 fail-closed 内置 + v8.4.3 结构化权限）。
+
+    策略:
       - SANDBOX_ENABLED=False → 放行
-      - 已注册且只读/分析类工具 → 放行（检索/读取类）
-      - 命中 SANDBOX_DANGEROUS_PATTERNS 且未在 HITL 放行名单 → 拒绝
-      - 检查异常 → 拒绝执行（fail-closed），不再静默放行
+      - 只读/分析类工具 → 放行（检索/读取/统计类）
+      - 危险模式（delete_*/exec_*/write_*）→ 按 permission_mode:
+          auto_workspace: write_local_file 且路径在 workspace/output 内 → 放行
+          ask: 查 permission_grants（workspace/once/session 范围）→ 放行或
+              拒绝并发 permission_request 事件（前端审批卡片）
+          deny: 一律拒绝
+      - 检查异常 → 拒绝执行（fail-closed）
     """
     try:
         if not getattr(settings, "SANDBOX_ENABLED", True):
@@ -122,14 +151,51 @@ async def _check_tool_sandbox(tool_name: str, args: dict) -> Optional[str]:
         spec = get_tool_spec(tool_name)
         if spec is not None and (spec.is_readonly or spec.category in ("analysis", "agent", "file")):
             return None
+        if tool_name in _READONLY_TOOLS:
+            return None
         dangerous = getattr(settings, "SANDBOX_DANGEROUS_PATTERNS", None) or []
-        if any(fnmatch.fnmatch(tool_name, p) for p in dangerous):
+        if not any(fnmatch.fnmatch(tool_name, p) for p in dangerous):
+            return None
+
+        mode = getattr(settings, "PERMISSION_MODE", "auto_workspace") or "auto_workspace"
+        path = str((args or {}).get("path", "") or "")
+
+        if mode == "auto_workspace":
+            if tool_name == "write_local_file" and _is_workspace_output_path(path):
+                return None
             return (f"[ERR_HITL_REJECT] 沙箱拒绝: 工具 {tool_name} 属危险操作类，"
-                    f"未获执行批准")
+                    f"仅允许写入 workspace/output（permission_mode=auto_workspace）")
+
+        if mode == "ask":
+            try:
+                from src.session.manager import session_manager
+                from src.core.tracing import get_session_id
+                sid = get_session_id()
+                granted = await asyncio.to_thread(
+                    session_manager.consume_grant, sid, tool_name, path)
+                if granted:
+                    return None
+            except Exception:
+                pass
+            # 发结构化权限请求事件 → 前端审批卡片
+            try:
+                from src.core.progress_bus import emit_encoded
+                emit_encoded("permission_request", {
+                    "tool_name": tool_name,
+                    "args": {k: str(v)[:200] for k, v in (args or {}).items()},
+                })
+            except Exception:
+                pass
+            return (f"[ERR_HITL_REJECT] 权限未授权: 工具 {tool_name} "
+                    f"path={path[:120] or '(无)'}（permission_mode=ask，"
+                    f"请在弹出的审批卡片中点击允许）")
+
+        # deny 或未知模式
+        return (f"[ERR_HITL_REJECT] 沙箱拒绝: 工具 {tool_name} 属危险操作类，"
+                f"未获执行批准（permission_mode={mode}）")
     except Exception as e:
         logger.error(f"[Sandbox] 检查异常(fail-closed): {e}")
         return f"[ERR_HITL_REJECT] 沙箱检查失败，已拒绝执行: {e}"
-    return None
 
 
 async def _invoke_tool_with_ctx(ctx: contextvars.Context, tool: BaseTool, args: dict):

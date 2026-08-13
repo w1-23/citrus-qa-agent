@@ -65,17 +65,23 @@ def _count_unique_dois(main_results: list) -> int:
 
 
 def check_citation_support(answer: str, main_results: list,
-                           retrieval_tool_called: bool) -> dict:
-    """v8.3.7 M3: 引用支撑检测——回答含 [n] 引用但无检索支撑 → 标记假完成风险。
+                           retrieval_tool_called: bool,
+                           evidence_count: int = 0,
+                           ltm_chars: int = 0) -> dict:
+    """引用支撑检测——回答含 [n] 引用但无检索支撑 → 标记假完成风险。
 
+    v8.4.3 工单5: 证据感知——支撑来源 = 本轮检索 ∪ 会话证据库(session_evidence)
+    ∪ 长期记忆(LTM)。历史轮次检索的证据（引用编号在会话证据库中）不再误报。
     检测但不强制改写（只标记 + 日志 + 前端轻提示）。
     """
     cited = {int(n) for n in re.findall(r"\[(\d{1,3})\]", answer or "")}
     unique_dois = _count_unique_dois(main_results)
-    supported = bool(retrieval_tool_called) and unique_dois > 0
+    supported = ((bool(retrieval_tool_called) and unique_dois > 0)
+                 or evidence_count > 0 or ltm_chars > 0)
     return {
         "citation_count": len(cited),
         "retrieval_count": unique_dois,
+        "evidence_count": evidence_count,
         "citation_supported": (not cited) or supported,
         "citation_unsupported": bool(cited) and not supported,
         "citation_mismatch": bool(cited) and supported and len(cited) > unique_dois + 2,
@@ -426,6 +432,36 @@ async def _force_final_answer(llm, messages: list, reason: str) -> str:
     return _last_aimessage_content(messages)
 
 
+# v8.4.3 工单7: write-agent 回执提取（超长结果禁止裸截断，见 supervisor 工具回执处理）
+_RECEIPT_RE = re.compile(r"已保存到:\s*(\S+)")
+
+
+def _extract_write_receipt(result_text: str, hint_path: str = "") -> str:
+    """从 write-agent 结果提取结构化回执；失败时读文件生成摘要（禁止裸截断）。"""
+    try:
+        if "已保存到:" in result_text:
+            lines = [l.strip() for l in result_text.splitlines() if l.strip()]
+            return "\n".join(lines[:14])
+        path = ""
+        m = re.search(r"Success: (?:write|append) to ([^\n.]+\.\w+)", result_text)
+        if m:
+            path = m.group(1)
+        elif hint_path:
+            path = hint_path
+        if path:
+            target = (PROJECT_ROOT / "workspace" / "output" / path).resolve()
+            if target.exists():
+                content = target.read_text(encoding="utf-8")
+                sections = len(re.findall(r"^##\s+", content, re.M))
+                refs = len(re.findall(r"^\[\d+\]", content, re.M))
+                return (f"已保存到: {path}\n总字符数: {len(content)}\n"
+                        f"章节数: {sections}\n参考文献条目数: {refs}\n"
+                        f"（内容较长，已按落盘文件生成回执摘要）")
+    except Exception as e:
+        logger.warning(f"[ExpertGraph] write receipt extract failed: {e}")
+    return ""
+
+
 async def supervisor_node(state: AgentState) -> dict:
     query = state.get("query", "")
     format_hint = state.get("format_hint")
@@ -756,13 +792,28 @@ async def supervisor_node(state: AgentState) -> dict:
                 agent_display = sub_result.get("agent", "?")
                 cap = caps.get(agent_display, caps.get("default", 100000))
                 result_text = sub_result.get("result", "") or ""
-                truncated = result_text[:cap]
-                if len(result_text) > cap:
-                    truncated += "\n\n[... 已截断 ...]"
-                    logger.warning(
-                        f"[ExpertGraph] truncated {agent_display} result "
-                        f"{len(result_text)} chars > cap {cap}"
+                # v8.4.3 工单7: write-agent 超长结果禁止裸截断——提取结构化回执
+                # （"已保存到: path..."），失败时读文件生成摘要
+                if agent_display == "write-agent" and len(result_text) > cap:
+                    receipt = _extract_write_receipt(
+                        result_text,
+                        hint_path=str((tc_dict.get("args") or {}).get("output_path", "")),
                     )
+                    if receipt and len(receipt) <= cap:
+                        truncated = receipt
+                    else:
+                        truncated = result_text[:cap] + "\n\n[... 已截断 ...]"
+                        logger.warning(
+                            f"[ExpertGraph] truncated {agent_display} result "
+                            f"{len(result_text)} chars > cap {cap}（回执提取失败）")
+                else:
+                    truncated = result_text[:cap]
+                    if len(result_text) > cap:
+                        truncated += "\n\n[... 已截断 ...]"
+                        logger.warning(
+                            f"[ExpertGraph] truncated {agent_display} result "
+                            f"{len(result_text)} chars > cap {cap}"
+                        )
                 tool_msg_content = f"[{agent_display} result]\n{truncated}"
                 messages.append(ToolMessage(
                     content=tool_msg_content,
@@ -912,13 +963,32 @@ async def supervisor_node(state: AgentState) -> dict:
         pass
 
     # v8.3.7 M3: 假完成检测——回答含 [n] 引用但无检索支撑 → 标记（不强制改写）
+    # v8.4.3 工单5: 证据感知——引用支撑 = 本轮检索 ∪ 会话证据库 ∪ LTM
+    _evidence_count = 0
+    _ltm_chars = 0
+    try:
+        from src.session.manager import session_manager
+        _evidence_count = session_manager.count_evidence_items(session_id)
+    except Exception:
+        pass
+    try:
+        _ltm_chars = len(state.get("long_term_memory") or "")
+    except Exception:
+        pass
     citation_info = check_citation_support(
         answer, all_main_results,
-        "call_retrieve_agent" in tool_names_called)
+        "call_retrieve_agent" in tool_names_called,
+        evidence_count=_evidence_count,
+        ltm_chars=_ltm_chars)
     if citation_info["citation_unsupported"]:
         logger.warning(
             f"[ExpertGraph:supervisor] 假完成风险: 回答含 {citation_info['citation_count']} 个引用"
-            f"但无检索支撑 (retrieval_tools={tool_names_called})")
+            f"但无检索支撑 (retrieval_tools={tool_names_called}, "
+            f"evidence={_evidence_count}, ltm={_ltm_chars})")
+    else:
+        logger.debug(
+            f"[ExpertGraph:supervisor] citations backed: "
+            f"evidence={_evidence_count} ltm={_ltm_chars}")
     if citation_info["citation_mismatch"]:
         logger.warning(
             f"[ExpertGraph:supervisor] 引用异常: {citation_info['citation_count']} 个引用 > "

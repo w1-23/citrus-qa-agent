@@ -11,11 +11,11 @@ retrieval:
     hyde_dense: 1.0          # HyDE 假想答案向量检索权重
     bm25: 1.0                # BM25 词法检索权重
   rerank_threshold: 0.25    # Sigmoid 概率绝对底线阈值
+  rerank_threshold_hyde: 0.15  # v8.4.3: HyDE 混合路地板阈值（英文 HyDE 与库分数分布不匹配，0.25 会全拦）
   dynamic_threshold_ratio: 0.60  # 动态阈值 = top_score * ratio
   web_relevance_threshold: 0.3   # Web 语义过滤阈值（BGE reranker 分数，0=不相关 1=完美匹配）
   rag_hyde_enabled: true         # HyDE: 本地RAG检索前生成英文假想答案提升召回
   hyde_max_tokens: 512           # HyDE 假想答案输出上限（与 prompt 250词约束配套，防截断）
-  converge_min_docs: 6           # v8.3.4: retrieve-agent 去重文献数达到即代码级收敛（强制收尾）
 
 # 学术搜索配置（CrossRef/PubMed/Semantic Scholar/OpenAlex）
 # 根据网络状况选择性启用。大陆网络仅 CrossRef+PubMed 稳定。
@@ -149,8 +149,8 @@ sandbox:
 #    压缩是"发送视图构建"，只在用户轮边界（新请求 load 时）批量执行）──
 context_budget:
   enabled: true
-  max_tokens: 512000           # 发送视图预算(512K)：原始轨迹仍全量存储，仅发送给模型的视图受限
-                               #   —— 防上下文腐化 + 控延迟成本；1M 窗口下软阈值永不触发是设计错误
+  max_tokens: 1000000          # v8.4.3: 发送视图预算=模型窗口(DeepSeek V4 Flash 1M)
+                               #   软阈值 75%(750K) 批量压缩 / 硬阈值 93%(930K) 熔断兜底
   soft_threshold: 0.75         # 视图 ≥75% 时批量压缩（一次压到 ~50%，不逐步挤牙膏——
                                #   每次压缩=一次缓存破坏，批量=只破坏一次）
   hard_threshold: 0.93         # 硬阈值：规则式保护截断 + 强制收尾兜底
@@ -166,6 +166,13 @@ context:
   static_prefix: false          # 阶段1灰度: true = SystemMessage 字节级稳定(格式指南/策略卡片/
                                 #   skills 移出前缀，追加到当前轮 HumanMessage 尾部)，利于
                                 #   DeepSeek 上下文缓存命中；验证后切默认 true
+
+# ── Permission v8.4.3（结构化权限确认）──
+# 权限拒绝不再靠用户打字"确认权限"（被当普通 query 白烧一轮），
+# 由前端审批卡片 + POST /api/v2/permission/grant 闭环。
+permission:
+  mode: auto_workspace          # ask=危险操作弹卡片审批 | auto_workspace=workspace/output 下写文件免询问 |
+                                # deny=一律拒绝危险操作
 
 # ── Fast Guard v8.1.1 ──
 guard:

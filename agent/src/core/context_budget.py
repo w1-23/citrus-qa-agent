@@ -30,7 +30,7 @@ class ContextBudgetLevel(Enum):
 
 @dataclass
 class ContextBudgetConfig:
-    max_tokens: int = 512000          # 发送视图预算
+    max_tokens: int = 1000000         # 发送视图预算（=模型窗口，v8.4.3 由 512K 升 1M）
     soft_threshold: float = 0.75      # ≥75% 批量压缩（一次压到 ~50%）
     hard_threshold: float = 0.93      # ≥93% 规则式保护截断
     target_ratio: float = 0.50        # 批量压缩目标：压到预算 ~50%

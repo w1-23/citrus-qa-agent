@@ -3,6 +3,7 @@ Structured retrieval logger for traceability and manual review.
 Writes query + reranked chunks to timestamped log files.
 """
 import logging
+import os
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from datetime import datetime
@@ -11,6 +12,14 @@ from typing import List, Dict, Optional
 from src.config import PROJECT_ROOT, settings
 
 logger = logging.getLogger(__name__)
+
+
+def _log_dir() -> Path:
+    """v8.4.3 工单10: 日志目录可被 CITRUS_LOG_DIR 覆盖（测试独立 sink，防测试帧污染生产日志）。"""
+    override = os.environ.get("CITRUS_LOG_DIR", "").strip()
+    if override:
+        return Path(override)
+    return PROJECT_ROOT / settings.LOG_DIR
 
 
 class RequestIdFilter(logging.Filter):
@@ -33,7 +42,7 @@ def setup_logging():
     root.setLevel(log_level)
 
     # File handler
-    log_dir = PROJECT_ROOT / settings.LOG_DIR
+    log_dir = _log_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
     file_handler = TimedRotatingFileHandler(
         str(log_dir / "agent.log"), when="midnight",
@@ -70,7 +79,7 @@ class RetrievalLogger:
     """Writes retrieval search records to structured log files."""
 
     def __init__(self):
-        self._log_dir = PROJECT_ROOT / settings.LOG_DIR / "retrieval"
+        self._log_dir = _log_dir() / "retrieval"
         self._log_dir.mkdir(parents=True, exist_ok=True)
 
     def _log_path(self) -> Path:

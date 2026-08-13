@@ -111,6 +111,9 @@ async def chat_v2(req: ChatRequest):
     # v8.3.3: 请求级追踪 ID（日志串线）
     from src.core.tracing import new_request_id
     rid = new_request_id()
+    # v8.4.3: 会话 ID 入 contextvar（工具执行/权限判定需要）
+    from src.core.tracing import set_session_id
+    set_session_id(sid)
     # v8.3.7 M1: 幂等键（客户端稳定 ID 优先，服务端 30s 桶兜底）——重发/重试不重复写历史
     from src.session.manager import compute_idempotency_key
     idem_key = compute_idempotency_key(sid, query, req.client_request_id or "")
@@ -436,6 +439,45 @@ async def hitl_pending():
 async def hitl_resolve():
     """Stub: HITL disabled in v8.1.1."""
     return {"status": "ok"}
+
+
+# ── v8.4.3 结构化权限确认（前端审批卡片闭环）──
+
+class GrantRequest(BaseModel):
+    session_id: str = ""
+    tool_name: str
+    scope: str = "once"   # once | session | workspace
+
+
+@app.post("/api/v2/permission/grant")
+async def permission_grant(req: GrantRequest):
+    """授权工具调用（once/session/workspace 范围）。授权不写入对话历史。"""
+    if req.scope not in ("once", "session", "workspace"):
+        raise HTTPException(status_code=400, detail=f"scope 必须为 once/session/workspace，got {req.scope}")
+    ok = await asyncio.to_thread(
+        session_manager.grant_permission,
+        req.session_id, req.tool_name, req.scope)
+    if not ok:
+        raise HTTPException(status_code=500, detail="授权记录失败")
+    return {"status": "ok", "tool_name": req.tool_name, "scope": req.scope}
+
+
+# ── v8.4.3 运行时配置（前端"上下文概览"面板单一来源，删本地硬编码）──
+
+@app.get("/api/v2/config")
+async def runtime_config():
+    return {
+        "context": {
+            "max_tokens": settings.CONTEXT_BUDGET_MAX_TOKENS,
+            "soft_threshold": settings.CONTEXT_BUDGET_SOFT_THRESHOLD,
+            "hard_threshold": settings.CONTEXT_BUDGET_HARD_THRESHOLD,
+        },
+        "permission_mode": settings.PERMISSION_MODE,
+        "model": {
+            "main": settings.MAIN_MODEL,
+            "fast": settings.FAST_MODEL,
+        },
+    }
 
 
 @app.get("/")

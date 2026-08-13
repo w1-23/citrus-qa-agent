@@ -32,8 +32,8 @@ def build_history(n_turns, tokens_per_msg=1500):
 
 def test_ag3_config_single_source():
     print("[AG-3] 配置单向化")
-    check("settings 读取 max_tokens=512K (v8.4 发送视图)",
-          settings.CONTEXT_BUDGET_MAX_TOKENS == 512000,
+    check("settings 读取 max_tokens=1M (v8.4.3 视图预算=模型窗口)",
+          settings.CONTEXT_BUDGET_MAX_TOKENS == 1000000,
           f"got {settings.CONTEXT_BUDGET_MAX_TOKENS}")
     check("settings 读取 soft=0.75", abs(settings.CONTEXT_BUDGET_SOFT_THRESHOLD - 0.75) < 1e-6,
           f"got {settings.CONTEXT_BUDGET_SOFT_THRESHOLD}")
@@ -50,26 +50,26 @@ def test_ag3_config_single_source():
 
 
 def test_ag3_early_compaction():
-    print("[AG-3] 早期压缩触发 (512K 视图)")
-    cfg = ContextBudgetConfig(max_tokens=512000, soft_threshold=0.75, hard_threshold=0.93)
+    print("[AG-3] 早期压缩触发 (1M 视图)")
+    cfg = ContextBudgetConfig(max_tokens=1000000, soft_threshold=0.75, hard_threshold=0.93)
     budget = ContextBudget(cfg)
 
-    short = build_history(20)   # ~36K tokens → ratio ~7% → NORMAL
+    short = build_history(20)   # ~36K tokens → ratio ~3.6% → NORMAL
     r = asyncio.get_event_loop().run_until_complete(budget.check(short))
     check("20 轮不触发", r.level == ContextBudgetLevel.NORMAL, f"level={r.level.value}")
 
-    long = build_history(110)   # 110 轮 ≈ 397K tokens → ratio ~77% → SUMMARIZE
+    long = build_history(220)   # 220 轮 ≈ 794K tokens → ratio ~79% → SUMMARIZE
     r2 = asyncio.get_event_loop().run_until_complete(budget.check(long))
-    check("110 轮触发 SUMMARIZE", r2.level == ContextBudgetLevel.SUMMARIZE,
+    check("220 轮触发 SUMMARIZE", r2.level == ContextBudgetLevel.SUMMARIZE,
           f"level={r2.level.value}, tokens={budget.estimate_tokens(long)}")
     check("压缩后消息数显著下降", len(r2.messages) < len(long) * 0.35,
           f"{len(r2.messages)} < {len(long)*0.35:.0f}")
 
-    # v8.4 语义: 500 轮(预压缩比 3.5×) → 批量压缩成功 → 视图已收敛 → SUMMARIZE
+    # v8.4 语义: 600 轮(预压缩比 ~2.2×) → 批量压缩成功 → 视图已收敛 → SUMMARIZE
     # (TRUNCATE 仅当压缩后视图仍超硬阈值)
-    huge = build_history(500)
+    huge = build_history(600)
     r3 = asyncio.get_event_loop().run_until_complete(budget.check(huge))
-    check("500 轮压缩成功 → SUMMARIZE", r3.level == ContextBudgetLevel.SUMMARIZE,
+    check("600 轮压缩成功 → SUMMARIZE", r3.level == ContextBudgetLevel.SUMMARIZE,
           f"level={r3.level.value}")
 
     # 真实 TRUNCATE 路径: 压缩产出超长摘要 → 压缩后视图仍 ≥ hard → 硬截断
@@ -126,6 +126,12 @@ def test_ag2_file_semantics():
 
     r1 = write_local_file.func(target.name, "AAA", "write")
     check("首次 write 创建", "Success" in r1 and "write" in r1, r1[:60])
+    # v8.4.3 工单8: 返回含 content_hash（聊天/存盘单一来源一致性断言）
+    check("返回含 sha256", "sha256:" in r1, r1[:80])
+    import hashlib
+    file_hash = hashlib.sha256(
+        target.read_text(encoding="utf-8").encode("utf-8")).hexdigest()[:16]
+    check("sha256 与文件内容一致", "sha256: " + file_hash in r1, r1[:120])
     r2 = write_local_file.func(target.name, "BBB", "write")
     content = target.read_text(encoding="utf-8")
     check("再次 write 覆盖（不叠加）", content == "BBB", repr(content))

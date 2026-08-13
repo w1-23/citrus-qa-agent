@@ -963,8 +963,83 @@ function escapeHtml(s) {
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
+/* v8.4.3: 代码块内容只转义 & < >（引号安全——处于 <pre><code> 标签内部，
+   全量转义会把代码里的 ' 显示成 &#39;，如 5'上游调控区） */
+function escapeHtmlCode(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
 function renderMarkdownSafe(text) {
-  return marked.parse(escapeHtml(text == null ? '' : text));
+  var renderer = new marked.Renderer();
+  var origCode = renderer.code;
+  renderer.code = function(code, lang) {
+    var cls = lang ? ' class="lang-' + escapeHtml(lang) + '"' : '';
+    return '<pre><code' + cls + '>' + escapeHtmlCode(code) + '</code></pre>';
+  };
+  renderer.codespan = function(code) {
+    return '<code>' + escapeHtmlCode(code) + '</code>';
+  };
+  return marked.parse(String(text == null ? '' : text), { renderer: renderer, breaks: true });
+}
+
+/* ─── v8.4.3: 运行时配置（上下文预算/权限模式单一来源，删本地硬编码）─── */
+var _runtimeConfig = null;
+var _lastStreamOnce = null;   /* 权限授权后重放当前请求的钩子 */
+var _pendingPermission = null;
+function _ctxMaxTokens() {
+  if (_runtimeConfig && _runtimeConfig.context && _runtimeConfig.context.max_tokens) {
+    return _runtimeConfig.context.max_tokens;
+  }
+  return 1000000;
+}
+function loadRuntimeConfig() {
+  fetch('/api/v2/config').then(function(r) { return r.json(); })
+    .then(function(cfg) { _runtimeConfig = cfg; })
+    .catch(function() {});
+}
+loadRuntimeConfig();
+
+/* ─── v8.4.3: 权限审批卡片（授权动作不写入对话历史）─── */
+function showPermissionCard(data) {
+  _pendingPermission = data;
+  var existing = document.getElementById('permission-card');
+  if (existing) existing.remove();
+  var card = document.createElement('div');
+  card.id = 'permission-card';
+  card.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:9999;max-width:360px;' +
+    'background:var(--bg-card,#1e2430);border:1px solid rgba(255,180,0,.5);border-radius:10px;' +
+    'padding:14px 16px;box-shadow:0 8px 30px rgba(0,0,0,.45);font-size:13px';
+  var tool = data.tool_name || '工具';
+  var args = data.args || {};
+  var argText = Object.keys(args).map(function(k) { return k + ': ' + String(args[k]).substring(0, 120); }).join('<br>');
+  card.innerHTML =
+    '<div style="font-weight:600;color:#ffb347;margin-bottom:6px">⚠ 权限确认</div>' +
+    '<div style="margin-bottom:4px">工具: <code>' + escapeHtml(tool) + '</code></div>' +
+    (argText ? '<div style="color:var(--text-muted);margin-bottom:10px;word-break:break-all">' + argText + '</div>' : '') +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+    '<button class="need-complex-btn" data-scope="once">允许本次</button>' +
+    '<button class="need-complex-btn" data-scope="session">本会话允许</button>' +
+    '<button class="need-complex-btn" data-scope="workspace">始终允许工作区</button>' +
+    '</div>';
+  card.querySelectorAll('button').forEach(function(btn) {
+    btn.onclick = function() {
+      grantPermission(tool, btn.getAttribute('data-scope'));
+    };
+  });
+  document.body.appendChild(card);
+}
+
+function grantPermission(toolName, scope) {
+  fetch('/api/v2/permission/grant', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, tool_name: toolName, scope: scope }),
+  }).then(function(r) { return r.json(); }).then(function() {
+    var card = document.getElementById('permission-card');
+    if (card) card.remove();
+    _pendingPermission = null;
+    if (_lastStreamOnce) _lastStreamOnce();   /* 授权后重放同请求（幂等不重复写历史） */
+  }).catch(function(e) { alert('授权失败: ' + e.message); });
 }
 
 /* ─── Theme ─── */
@@ -1064,7 +1139,7 @@ function _updateCtxBtnRing(pct) {
 function renderContextPanel(data) {
   _ctxData = data;
   var est = data.estimated_tokens || 0;
-  var max = data.max_tokens || 1000000;
+  var max = data.max_tokens || _ctxMaxTokens();
   var pct = max > 0 ? est / max : 0;
 
   _updateCtxBtnRing(pct);
@@ -1177,7 +1252,7 @@ function renderContextPanel(data) {
   // v8.3.1: 入参即 token 数（调用方自行折算字符→token；context_usage 事件传真实 token）
   _totalTokensUsed += (extraTokens || 0);
   if (!_ctxData) return;
-  var max = _ctxData.max_tokens || 1000000;
+  var max = _ctxData.max_tokens || _ctxMaxTokens();
   var est = (_ctxData.estimated_tokens || 0) + Math.round(_totalTokensUsed);
   var pct = max > 0 ? Math.min(est / max, 1) : 0;
 
@@ -1283,7 +1358,7 @@ async function clearSession() {
     // P3-2: 重置上下文面板（清空后不再残留旧会话数字）
     _ctxData = null;
     _totalTokensUsed = 0;
-    renderContextPanel({ estimated_tokens: 0, max_tokens: 1000000, history_msgs: 0,
+    renderContextPanel({ estimated_tokens: 0, max_tokens: _ctxMaxTokens(), history_msgs: 0,
                          soft_threshold: 0.60, hard_threshold: 0.93 });
   } catch (e) { alert('清空失败: ' + e.message); }
 }
@@ -1448,6 +1523,10 @@ async function sendMsg(isFollowUp) {
       case 'status': handleStatusEvent(data); break;
       case 'context_usage': updateContextTokens((data.delta != null ? data.delta : data.total) || 0); break;
       case 'context_degraded': showBanner('⚠️ 历史会话加载失败，本次回答可能缺少上下文'); break;
+      case 'permission_request':
+        showPermissionCard(data);
+        appendTerminal('⚠ 工具 ' + (data.tool_name || '') + ' 需要权限确认（已弹出审批卡片）');
+        break;
       case 'plan_ready':
         updateStatus('answer', '📑 大纲已生成 (' + (data.sections||[]).length + ' 章)，开始逐章撰写...');
         appendTerminal('📑 大纲: ' + (data.title||'') + ' | 章节: ' + (data.sections||[]).join(' → '));
@@ -1498,22 +1577,39 @@ async function sendMsg(isFollowUp) {
     }
   }
 
-  if (currentAbortController) currentAbortController.abort();
-  currentAbortController = new AbortController();
+  function streamOnce() {
+    /* v8.4.3: 权限授权后重放同一请求（同 clientRequestId → 服务端幂等不重复写历史） */
+    fullText = '';
+    isAnswerStarted = false;
+    renderPending = false;
+    answerDiv.style.display = 'none';
+    answerDiv.innerHTML = '';
+    statusDiv.innerHTML = '';
+    termLog.style.display = 'none';
 
-  try {
-    var response = await fetch(API_URL, {method:'POST',headers:{'Content-Type':'application/json'},signal:currentAbortController.signal,body:JSON.stringify({session_id:sessionId,query:query,client_request_id:clientRequestId,light_mode:currentMode==='light'})});
-    if (!response.ok) { clearTimeout(spinnerTimeout);isCancelled=true;clearStatus();answerDiv.style.display='';answerDiv.innerHTML='<div style="color:var(--error);font-weight:500">⚠ 服务器错误 ('+response.status+')</div>';setSendDisabled(false);userInput.focus();return; }
-    var reader=response.body.getReader(),decoder=new TextDecoder(),buffer='',curEvt='message';
-    while(true){var chunk=await reader.read();if(chunk.done)break;buffer+=decoder.decode(chunk.value,{stream:true});var lines=buffer.split('\n');buffer=lines.pop();
-      for(var j=0;j<lines.length;j++){var line=lines[j];
-        if(line.startsWith('event: '))curEvt=line.substring(7).trim();
-        else if(line.startsWith('data: ')){try{var d=JSON.parse(line.substring(6));try{handleEvent(curEvt,d)}catch(_){}}catch(_){}}
-        else if(line.trim()==='')curEvt='message';
-      }
-    }
-  } catch(err){if(err.name!=='AbortError'){clearTimeout(spinnerTimeout);isCancelled=true;clearStatus();answerDiv.style.display='';answerDiv.innerHTML='<span style="color:var(--error)">请求失败: '+err+'</span>';setSendDisabled(false);}}
-  finally{if(currentAbortController)currentAbortController=null;}
+    if (currentAbortController) currentAbortController.abort();
+    currentAbortController = new AbortController();
+
+    (async function() {
+      try {
+        var response = await fetch(API_URL, {method:'POST',headers:{'Content-Type':'application/json'},signal:currentAbortController.signal,body:JSON.stringify({session_id:sessionId,query:query,client_request_id:clientRequestId,light_mode:currentMode==='light'})});
+        if (!response.ok) { clearTimeout(spinnerTimeout);isCancelled=true;clearStatus();answerDiv.style.display='';answerDiv.innerHTML='<div style="color:var(--error);font-weight:500">⚠ 服务器错误 ('+response.status+')</div>';setSendDisabled(false);userInput.focus();return; }
+        var reader=response.body.getReader(),decoder=new TextDecoder(),buffer='',curEvt='message';
+        while(true){var chunk=await reader.read();if(chunk.done)break;buffer+=decoder.decode(chunk.value,{stream:true});var lines=buffer.split('\n');buffer=lines.pop();
+          for(var j=0;j<lines.length;j++){var line=lines[j];
+            if(line.startsWith('event: '))curEvt=line.substring(7).trim();
+            else if(line.startsWith('data: ')){try{var d=JSON.parse(line.substring(6));try{handleEvent(curEvt,d)}catch(_){}}catch(_){}}
+            else if(line.trim()==='')curEvt='message';
+          }
+        }
+      } catch(err){if(err.name!=='AbortError'){clearTimeout(spinnerTimeout);isCancelled=true;clearStatus();answerDiv.style.display='';answerDiv.innerHTML='<span style="color:var(--error)">请求失败: '+err+'</span>';setSendDisabled(false);}}
+      finally{if(currentAbortController)currentAbortController=null;}
+    })();
+  }
+
+  /* v8.4.3: 权限重放钩子（permission_request 授权后由全局函数调用） */
+  _lastStreamOnce = streamOnce;
+  streamOnce();
 
   function renderCitationItem(item){var du=item.doi&&item.doi!=='N/A'?'https://doi.org/'+encodeURIComponent(item.doi):'#';var b=item.type==='main'?'citation-badge':item.type==='dynamic'?'citation-badge uncited':'citation-badge uncited';var sl=item.type==='dynamic'?'Agent 发现':item.type==='web'?'Web':(item.score?'CE='+item.score.toFixed(3):'');var h='<div class="citation-item" onclick="this.classList.toggle(\'expanded\')">';h+='<div class="citation-header"><span class="'+b+'">['+escapeHtml(item.ref_id)+']</span><span class="citation-score">'+escapeHtml(sl)+'</span></div>';if(item.type==='web'){if(item.url)h+='<a href="'+escapeHtml(item.url)+'" target="_blank" class="citation-doi" onclick="event.stopPropagation()">'+escapeHtml(item.url)+'</a>'}else if(item.doi&&item.doi!=='N/A'){h+='<a href="'+du+'" target="_blank" class="citation-doi" onclick="event.stopPropagation()">'+escapeHtml(item.doi)+'</a>'}if(item.section_name)h+='<div class="citation-text"><strong>Section:</strong> '+escapeHtml(item.section_name)+'</div>';if(item.text_preview)h+='<div class="citation-text">'+escapeHtml((item.text_preview||'').substring(0,250))+'</div>';h+='<div class="citation-detail">';if(item.title)h+='<div class="citation-text"><strong>Title:</strong> '+escapeHtml((item.title||'').substring(0,200))+'</div>';if(item.authors)h+='<div class="citation-text"><strong>Authors:</strong> '+escapeHtml(item.authors)+'</div>';if(item.year)h+='<div class="citation-text"><strong>Year:</strong> '+escapeHtml(item.year)+'</div>';h+='</div></div>';return h}
   function renderRoundSidebar(){if(roundHistory.length===0){sidebarContent.innerHTML='<div class="empty-sidebar">提交问题后文献将在此展示</div>';citationCount.textContent='0';return}var tC=0,tU=0;for(var i=0;i<roundHistory.length;i++){tC+=roundHistory[i].cited.length;tU+=roundHistory[i].uncited.length}citationCount.textContent=(tC+tU);var html='';for(var i=roundHistory.length-1;i>=0;i--){var round=roundHistory[i];var all=[];for(var k=0;k<round.cited.length;k++){if(round.cited[k].type!=='web')all.push(round.cited[k])}for(var k=0;k<round.uncited.length;k++){if(round.uncited[k].type!=='web')all.push(round.uncited[k])}if(all.length===0)continue;var qp=round.query.length>25?round.query.substring(0,25)+'...':round.query;var open=i===roundHistory.length-1;html+='<div class="round-group">';html+='<div class="round-header" onclick="toggleRound(\'round-'+round.roundId+'\')">';html+='<span class="toggle-icon" id="round-'+round.roundId+'-icon">▶</span>';html+='<span class="round-title">Round '+round.roundId+': '+qp+'</span>';html+='<span class="round-count">'+all.length+'</span></div>';html+='<div class="round-body" id="round-'+round.roundId+'"'+(open?'':' style="display:none"')+'>';for(var m=0;m<all.length;m++){html+=renderCitationItem(all[m])}html+='</div></div>'}sidebarContent.innerHTML=html||'<div class="empty-sidebar">本轮未检索到相关文献</div>'}

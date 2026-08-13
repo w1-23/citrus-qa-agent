@@ -142,6 +142,8 @@ class SessionManager:
             conn.commit()
         self._migrate_schema()
         self._ensure_idempotency_index()
+        # v8.4.3: 存量伪造指令一次性 purge（幂等，读时过滤保留为 DEBUG 安全网）
+        self._purge_synth_history()
 
     def _migrate_schema(self):
         """Add columns if missing from older schemas."""
@@ -182,6 +184,112 @@ class SessionManager:
                 conn.commit()
         except Exception as e:
             logger.debug(f"[SessionManager] schema migration: {e}")
+
+    def _purge_synth_history(self):
+        """v8.4.3: 一次性清理存量污染——旧版 supervisor 收尾 bug 写入的伪造
+        "用户指令"（"You have reached the maximum number of turns..."）。
+        读时过滤（_get_messages_sync）只保证新读路径干净，脏行仍留库且每请求
+        触发过滤日志；此处启动期 DELETE 根治，迁移版本标记幂等（参照
+        _ltm_migrated_v2 模式）。修复后新请求不再产生此类消息。
+        """
+        import sqlite3
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    """CREATE TABLE IF NOT EXISTS memory_store (
+                        session_id TEXT NOT NULL,
+                        key TEXT NOT NULL,
+                        value TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY (session_id, key))"""
+                )
+                marked = conn.execute(
+                    "SELECT COUNT(*) FROM memory_store WHERE key='_synth_purge_v843'"
+                ).fetchone()[0]
+                if marked:
+                    return
+                cur = conn.execute(
+                    "DELETE FROM messages WHERE msg_type='human' "
+                    "AND content LIKE ?",
+                    (_SYNTH_FORCE_FINAL_MARK + "%",))
+                deleted = cur.rowcount
+                conn.execute(
+                    "INSERT OR REPLACE INTO memory_store "
+                    "(session_id, key, value, updated_at) VALUES (?, ?, ?, ?)",
+                    ("__system__", "_synth_purge_v843", "1",
+                     datetime.now().isoformat()))
+                conn.commit()
+                if deleted:
+                    logger.info(
+                        f"[SessionManager] 存量污染清理: 删除 {deleted} 条伪造收尾指令")
+        except Exception as e:
+            logger.warning(f"[SessionManager] purge synth history failed: {e}")
+
+    # ── v8.4.3 结构化权限授权（permission_mode=ask 时前端卡片闭环）──
+
+    def _ensure_permission_schema(self, conn) -> None:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS permission_grants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT,
+                tool_name TEXT,
+                scope TEXT,
+                created_at TEXT
+            )"""
+        )
+
+    def grant_permission(self, session_id: str, tool_name: str, scope: str) -> bool:
+        """记录授权（once/session/workspace）。once 由 consume 消费删除。"""
+        import sqlite3
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                self._ensure_permission_schema(conn)
+                conn.execute(
+                    "INSERT INTO permission_grants "
+                    "(session_id, tool_name, scope, created_at) VALUES (?, ?, ?, ?)",
+                    (session_id or "", tool_name or "", scope or "session",
+                     datetime.now().isoformat()))
+                conn.commit()
+            logger.info(f"[SessionManager] 权限授权: tool={tool_name} "
+                        f"scope={scope} session={str(session_id)[:8]}")
+            return True
+        except Exception as e:
+            logger.warning(f"[SessionManager] grant_permission failed: {e}")
+            return False
+
+    def consume_grant(self, session_id: str, tool_name: str, path: str) -> bool:
+        """校验并消费授权。workspace 范围匹配 workspace/output 路径免 session；
+        once 消费即删；session 范围要求 session 匹配。"""
+        import sqlite3
+        try:
+            # 与 registry._is_workspace_output_path 同一口径（相对路径按 workspace/output 解析）
+            in_workspace = False
+            try:
+                from src.tools.registry import _is_workspace_output_path
+                in_workspace = _is_workspace_output_path(str(path or ""))
+            except Exception:
+                in_workspace = False
+            with sqlite3.connect(self.db_path) as conn:
+                self._ensure_permission_schema(conn)
+                rows = conn.execute(
+                    "SELECT id, session_id, scope FROM permission_grants "
+                    "WHERE tool_name=? ORDER BY id DESC",
+                    (tool_name,)).fetchall()
+                for rid, gsid, scope in rows:
+                    if scope == "workspace":
+                        if in_workspace:
+                            return True
+                        continue
+                    if scope == "once":
+                        conn.execute("DELETE FROM permission_grants WHERE id=?", (rid,))
+                        conn.commit()
+                        return True
+                    if scope == "session" and gsid == session_id:
+                        return True
+            return False
+        except Exception as e:
+            logger.warning(f"[SessionManager] consume_grant failed: {e}")
+            return False
 
     def _ensure_idempotency_index(self):
         """幂等唯一索引（v8.3.7 M1）：数据库层兜底，防多进程/竞态重复写。"""
@@ -249,9 +357,10 @@ class SessionManager:
 
                 try:
                     if msg_type == "human":
-                        # v8.4.2: 过滤旧版收尾 bug 写入的伪造"用户指令"（读时幂等清理）
+                        # v8.4.2/8.4.3: 过滤旧版收尾 bug 写入的伪造"用户指令"。
+                        # 启动期已 purge（幂等），此处仅作 DEBUG 级安全网。
                         if content.startswith(_SYNTH_FORCE_FINAL_MARK):
-                            logger.info(
+                            logger.debug(
                                 f"[SessionManager] 过滤历史伪造收尾指令 "
                                 f"(session={session_id[:8]})")
                             continue
@@ -527,6 +636,28 @@ class SessionManager:
                         f"  证据[{i}] {e.get('title', '')[:80]} | "
                         f"DOI: {e.get('doi', 'N/A')} | chunk: {e.get('chunk_id', 'N/A')}")
         return "\n".join(parts)
+
+    def count_evidence_items(self, session_id: str) -> int:
+        """v8.4.3 工单5: 会话证据库条目总数（假完成检测器证据感知用）。"""
+        import sqlite3
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    "SELECT evidence_json FROM session_evidence "
+                    "WHERE session_id=?",
+                    (session_id,)).fetchall()
+            total = 0
+            for row in rows:
+                try:
+                    evd = json.loads(row["evidence_json"] or "[]")
+                    total += len(evd) if isinstance(evd, list) else 1
+                except Exception:
+                    total += 1
+            return total
+        except Exception as e:
+            logger.debug(f"[SessionManager] count_evidence_items failed: {e}")
+            return 0
 
 
 session_manager = SessionManager()

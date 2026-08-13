@@ -123,6 +123,20 @@ async def run_agent(
     elif system_prompt_extra:
         system_content += f"\n\n---\n{system_prompt_extra}"
 
+    # v8.4.3 工单4: skill 注入审计——"匹配了但没用上"排查第一现场
+    if skills or system_prompt_extra:
+        _injected = _extra_block or system_prompt_extra or ""
+        logger.info(
+            f"[AgentRunner] skills injected: agent={agent_name} "
+            f"names={','.join(skills or [])} chars={len(_injected)}"
+        )
+        try:
+            from src.core.business_logger import blog
+            blog("skills_injected", agent=agent_name,
+                 names=",".join(skills or [])[:120], chars=len(_injected))
+        except Exception:
+            pass
+
     tool_names = _resolve_tool_names(agent_name)
     tools = [_TOOL_REGISTRY_BY_NAME[n] for n in tool_names if n in _TOOL_REGISTRY_BY_NAME]
 
@@ -189,26 +203,10 @@ async def run_agent(
     turns_taken = 0
 
     for turn in range(max_turns):
-        # v8.3.4: retrieve-agent 代码级收敛——去重文献数达标 → 强制收尾输出报告，
-        # 不再进入下一轮检索（"max turns forcing final" 只在确有必要时出现）
-        if (agent_name == "retrieve-agent" and turn > 0
-                and _count_unique_docs(collected_artifacts["main_results"])
-                >= settings.RETRIEVE_CONVERGE_MIN_DOCS):
-            logger.info(
-                f"[AgentRunner] {agent_name} 提前收敛: 去重文献 ≥ "
-                f"{settings.RETRIEVE_CONVERGE_MIN_DOCS} 篇，强制输出检索报告"
-            )
-            messages.append(HumanMessage(content=(
-                "已收集到足够的相关文献，立即停止检索，"
-                "直接输出最终结构化检索报告（检索结论 / 关键文献 / 信息缺口）。")))
-            try:
-                # v8.4: 收尾保持带工具客户端（载荷结构一致，缓存友好）
-                final_resp = await llm_with_tools.ainvoke(messages)
-                if final_resp.content:
-                    result_content = final_resp.content
-            except Exception as e:
-                logger.warning(f"[AgentRunner] {agent_name} converge-final failed: {e}")
-            break
+        # v8.4.3 指令A: 移除"≥6 篇强制收敛"——动态阈值已过滤 chunk，检索到的
+        # 全部证据都应进入最终报告（旧收敛曾导致模型输出 34~176 字的极短报告，
+        # 证据几乎没进 supervisor 上下文）。收敛交还模型自然判断（无 tool_calls
+        # 即完成），max_turns 兜底。
         turns_taken = turn + 1
         t_llm = time.perf_counter()
         response = None
@@ -339,15 +337,24 @@ async def run_agent(
             pass
         else:
             logger.info(f"[AgentRunner] {agent_name} max turns, forcing final")
-            messages.append(HumanMessage(content=(
-                "You have reached the maximum number of turns. "
-                "Do NOT call any more tools. "
-                "Provide your final answer based on the information you have. "
-                "If information is insufficient, state what is missing."
-            )))
+            # v8.4.3 指令A: retrieve-agent 收尾要求输出完整证据报告（全部检索到的 chunk）
+            if agent_name == "retrieve-agent":
+                final_prompt = (
+                    "已到达检索轮次上限。请立即输出最终结构化检索报告，"
+                    "包含本轮检索到的**全部**证据（逐条列出: 编号/标题/DOI/"
+                    "关键结论与数值），不要遗漏任何一条；最后说明信息缺口。"
+                )
+            else:
+                final_prompt = (
+                    "You have reached the maximum number of turns. "
+                    "Do NOT call any more tools. "
+                    "Provide your final answer based on the information you have. "
+                    "If information is insufficient, state what is missing."
+                )
+            # v8.4.3: 收尾消息不写入 messages（临时列表），避免进 turn_trace/历史
             try:
-                # v8.4: 收尾保持带工具客户端（载荷结构一致，缓存友好）
-                final_resp = await llm_with_tools.ainvoke(messages)
+                final_resp = await llm_with_tools.ainvoke(
+                    messages + [HumanMessage(content=final_prompt)])
                 if final_resp.content:
                     result_content = final_resp.content
             except Exception:

@@ -225,13 +225,20 @@ async def light_supervisor_node(state: AgentState) -> dict:
 
         else:
             logger.info("[LightGraph:supervisor] max turns, forcing final")
-            messages.append(HumanMessage(content=(
-                "You have reached the maximum number of turns. "
-                "Do NOT call any more tools. Provide your final answer now."
-            )))
-            # v8.4: 收尾保持带工具客户端（请求载荷结构一致，前缀缓存友好）
-            final_resp = await llm.ainvoke(messages)
+            # v8.4.3 工单7: 与 expert 统一——详尽中文措辞 + 临时列表（不入 turn_trace/历史）
+            # + 未绑工具客户端（杜绝收尾再发 tool_calls 导致空答）
+            final_prompt = (
+                "请立即给出最终回答：基于已检索的全部证据，完整、详尽、结构化地作答；"
+                "不要精简、不要省略、不要提及工具或轮次限制；信息不足请逐条说明缺口。"
+            )
+            final_resp = await _build_light_llm().ainvoke(
+                messages + [HumanMessage(content=final_prompt)])
             answer = final_resp.content or ""
+            if not answer:
+                for m in reversed(messages):
+                    if getattr(m, "content", None):
+                        answer = m.content
+                        break
 
     except Exception as e:
         logger.error(f"[LightGraph:supervisor] error: {e}")

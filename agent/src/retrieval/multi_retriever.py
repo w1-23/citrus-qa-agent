@@ -63,12 +63,27 @@ class MultiBatchRetriever:
                 raise
 
     def close(self):
-        """Release Qdrant file locks so next startup can load all batches."""
+        """Release Qdrant file locks so next startup can load all batches.
+
+        v8.4.3 工单10: 关闭后删除本实例持有的 .lock——否则每次启动都触发
+        "cleaned stale lock" 噪音（进程退出不释放锁文件）。
+        """
         for batch_name, (client, _) in list(self.batches.items()):
             try:
                 client.close()
             except Exception:
                 pass
+        try:
+            if self.data_dir.exists():
+                for batch_dir in sorted(self.data_dir.iterdir()):
+                    lock = batch_dir / "qdrant_data" / ".lock"
+                    if lock.exists():
+                        try:
+                            lock.unlink()
+                        except Exception:
+                            pass
+        except Exception:
+            pass
         self.batches.clear()
         self.global_chunks.clear()
         self._initialized = False
@@ -269,6 +284,17 @@ class MultiBatchRetriever:
                     c["year"] = year
             enriched += 1
 
+        # v8.4.3 工单10: 空 paper_id 论文被跳过 → title 缺失兜底（首行正文/section/DOI）
+        for c in self.global_chunks:
+            if c.get("title"):
+                continue
+            first_line = next(
+                (l.strip() for l in str(c.get("text", "")).splitlines()
+                 if l.strip() and len(l.strip()) > 8), None)
+            c["title"] = (first_line
+                          or str(c.get("section_name") or "").strip()
+                          or c.get("doi") or "Untitled")[:120]
+
         with_title = sum(1 for c in self.global_chunks if c.get("title"))
         with_year = sum(1 for c in self.global_chunks if c.get("year"))
         logger.info(
@@ -416,9 +442,19 @@ class MultiBatchRetriever:
             logger.info("[Retriever] HyDE: no reranked results, falling back to original search")
             return self.search(original_query)
 
+        # v8.4.3 工单6: HyDE 混合路分数分布与基础路不同（英文 HyDE 与库分数分布
+        # 不匹配导致 0.25 地板全拦）——HyDE 路地板降至 0.15 + 记录分布供校准
+        scores = sorted(c.get("rerank_score", 0) for c in reranked)
+        p50 = scores[len(scores) // 2] if scores else 0
+        p90 = scores[int(len(scores) * 0.9)] if scores else 0
+        logger.info(
+            f"[Retriever] HyDE rerank scores: top={scores[-1] if scores else 0:.4f} "
+            f"p50={p50:.4f} p90={p90:.4f} n={len(scores)}")
+
         top_score = reranked[0].get("rerank_score", 0)
         dynamic_thresh = top_score * settings.DYNAMIC_THRESHOLD_RATIO
-        final_threshold = max(settings.RERANK_THRESHOLD, dynamic_thresh)
+        hyde_floor = getattr(settings, "RERANK_THRESHOLD_HYDE", 0.15)
+        final_threshold = max(hyde_floor, dynamic_thresh)
         passed = [c for c in reranked if c.get("rerank_score", 0) >= final_threshold]
         if not passed:
             logger.warning(f"[Retriever] HyDE: threshold {final_threshold:.4f} blocked all, falling back")
