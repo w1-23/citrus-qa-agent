@@ -119,15 +119,23 @@ class Settings(BaseSettings):
     TEMPERATURE_MAIN: float = Field(default_factory=lambda: _yaml_val("chat", "temperature_main", default=0.2))
     TEMPERATURE_FAST: float = Field(default_factory=lambda: _yaml_val("chat", "temperature_fast", default=0.0))
     MAX_TOKENS: int = Field(default_factory=lambda: _yaml_val("chat", "max_tokens", default=4096))
-    RECENT_CONTENT_MAX_CHARS: int = Field(default_factory=lambda: _yaml_val("chat", "recent_content_max_chars", default=800))
-    COMPACT_MAX_TOKENS: int = Field(default_factory=lambda: _yaml_val("context_budget", "compact_max_tokens", default=800))
-    FALLBACK_CONTENT_MAX_CHARS: int = Field(default_factory=lambda: _yaml_val("chat", "fallback_content_max_chars", default=300))
+    # v8.4 清理: RECENT_CONTENT_MAX_CHARS / COMPACT_MAX_TOKENS / FALLBACK_CONTENT_MAX_CHARS
+    # 死配置已删（对应旧 graph.py check_history/compact_history 节点，代码已无引用；
+    # 压缩统一走 context_budget 段的 ContextBudgetConfig）
 
-    # Context Budget (v8.3.1: 配置单向化，图内不再硬编码)
+    # Context Budget (v8.4: 存储全量·发送裁剪——512K 发送视图，压缩只在用户轮边界批量执行)
     CONTEXT_BUDGET_ENABLED: bool = Field(default_factory=lambda: _yaml_val("context_budget", "enabled", default=True))
-    CONTEXT_BUDGET_MAX_TOKENS: int = Field(default_factory=lambda: _yaml_val("context_budget", "max_tokens", default=1000000))
-    CONTEXT_BUDGET_SOFT_THRESHOLD: float = Field(default_factory=lambda: _yaml_val("context_budget", "soft_threshold", default=0.60))
+    CONTEXT_BUDGET_MAX_TOKENS: int = Field(default_factory=lambda: _yaml_val("context_budget", "max_tokens", default=512000))
+    CONTEXT_BUDGET_SOFT_THRESHOLD: float = Field(default_factory=lambda: _yaml_val("context_budget", "soft_threshold", default=0.75))
     CONTEXT_BUDGET_HARD_THRESHOLD: float = Field(default_factory=lambda: _yaml_val("context_budget", "hard_threshold", default=0.93))
+    CONTEXT_BUDGET_TARGET_RATIO: float = Field(default_factory=lambda: _yaml_val("context_budget", "target_ratio", default=0.50))
+    CONTEXT_BUDGET_PROTECT_RECENT_TURNS: int = Field(default_factory=lambda: _yaml_val("context_budget", "protect_recent_turns", default=3))
+
+    # ── Context Engineering (阶段1: 静态前缀灰度开关) ──
+    # true = SystemMessage 字节级稳定（format 指南/策略卡片/skills 移出前缀，
+    #        追加到当前轮 HumanMessage 尾部），利于 DeepSeek 上下文缓存命中；
+    # false = 旧行为（动态内容进 SystemMessage，前缀每次请求重算）
+    CONTEXT_STATIC_PREFIX: bool = Field(default_factory=lambda: _yaml_val("context", "static_prefix", default=False))
 
     # 5. Tools Parameters
     # v8.3.3: MAX_TOOL_CALLS 死配置已删除（无引用）

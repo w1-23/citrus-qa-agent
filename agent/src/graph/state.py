@@ -26,6 +26,7 @@ class AgentState(TypedDict, total=False):
 
     history_summary: Optional[str]
     long_term_memory: Optional[str]
+    resident_cards: Optional[str]     # v8.4: 常驻卡片（双层记忆"概览"层）
     search_suggestions: list[str]
     format_hint: Optional[str]
 

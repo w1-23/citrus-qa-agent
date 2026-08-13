@@ -63,49 +63,8 @@ chat:
   max_tokens: 4096
     # 每次 LLM 生成的最大 token 数。涵盖了主回答的输出长度上限。
     # 注意：仍受模型上下文窗口和已消耗 token 的双重限制。
-  history_compact_threshold: 3
-    # 在 graph.py 的 check_history 节点中：当 state["messages"] 中 human 消息数 > 此值，
-    # 路由到 compact_history 节点执行历史压缩。
-    # 3 轮对话经验值：太早压缩丢失上下文，太晚压缩浪费 token。
-    # 设为 0 则每轮都压缩（激进节约 token）；设为 99 则永不压缩。
-  compact_threshold_messages: 6
-    # 在 history_compactor.compact() 中：传入的过滤后历史列表长度 > 此值才真正调用 LLM 压缩。
-    # 与 history_compact_threshold 的关系：后者是路由条件（粗粒度），此值是执行条件（细粒度）。
-    # 例如 history_compact_threshold=3 路由到 compact，但过滤后只有 5 条消息则跳过压缩。
-    # 6 = 3轮对话（3条human + 3条assistant，过滤掉tool_call消息后通常4~5条）。
-  recent_messages_window: 4
-    # 短期工作记忆窗口大小。控制 context_builder / query_expansion / stateless_rag_service 中
-    # 截取最近几条对话作为 LLM 的短时上下文。值越大给模型更多上下文但增加 token 消耗。
-    # 4 条 = 最近 2 轮对话（2问2答）。
-  recent_content_max_chars: 800
-    # context_builder.build_messages() 组装近期对话时，每条 assistant 消息最多截取的字数。
-    # 控制短期记忆注入 prompt 的大小。超过部分被截断，不包含 [x] 引用编号。
-    # 800 字约等于 1 段详细回答，过长会增加无用上下文。
-  expansion_content_max_chars: 400
-    # query_expansion.generate_options() 查询扩展时，每条历史消息最多截取的字数。
-    # 查询扩展不需要完整回答内容，只需要理解话题上下文，所以比 recent_content_max_chars 更短。
-  compact_content_max_chars: 400
-    # history_compactor.compact() 构造压缩输入时，每条历史消息最多截取的字数。
-    # 控制送入压缩 LLM 的每条消息长度。值越大保留更多细节但增加压缩 API 的成本和延迟。
-    # 400 字约 = 1 段核心结论 + 1 个关键数值，超过部分在压缩阶段会被丢弃。
-    # 与 compact_max_tokens 配合：每条截断 400 × 6条 = 2400 输入，输出约 500 tokens 摘要。
-    # 若单条回答特别长（如包含表格、多段引用），此值可适当提高至 600。
-  compact_max_tokens: 800
-    # 压缩器 LLM 调用时 output 的 max_tokens 上限。控制摘要输出的精细度。
-    # 500 tokens ≈ 1500 中文字符，实际模型输出通常 300~500 字，压缩率约 70~80%。
-    # 提高此值 → 摘要保留更多细节（降低信息丢失风险），但压缩后仍然注入后续 prompt，
-    #   占用上下文窗口，变相增加 token 成本。
-    # 降低此值 → 摘要更精简，节省 token，但可能丢失关键实体或数值。
-    # 建议：若科研讨论涉及精确数值（如 "p<0.05, 浓度 0.5μM"），800 更稳妥。
-  compact_timeout: 10
-    # 压缩器 LLM API 调用的超时秒数。超时后触发生成的 fallback（保留最近 N 条原始消息）。
-    # 网络不稳定时可适当提高，避免因超时导致每次 fallback 跳过压缩。
-  fallback_messages_window: 4
-    # 压缩 LLM API 调用失败时，fallback 保留的最近消息条数。
-    # 4 = 保留最近 2 轮对话的原始内容作为摘要，至少保证下一次 LLM 有基础上下文。
-  fallback_content_max_chars: 300
-    # fallback 场景下每条消息截取的字数。比 compact_content_max_chars 更短，
-    # 因为 fallback 是原始文本直接注入，没有经过压缩提炼，需要更严格的长度控制。
+    # v8.4 清理: 旧 graph.py 压缩参数（history_compact_threshold 等）已随
+    # check_history/compact_history 节点删除，压缩统一走 context_budget 段
 
 graph:
   recursion_limit: 25            # main.py
@@ -186,16 +145,27 @@ sandbox:
     - exec_*
     - write_*
 
-# ── Context Budget v8.3.1（配置单向化：图内统一读此段，勿再硬编码）──
+# ── Context Budget v8.4（存储全量·发送裁剪：SQLite 轨迹 append-only 永不改写，
+#    压缩是"发送视图构建"，只在用户轮边界（新请求 load 时）批量执行）──
 context_budget:
   enabled: true
-  max_tokens: 1000000           # 对齐 DeepSeek V4 Flash 实际窗口(1M)
-  soft_threshold: 0.60          # 早期压缩：约 60% 窗口(~600K tokens, 60-150 轮长会话)触发摘要，
-                                #   将每轮输入 token 拉回常数级，控延迟与成本。压缩 LLM 用 main 模型
-  hard_threshold: 0.93          # 硬截断兜底
+  max_tokens: 512000           # 发送视图预算(512K)：原始轨迹仍全量存储，仅发送给模型的视图受限
+                               #   —— 防上下文腐化 + 控延迟成本；1M 窗口下软阈值永不触发是设计错误
+  soft_threshold: 0.75         # 视图 ≥75% 时批量压缩（一次压到 ~50%，不逐步挤牙膏——
+                               #   每次压缩=一次缓存破坏，批量=只破坏一次）
+  hard_threshold: 0.93         # 硬阈值：规则式保护截断 + 强制收尾兜底
+  target_ratio: 0.50           # 批量压缩目标：压到预算 ~50%
+  protect_recent_turns: 3      # 保护名单：最近 3 轮 Q/A 不压缩（当前用户意图/被引用证据/DOI 等标识符
+                               #   由压缩提示词保证保留）
+  keep_recent_turns: 2         # TRUNCATE 硬截断时保留最近轮数
   summarize_ratio: 0.70
-  keep_recent_turns: 2
   compact_max_tokens: 800
+
+# ── Context Engineering v8.4 ──
+context:
+  static_prefix: false          # 阶段1灰度: true = SystemMessage 字节级稳定(格式指南/策略卡片/
+                                #   skills 移出前缀，追加到当前轮 HumanMessage 尾部)，利于
+                                #   DeepSeek 上下文缓存命中；验证后切默认 true
 
 # ── Fast Guard v8.1.1 ──
 guard:

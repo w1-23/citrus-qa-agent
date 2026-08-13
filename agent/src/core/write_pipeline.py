@@ -38,6 +38,22 @@ CHAR_TARGET_RE = re.compile(r"(\d{3,})\s*(?:字|字符)")
 
 _WORKSPACE_ROOT = (PROJECT_ROOT / "workspace" / "output").resolve()
 
+# v8.4: 固定系统提示（字节级稳定，动态任务要求一律放 HumanMessage——
+# 书 2.3 铁律: system 前缀不动，动态内容追加末尾；此前全部内容塞单条
+# SystemMessage，前缀随任务变化）
+_WRITE_SYSTEM_PROMPT = (
+    "你是柑橘科研领域的中文写作专家。"
+    "请严格遵循用户消息中的任务要求、材料引用规则与输出格式。"
+)
+
+
+def _call_llm(llm, prompt: str):
+    """[System(固定) + Human(动态)] 消息结构统一入口。"""
+    return llm.ainvoke([
+        SystemMessage(content=_WRITE_SYSTEM_PROMPT),
+        HumanMessage(content=prompt),
+    ])
+
 # ─────────────────────────────────────────────
 # 1. 写任务分类（四路路由）
 # ─────────────────────────────────────────────
@@ -214,7 +230,7 @@ async def run_stage1_plan(llm, material_pack: list[dict], target_chars: int) -> 
     plan_text = ""
     for attempt in range(retries + 1):
         try:
-            resp = await llm.ainvoke([SystemMessage(content=prompt)])
+            resp = await _call_llm(llm, prompt)
         except Exception as e:
             logger.warning(f"[WritePipeline] plan LLM failed (attempt {attempt+1}): {e}")
             await asyncio.sleep(2)
@@ -256,7 +272,7 @@ async def _react_fallback_write(llm, goal: str, plan_text: str, material_pack: l
               f"要求: 一次输出完整 Markdown 文档（# 标题 + 摘要 + 分章节），"
               f"控制在 3000 字以内，宁精勿滥。")
     try:
-        resp = await asyncio.wait_for(llm.ainvoke([SystemMessage(content=prompt)]),
+        resp = await asyncio.wait_for(_call_llm(llm, prompt),
                                       timeout=settings.PIPELINE_SECTION_TIMEOUT * 3)
         content, _ = extract_summary((resp.content or "").strip())
     except Exception as e:
@@ -473,7 +489,7 @@ async def run_stage2_execute(llm, plan: dict, material_pack: list[dict],
         resp_content = ""
         for attempt in range(3):
             try:
-                resp = await asyncio.wait_for(llm.ainvoke([SystemMessage(content=prompt)]),
+                resp = await asyncio.wait_for(_call_llm(llm, prompt),
                                               timeout=settings.PIPELINE_SECTION_TIMEOUT)
                 resp_content = (resp.content or "").strip()
                 break
@@ -495,7 +511,7 @@ async def run_stage2_execute(llm, plan: dict, material_pack: list[dict],
                     f"请压缩到 {max_per_section} 字以内：保留核心内容与要点、删除冗余修饰与重复表述，"
                     f"并照常输出 <summary> 标签。】")
                 resp = await asyncio.wait_for(
-                    llm.ainvoke([SystemMessage(content=condensed_prompt)]),
+                    _call_llm(llm, condensed_prompt),
                     timeout=settings.PIPELINE_SECTION_TIMEOUT)
                 condensed, summary2 = extract_summary((resp.content or "").strip())
                 if condensed and len(condensed) <= max_per_section:
@@ -615,7 +631,7 @@ async def modify_document(llm, output_path: str, target_section: str, user_goal:
         prompt_file = _read_prompt("write-section.md")
         prompt = (f"{prompt_file}\n\n---\n全文已有章节: {[s['heading'] for s in sections]}\n"
                   f"任务: 新增章节 — {user_goal}\n材料: {_format_material_pack(material_pack, 8)}")
-        resp = await asyncio.wait_for(llm.ainvoke([SystemMessage(content=prompt)]),
+        resp = await asyncio.wait_for(_call_llm(llm, prompt),
                                       timeout=settings.PIPELINE_SECTION_TIMEOUT)
         body, _ = extract_summary((resp.content or "").strip())
         if not SECTION_HEADING_RE.search(body):
@@ -634,7 +650,7 @@ async def modify_document(llm, output_path: str, target_section: str, user_goal:
               f"用户要求: {user_goal}\n"
               f"原章节内容:\n{old_body[:2000]}\n\n"
               f"相关材料:\n{_format_material_pack(material_pack, 8)}")
-    resp = await asyncio.wait_for(llm.ainvoke([SystemMessage(content=prompt)]),
+    resp = await asyncio.wait_for(_call_llm(llm, prompt),
                                   timeout=settings.PIPELINE_SECTION_TIMEOUT)
     new_body, _ = extract_summary((resp.content or "").strip())
     if not SECTION_HEADING_RE.search(new_body):

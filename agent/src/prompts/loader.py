@@ -4,12 +4,25 @@ v8.1.1: 单一 SystemMessage 架构.
   - 1 个 SystemMessage: 角色 + 约束 + 决策原则 + 输出格式 + 策略卡片
   - 工具参数 schema 不在此处, 由 bind_tools 提供
   - format_hint 由 FAST_MODEL 轻量预测, LLM 可覆盖
+
+v8.4 (阶段1 静态前缀): context.static_prefix=true 时——
+  - SystemMessage 只含不随 query 变化的静态部分（role/constraints/decision_guide）
+  - format 指南与策略卡片经 build_dynamic_blocks() 生成，追加到当前轮
+    HumanMessage 尾部（KV Cache 铁律: 前缀字节级稳定，动态内容一律追加末尾）
 """
 from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
+
+
+def _static_prefix_enabled() -> bool:
+    try:
+        from src.config import settings
+        return bool(settings.CONTEXT_STATIC_PREFIX)
+    except Exception:
+        return False
 
 PROMPT_DIR = Path(__file__).resolve().parent
 
@@ -101,6 +114,11 @@ def assemble_system_prompt(
     else:
         parts.append(_read_prompt_cached("system/decision_guide.md"))
 
+    if _static_prefix_enabled():
+        # 阶段1: 静态前缀——format 指南/策略卡片移出 SystemMessage
+        # (见 build_dynamic_blocks)，前缀字节级稳定，缓存跨请求命中
+        return _join_parts(parts)
+
     parts.append(_load_format(format_hint))
 
     if include_strategy_cards and query:
@@ -109,6 +127,30 @@ def assemble_system_prompt(
             parts.append(f"## 输出指导\n\n{output_cards}")
 
     return _join_parts(parts)
+
+
+def build_dynamic_blocks(
+    *,
+    format_hint: str | None = None,
+    query: str | None = None,
+    include_strategy_cards: bool = True,
+) -> str:
+    """阶段1: 静态前缀模式下，随请求变化的动态内容作为独立块返回。
+
+    由 build_human_message 追加到当前轮 HumanMessage 尾部（<user_query> 之后），
+    不进入 SystemMessage —— 动态信息一律追加末尾，前缀缓存不受影响。
+    """
+    if not _static_prefix_enabled():
+        return ""
+    blocks: list[str] = []
+    fmt = _load_format(format_hint)
+    if fmt:
+        blocks.append(f"<format_guide>\n{fmt}\n</format_guide>")
+    if include_strategy_cards and query:
+        cards = _load_skill_cards(query=query, card_type="output", top_k=3)
+        if cards:
+            blocks.append(f"<output_guide>\n{cards}\n</output_guide>")
+    return "\n\n".join(blocks)
 
 
 def assemble_agent_prompt(
@@ -125,6 +167,11 @@ def assemble_agent_prompt(
     parts: list[str] = []
     parts.append(_read_prompt_cached(AGENT_FILES[agent_normalized]))
 
+    if _static_prefix_enabled():
+        # 阶段1: skills/task_type 移出 SystemMessage（见 build_agent_extra_block），
+        # 子 Agent 系统提示按 agent_name 字节级稳定，跨请求可缓存
+        return _join_parts(parts)
+
     if skills:
         skill_parts: list[str] = []
         for skill in skills:
@@ -140,6 +187,38 @@ def assemble_agent_prompt(
             parts.append(f"## 任务策略\n\n{task_prompt}")
 
     return _join_parts(parts)
+
+
+def build_agent_extra_block(
+    *,
+    skills: list[str] | None = None,
+    task_type: str | None = None,
+    system_prompt_extra: str = "",
+) -> str:
+    """阶段1: 静态前缀模式下，子 Agent 的动态指令作为独立块返回。
+
+    由 agent_runner 追加到首条 HumanMessage，不进入 SystemMessage。
+    非静态前缀模式返回 system_prompt_extra（旧行为，由调用方拼进 system）。
+    """
+    if not _static_prefix_enabled():
+        return system_prompt_extra or ""
+
+    blocks: list[str] = []
+    if system_prompt_extra:
+        blocks.append(system_prompt_extra)
+    if skills:
+        skill_parts: list[str] = []
+        for skill in skills:
+            skill_content = _read_prompt_cached(f"skills/{skill}.md")
+            if skill_content:
+                skill_parts.append(skill_content)
+        if skill_parts:
+            blocks.append("## 写作技能\n\n" + "\n\n".join(skill_parts))
+    if task_type:
+        task_prompt = _read_prompt_cached(f"strategies/planning/{task_type}.md")
+        if task_prompt:
+            blocks.append(f"## 任务策略\n\n{task_prompt}")
+    return _join_parts(blocks)
 
 
 def available_formats() -> list[str]:

@@ -60,26 +60,41 @@
 4. **D1 放行声明**：写类工具（write_local_file）不做"默认拒绝+审批"——单用户内网部署 + workspace 路径白名单 + 综述写作链路依赖写盘，审批流会破坏核心工作流。此决策为显式权衡，非疏漏。
 5. **评估口径**：过程指标关注 步数/冗余动作/回退次数/成本延迟（日志已有 tool 计数与耗时）；轨迹 vs 结果双覆盖（write 有 read-back；问答靠复测人工核验）。
 
-## 4b. 上下文结构（规范 2.2.5 静态前缀+轨迹，v8.3.6 固化 / v8.3.8 扩展）
+## 4b. 上下文结构（规范 2.2.5 静态前缀+轨迹，v8.3.6 固化 / v8.4 静态前缀重构）
 
 ```
-静态前缀（会话内不变，利于 KV Cache）
-├─ SystemMessage: 角色+约束+决策原则+格式+策略卡片（assemble_system_prompt，query 仅影响策略卡片检索，同一请求内不变）
-├─ 历史消息（load 时完整恢复含 tool_calls/ToolMessage 配对；超预算时压缩——噪声优先删、证据保护）
-├─ [历史检索证据] 块（v8.3.8，来自 session_evidence 账本，跨轮复用，带"数据非用户输入"边界声明）
-└─ 当前 HumanMessage（build_human_message：LTM 召回 + 检索建议）
-轨迹（随交互增长）
-├─ AIMessage（含 tool_calls）+ ToolMessage（工具结果，含 retrieve-agent 报告 [retrieve-agent result] 与 write-agent 保存摘要）
-└─ <agent_status> 状态栏（v8.3.5，仅注入本次调用 call_messages，不进历史，不动前缀）
+静态前缀（字节级稳定，跨请求命中 DeepSeek 上下文缓存；context.static_prefix=true 时）
+├─ SystemMessage: 角色+约束+决策原则（assemble_system_prompt 只拼静态文件；
+│                 format 指南/策略卡片经 build_dynamic_blocks 追加到当前轮 HumanMessage 尾部）
+├─ 历史消息（发送视图，来自 checkpoint 增量构建，见 v8.4 压缩架构）
+├─ [历史检索证据] 块（来自 session_evidence 账本，跨轮复用，带"数据非用户输入"边界声明）
+└─ 当前 HumanMessage（build_human_message：LTM 召回 + 常驻卡片 + 检索建议 + 动态块）
+轨迹（随交互增长，append-only）
+├─ AIMessage（含 tool_calls）+ ToolMessage（工具结果）
+└─ <agent_status> 状态栏（代码确定性维护，含 TODO 列表/预算占用率；仅注入 call_messages，
+   不进历史，不动前缀）
 ```
 
-**上下文与证据保真六原则（v8.3.8，生产级预留）**：
-1. **存储全量**：用户消息/assistant 回答/工具调用与结果/检索 chunk 证据全量入 DB（真相源），压缩永远只作用于发送上下文，不删除存储原文
-2. **发送装配**：每次调用 LLM 由装配逻辑按"当前问题+相关性+预算"组装必要上下文；核心证据保真，辅助内容可摘要
-3. **证据复用**：每轮检索生成结构化账本（session_evidence）；下一轮 supervisor 先回顾历史证据，覆盖则直接回答，缺口才增量检索
-4. **压缩分级**：保护用户意图/任务目标/最终回答/被引证据/结论/DOI；压缩重复调用/错误堆栈/失败重试/未采用结果/中间草稿
-5. **窗口触发**：token 接近预算（soft 0.60/hard 0.93）才压缩，不在运行中编辑历史（append-only）
-6. **协议安全**：历史消息不得含孤立 ToolMessage（INV-01 持久化路径，_validate_trace）；KV cache 是推理优化不是记忆机制
+**上下文与证据保真六原则（v8.4 修订）**：
+1. **存储全量**：轨迹全量入 messages 表（append-only，真相源永不改写）；压缩只是"发送视图构建"
+2. **发送装配**：视图 = [首消息] + `<conversation_summary>`(checkpoint) + [checkpoint 之后原始消息]；
+   压缩只在**用户轮边界**（新请求 load 时）发生，循环内绝不压缩（前缀中途变化=缓存必不命中）
+3. **批量压缩**：视图 ≥ soft(75%) → 一次性压缩至 ~target(50%)（每次压缩=一次缓存破坏，批量=只破坏一次）；
+   保护名单：最近 3 轮 Q/A、被引用证据全文、DOI/evidence_id/artifact_id 标识符；
+   只压旧工具过程、错误日志、低相关证据
+4. **checkpoint 持久化**：sessions 表记录"已摘要至哪条消息+摘要文本"，跨请求增量复用（旧摘要作
+   prior_summary 合并），防摘要套摘要；压缩失败连续 ≥3 次熔断降级规则式
+5. **压缩 LLM 用 FAST_MODEL**（高频低价值操作，质量由保留优先级提示保证）；max_tokens 真正传入；
+   截断透明 [TRUNCATED] 标记
+6. **协议安全**：历史消息不得含孤立 ToolMessage（INV-01）；KV cache 是推理优化不是记忆机制；
+   缓存命中率经 cache_metrics 观测（context_usage 事件 cache_hit/cache_miss 字段）
+
+**v8.4 记忆架构（Mem0 v3 模式 + 双层记忆）**：
+- LTM 写入 **ADD-only**（ltm_facts 表自增 id，同 key 多版本并存；低置信度 <0.5 拒绝写入），
+  冲突留到检索时用"语义相似度 × 时间衰减置信度"排序解决
+- **常驻卡片层**（resident_cards 表）：高置信度(≥0.8)短事实常驻上下文（≤500 字符，上限 8 条自动淘汰，
+  代码维护非 LLM）；细节走向量召回——双层记忆"概览+细节"
+- LTM 提取转后台 spawn（不与响应抢时间），写入带来源会话/查询标注
 
 **生产级后置清单（当前单用户开发形态，架构已按 session 隔离预留）**：
 - 鉴权中间件 / 速率限制（接口层已有 session_id 维度，鉴权只需中间件）
@@ -101,6 +116,7 @@
 
 ## 历史变更摘要
 
+- **v8.4（2026-08-13）**：上下文工程改造（对齐《深入理解AI Agent》第2/3/4章）——①静态前缀：SystemMessage 字节级稳定（format 指南/策略卡片/skills 移出前缀，追加当前轮 HumanMessage 尾部），`context.static_prefix` 灰度开关；supervisor 工具 schema 单一来源（`tools/supervisor_tools.py`）②压缩架构：存储全量·发送裁剪（废除 replace_history 破坏 append-only，checkpoint 增量视图，512K 视图预算，用户轮边界批量压缩至 50%，保护名单，压缩 LLM 改 FAST，熔断器）③收尾统一带工具客户端（载荷结构一致）④状态栏：TODO 列表 + 预算占用率（纯函数可单测）⑤记忆：ADD-only 写入（ltm_facts）+ 混合信号召回 + 常驻卡片双层记忆 + 后台提取⑥缓存命中率观测（cache_metrics）+ LLM 客户端池复用 + light/expert 装配收敛 + write_pipeline [System+Human] 结构；测试 65→78
 - **v8.3.5（2026-08-12）**：状态栏/熔断/透明化（规范对齐《深入理解AI Agent》）——INV-07 状态栏、INV-08 熔断+截断透明、计时器 id 单一来源（F7）、提示注入边界声明；测试 208→232
 - **v8.3.4（2026-08-12）**：执行卡片修复（contextvar 线程传播 F1）、Qdrant 争抢可感知降级（F2）、supervisor 每轮工具预算 + 400 修复（F3）、retrieve-agent 代码级收敛（F4）、证据清单 + cap 提升（F5）、decision_guide 深度规则（F6）
 - **v8.3.3（2026-08-12）**：综述首跑必崩修复（UnboundLocalError）、运行时容量兜底、写后校验、引用完整性、react_fallback 落盘、断点续传原子化、安全加固（沙箱/路径/XSS/队列/request_id）、配置接线、死代码清理

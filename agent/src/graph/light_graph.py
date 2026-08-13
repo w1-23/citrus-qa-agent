@@ -8,7 +8,6 @@ import logging
 import time
 
 from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 
 from src.graph.state import AgentState
@@ -18,9 +17,9 @@ from src.prompts.loader import assemble_system_prompt
 logger = logging.getLogger(__name__)
 
 from src.core.progress_bus import (
-    emit_encoded, emit_thinking, emit_text,
+emit_thinking, emit_text,
     emit_tool_call_start, emit_tool_executing, emit_tool_result,
-    emit_status, emit_usage_delta,
+    emit_status,
 )
 
 # v8.3.3: 轮次上限接线 config.yaml light.max_turns（此前硬编码 2）
@@ -29,15 +28,16 @@ LIGHT_TOOL_NAMES = ("citrus_rag_search", "read_local_file")
 
 
 def _build_light_llm(bind_tools=None):
-    kwargs = {
-        "model": get_deepseek_model(),
-        "api_key": settings.RESOLVED_MAIN_API_KEY,
-        "base_url": settings.MAIN_BASE_URL,
-        "temperature": settings.TEMPERATURE_MAIN,
-        "max_tokens": 16384,
-        "timeout": 60,
-    }
-    client = ChatOpenAI(**kwargs)
+    # v8.4: 客户端进程级复用（llm_pool），避免每请求新建 ChatOpenAI/连接池
+    from src.core.llm_pool import get_llm as _pool_get_llm
+    client = _pool_get_llm(
+        model=get_deepseek_model(),
+        api_key=settings.RESOLVED_MAIN_API_KEY,
+        base_url=settings.MAIN_BASE_URL,
+        temperature=settings.TEMPERATURE_MAIN,
+        max_tokens=16384,
+        timeout=60,
+    )
     if bind_tools:
         client = client.bind_tools(bind_tools)
     return client
@@ -58,7 +58,7 @@ async def load_context_node(state: AgentState) -> dict:
     try:
         from src.session.manager import session_manager
         from src.core.context_budget import ContextBudget, ContextBudgetConfig
-        from src.core.context_manager import ContextManager, LoadedContext
+        from src.core.context_manager import ContextManager, finalize_load_result
         from src.guardrails.memory import memory_store
 
         budget_config = ContextBudgetConfig(
@@ -75,48 +75,16 @@ async def load_context_node(state: AgentState) -> dict:
         )
 
         ctx = await ctx_mgr.load(session_id, query, mode)
-        result["session_id"] = ctx.session_id
-        result["history_summary"] = ctx.history_summary
-        result["long_term_memory"] = ctx.long_term_memory
-        result["search_suggestions"] = ctx.search_suggestions
-        result["format_hint"] = ctx.format_hint
-
-        history_msgs = list(ctx.history_messages) if ctx.history_messages else []
-        result["messages"] = history_msgs
-
-        # v8.3.8: 历史检索证据块（跨轮复用）
-        try:
-            block = session_manager.build_evidence_block(session_id, limit=2)
-            if block:
-                result["history_evidence_block"] = block
-        except Exception as e:
-            logger.warning(f"[LightGraph:load] evidence block failed: {e}")
-
-        load_summary = f"history={len(history_msgs)}msgs"
-        if ctx.format_hint:
-            load_summary += f", fmt={ctx.format_hint}"
-        result["_trace"] = {"node": "load_context", "elapsed_ms": 0, "summary": load_summary}
-
-        hist_chars = sum(len(m.content or "") for m in history_msgs if hasattr(m, 'content'))
-        est_tokens = budget.estimate_tokens(history_msgs)
-        try:
-            emit_encoded("context_status", {
-                "history_msgs": len(history_msgs),
-                "history_chars": hist_chars,
-                "ltm_recalled": bool(ctx.long_term_memory),
-                "ltm_chars": len(ctx.long_term_memory or ""),
-                "suggestions": ctx.search_suggestions[:3] if ctx.search_suggestions else [],
-                "format_hint": ctx.format_hint or "",
-                "estimated_tokens": est_tokens,
-                "max_tokens": budget_config.max_tokens,
-                "soft_threshold": budget_config.soft_threshold,
-                "hard_threshold": budget_config.hard_threshold,
-                "compressed": bool(ctx.history_summary),
-                "compression_len": len(ctx.history_summary or ""),
-            })
-        except Exception:
-            pass
-        return result
+        # v8.4: 收尾装配收敛至 context_manager.finalize_load_result
+        # （与 expert 图共用，消除双实现漂移）
+        return finalize_load_result(
+            ctx,
+            session_manager=session_manager,
+            session_id=session_id,
+            budget=budget,
+            node_label="load_context",
+            log_prefix="LightGraph",
+        )
 
     except Exception as e:
         logger.warning(f"[LightGraph:load] failed: {e}")
@@ -146,6 +114,7 @@ async def light_supervisor_node(state: AgentState) -> dict:
         query=query,
         history_summary=state.get("history_summary"),
         long_term_memory=state.get("long_term_memory"),
+        resident_cards=state.get("resident_cards"),
         search_suggestions=state.get("search_suggestions", []),
         format_hint=format_hint,
     )
@@ -191,14 +160,11 @@ async def light_supervisor_node(state: AgentState) -> dict:
             dt_llm = (time.perf_counter() - t_llm) * 1000
             messages.append(response)
             # v8.3.3: 推送真实 token 增量（前端上下文面板实时刷新，避免累计值重复计数）
+            # 阶段0: 统一经 cache_metrics 提取（含 prompt_cache 命中字段）
             try:
-                usage = (getattr(response, "usage_metadata", None)
-                         or (getattr(response, "response_metadata", {}) or {}).get("usage", {}))
-                if isinstance(usage, dict) and usage.get("total_tokens"):
-                    emit_usage_delta(state.get("session_id", ""), "light_supervisor",
-                                     usage.get("input_tokens", 0),
-                                     usage.get("output_tokens", 0),
-                                     usage.get("total_tokens", 0))
+                from src.core.cache_metrics import emit_usage_from_response
+                emit_usage_from_response(state.get("session_id", ""),
+                                         "light_supervisor", response)
             except Exception:
                 pass
 
@@ -263,7 +229,8 @@ async def light_supervisor_node(state: AgentState) -> dict:
                 "You have reached the maximum number of turns. "
                 "Do NOT call any more tools. Provide your final answer now."
             )))
-            final_resp = await _build_light_llm().ainvoke(messages)
+            # v8.4: 收尾保持带工具客户端（请求载荷结构一致，前缀缓存友好）
+            final_resp = await llm.ainvoke(messages)
             answer = final_resp.content or ""
 
     except Exception as e:
@@ -381,17 +348,24 @@ async def save_context_node(state: AgentState) -> dict:
         logger.warning(f"[LightGraph:save] failed: {e}")
 
     try:
-        from src.guardrails.memory import memory_store
+        # v8.4: LTM 提取转后台 + ADD-only 写入（与 expert 图一致）
+        def _extract_and_save_ltm(q: str, a: str, sid: str):
+            try:
+                from src.guardrails.memory import memory_store
+                facts = memory_store.extract_key_facts(q, a)
+                for f in facts:
+                    memory_store.save_long_term_fact(
+                        f.get("key", ""),
+                        f.get("value", ""),
+                        f.get("confidence", 0.5),
+                        owner_session=sid,
+                        source_query=q,
+                    )
+            except Exception as e:
+                logger.debug(f"[LightGraph:save] LTM background extract failed: {e}")
+
         if len(answer) > 500:
-            facts = await asyncio.to_thread(memory_store.extract_key_facts, query, answer)
-            for f in facts:
-                memory_store.save_long_term_fact(
-                    f.get("key", ""),
-                    f.get("value", ""),
-                    f.get("confidence", 0.5),
-                    owner_session=session_id,
-                    source_query=query,
-                )
+            spawn(asyncio.to_thread(_extract_and_save_ltm, query, answer, session_id))
     except Exception as e:
         logger.debug(f"[LightGraph:save] LTM skip: {e}")
 

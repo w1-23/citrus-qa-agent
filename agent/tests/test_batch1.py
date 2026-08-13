@@ -27,16 +27,17 @@ def build_history(n_turns, tokens_per_msg=1500):
 
 def test_ag3_config_single_source():
     print("[AG-3] 配置单向化")
-    check("settings 读取 max_tokens=1M", settings.CONTEXT_BUDGET_MAX_TOKENS == 1000000,
+    check("settings 读取 max_tokens=512K (v8.4 发送视图)",
+          settings.CONTEXT_BUDGET_MAX_TOKENS == 512000,
           f"got {settings.CONTEXT_BUDGET_MAX_TOKENS}")
-    check("settings 读取 soft=0.60", abs(settings.CONTEXT_BUDGET_SOFT_THRESHOLD - 0.60) < 1e-6,
+    check("settings 读取 soft=0.75", abs(settings.CONTEXT_BUDGET_SOFT_THRESHOLD - 0.75) < 1e-6,
           f"got {settings.CONTEXT_BUDGET_SOFT_THRESHOLD}")
     check("settings 读取 hard=0.93", abs(settings.CONTEXT_BUDGET_HARD_THRESHOLD - 0.93) < 1e-6,
           f"got {settings.CONTEXT_BUDGET_HARD_THRESHOLD}")
     import yaml
     cfg = yaml.safe_load(open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config.yaml'), encoding='utf-8'))
     cb = cfg['context_budget']
-    check("config.yaml soft=0.60", abs(cb['soft_threshold'] - 0.60) < 1e-6)
+    check("config.yaml soft=0.75", abs(cb['soft_threshold'] - 0.75) < 1e-6)
     check("config.yaml hard=0.93", abs(cb['hard_threshold'] - 0.93) < 1e-6)
     check("circuit_breaker 重复阈值已删",
           'context_soft_threshold' not in cfg.get('circuit_breaker', {}),
@@ -44,24 +45,24 @@ def test_ag3_config_single_source():
 
 
 def test_ag3_early_compaction():
-    print("[AG-3] 早期压缩触发")
-    cfg = ContextBudgetConfig(max_tokens=1000000, soft_threshold=0.60, hard_threshold=0.93)
+    print("[AG-3] 早期压缩触发 (512K 视图)")
+    cfg = ContextBudgetConfig(max_tokens=512000, soft_threshold=0.75, hard_threshold=0.93)
     budget = ContextBudget(cfg)
 
-    short = build_history(20)   # ~60K tokens → ratio 6% → NORMAL
+    short = build_history(20)   # ~36K tokens → ratio ~7% → NORMAL
     r = asyncio.get_event_loop().run_until_complete(budget.check(short))
     check("20 轮不触发", r.level == ContextBudgetLevel.NORMAL, f"level={r.level.value}")
 
-    long = build_history(200)   # 200 轮 ≈ 72 万 tokens (新混合估算) → ratio ~72% → SUMMARIZE
+    long = build_history(110)   # 110 轮 ≈ 397K tokens → ratio ~77% → SUMMARIZE
     r2 = asyncio.get_event_loop().run_until_complete(budget.check(long))
-    check("200 轮触发 SUMMARIZE", r2.level == ContextBudgetLevel.SUMMARIZE,
+    check("110 轮触发 SUMMARIZE", r2.level == ContextBudgetLevel.SUMMARIZE,
           f"level={r2.level.value}, tokens={budget.estimate_tokens(long)}")
     check("压缩后消息数显著下降", len(r2.messages) < len(long) * 0.35,
           f"{len(r2.messages)} < {len(long)*0.35:.0f}")
 
-    huge = build_history(900)   # ~3.2M chars → ratio > 93% → TRUNCATE
+    huge = build_history(500)   # 500 轮 ≈ 1.8M tokens → ratio > 93% → TRUNCATE
     r3 = asyncio.get_event_loop().run_until_complete(budget.check(huge))
-    check("900 轮触发 TRUNCATE", r3.level == ContextBudgetLevel.TRUNCATE,
+    check("500 轮触发 TRUNCATE", r3.level == ContextBudgetLevel.TRUNCATE,
           f"level={r3.level.value}")
 
 

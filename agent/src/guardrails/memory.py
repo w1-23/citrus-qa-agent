@@ -30,7 +30,9 @@ class MemoryStore:
         return cls._instance
 
     def __init__(self):
-        pass
+        from src.config import PROJECT_ROOT
+        # v8.4: DB 路径实例化属性（测试可定向到临时库；此前硬编码 PROJECT_ROOT）
+        self.db_path = str(PROJECT_ROOT / "state" / "sessions.db")
 
     # ─── Entity Memory ───
 
@@ -114,45 +116,193 @@ class MemoryStore:
     # ─── Long-term Memory (Cross-session) ───
 
     def _ensure_ltm_schema(self, conn) -> None:
-        """AG-5: 迁移 long_term_memory 表，补齐 owner_session / source_query 列。"""
+        """AG-5: 迁移 long_term_memory 表，补齐 owner_session / source_query 列。
+
+        v8.4 (Mem0 v3 模式): 新增 ltm_facts 表（自增 id，ADD-only 写入——
+        同 key 多版本并存，冲突留到检索时用时间+置信度排序解决；
+        旧表写入式 UPDATE/DELETE 不可逆丢历史）。老表数据一次性迁移，
+        之后只读老表、只写新表。
+        """
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS long_term_memory (
+                fact_key TEXT PRIMARY KEY,
+                fact_value TEXT,
+                confidence REAL DEFAULT 0.5,
+                updated_at TEXT,
+                owner_session TEXT DEFAULT '',
+                source_query TEXT DEFAULT ''
+            )"""
+        )
+        # CREATE 之后重新读取列（旧库缺列才 ALTER，新库已有）
         cols = {r[1] for r in conn.execute("PRAGMA table_info(long_term_memory)")}
         if "owner_session" not in cols:
             conn.execute("ALTER TABLE long_term_memory ADD COLUMN owner_session TEXT DEFAULT ''")
         if "source_query" not in cols:
             conn.execute("ALTER TABLE long_term_memory ADD COLUMN source_query TEXT DEFAULT ''")
 
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS ltm_facts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fact_key TEXT,
+                fact_value TEXT,
+                confidence REAL DEFAULT 0.5,
+                updated_at TEXT,
+                owner_session TEXT DEFAULT '',
+                source_query TEXT DEFAULT ''
+            )"""
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ltm_fact_key ON ltm_facts(fact_key)")
+
+        # 一次性迁移老表 → 新表（幂等：迁移标记行）
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS memory_store (
+                session_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (session_id, key))"""
+        )
+        migrated = conn.execute(
+            "SELECT COUNT(*) FROM memory_store WHERE key='_ltm_migrated_v2'"
+        ).fetchone()[0]
+        if not migrated:
+            conn.execute(
+                """INSERT INTO ltm_facts (fact_key, fact_value, confidence,
+                                          updated_at, owner_session, source_query)
+                   SELECT fact_key, fact_value, confidence, updated_at,
+                          owner_session, source_query
+                   FROM long_term_memory"""
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO memory_store (session_id, key, value, updated_at) "
+                "VALUES ('__system__', '_ltm_migrated_v2', '1', ?)",
+                (datetime.now().isoformat(),))
+            logger.info("[Memory] LTM 迁移至 ltm_facts (ADD-only) 完成")
+
+    # ─── v8.4 常驻卡片层（双层记忆: 少量高频事实常驻上下文 ≤500 字符）───
+
+    def _ensure_resident_schema(self, conn) -> None:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS resident_cards (
+                fact_key TEXT PRIMARY KEY,
+                fact_value TEXT,
+                confidence REAL DEFAULT 0.5,
+                updated_at TEXT
+            )"""
+        )
+
+    RESIDENT_CARD_MIN_CONF = 0.8     # 高置信度事实才进常驻卡片
+    RESIDENT_CARD_MAX = 8            # 常驻卡片上限（约 ≤500 字符预算）
+    RESIDENT_CARD_MAX_CHARS = 60     # 单条卡片值上限
+
+    def _upsert_resident_card(self, conn, fact_key: str, fact_value: str,
+                              confidence: float) -> None:
+        self._ensure_resident_schema(conn)
+        if not fact_key or not fact_value:
+            return
+        if confidence < self.RESIDENT_CARD_MIN_CONF:
+            return
+        if len(fact_value) > self.RESIDENT_CARD_MAX_CHARS:
+            return
+        conn.execute(
+            """INSERT INTO resident_cards (fact_key, fact_value, confidence, updated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(fact_key) DO UPDATE SET
+                 fact_value=excluded.fact_value,
+                 confidence=excluded.confidence,
+                 updated_at=excluded.updated_at""",
+            (fact_key, fact_value, confidence, datetime.now().isoformat()),
+        )
+        # 超上限淘汰：最低置信度 + 最旧的先出（代码维护，非 LLM）
+        cur = conn.execute(
+            "SELECT COUNT(*) FROM resident_cards")
+        if (cur.fetchone()[0] or 0) > self.RESIDENT_CARD_MAX:
+            conn.execute(
+                """DELETE FROM resident_cards WHERE fact_key IN (
+                    SELECT fact_key FROM resident_cards
+                    ORDER BY confidence ASC, updated_at ASC
+                    LIMIT 1)"""
+            )
+
+    def get_resident_cards(self, max_chars: int = 500) -> str:
+        """常驻卡片（双层记忆的'概览'层）：按置信度取 top-N 拼文本，≤max_chars。"""
+        try:
+            import sqlite3
+            from pathlib import Path
+            from src.config import PROJECT_ROOT
+            db_path = self.db_path
+            if not db_path.exists():
+                return ""
+            with sqlite3.connect(str(db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                self._ensure_resident_schema(conn)
+                rows = conn.execute(
+                    "SELECT fact_key, fact_value, confidence, updated_at "
+                    "FROM resident_cards ORDER BY confidence DESC, updated_at DESC"
+                ).fetchall()
+            if not rows:
+                return ""
+            parts = []
+            total = 0
+            for r in rows:
+                line = f"- {r['fact_value']} (置信 {float(r['confidence']):.1f})"
+                if total + len(line) > max_chars:
+                    break
+                parts.append(line)
+                total += len(line)
+            if not parts:
+                return ""
+            return "## 用户常驻记忆（高频稳定事实，可能过期，冲突时以本次检索证据为准）\n" \
+                   + "\n".join(parts)
+        except Exception as e:
+            logger.debug(f"[Memory] 常驻卡片读取失败: {e}")
+            return ""
+
     def save_long_term_fact(self, fact_key: str, fact_value: str, confidence: float = 0.5,
-                            owner_session: str = "", source_query: str = "") -> None:
-        """跨会话长期事实存储（AG-5: 记录来源会话与查询，供召回时标注溯源）。"""
+                            owner_session: str = "", source_query: str = "") -> bool:
+        """v8.4 (Mem0 v3): ADD-only 写入——同 key 多版本并存，绝不覆盖/删除历史。
+        检索阶段用时间+置信度排序消歧。置信度 <0.5 的未核验事实拒绝写入。
+        """
+        if not fact_key or not fact_value:
+            return False
+        if float(confidence or 0) < 0.5:
+            logger.debug(f"[Memory] 低置信度事实拒绝写入: {fact_key[:30]} ({confidence})")
+            return False
         with self._mem_lock:
             try:
                 import sqlite3
                 from pathlib import Path
-                from src.config import PROJECT_ROOT
-                db_path = PROJECT_ROOT / "state" / "sessions.db"
+                db_path = Path(self.db_path)
                 db_path.parent.mkdir(parents=True, exist_ok=True)
                 with sqlite3.connect(str(db_path)) as conn:
-                    conn.execute(
-                        """CREATE TABLE IF NOT EXISTS long_term_memory (
-                            fact_key TEXT PRIMARY KEY,
-                            fact_value TEXT,
-                            confidence REAL DEFAULT 0.5,
-                            updated_at TEXT,
-                            owner_session TEXT DEFAULT '',
-                            source_query TEXT DEFAULT ''
-                        )"""
-                    )
                     self._ensure_ltm_schema(conn)
                     conn.execute(
-                        """INSERT OR REPLACE INTO long_term_memory
-                           (fact_key, fact_value, confidence, updated_at, owner_session, source_query)
+                        """INSERT INTO ltm_facts
+                           (fact_key, fact_value, confidence, updated_at,
+                            owner_session, source_query)
                            VALUES (?, ?, ?, ?, ?, ?)""",
                         (fact_key, fact_value, confidence, datetime.now().isoformat(),
                          owner_session, source_query),
                     )
+                    self._upsert_resident_card(conn, fact_key, fact_value, confidence)
                     conn.commit()
+                return True
             except Exception as e:
                 logger.debug(f"[Memory] 保存长期事实失败: {e}")
+                return False
+
+    def _fetch_ltm_rows(self, conn, limit: int = 500):
+        """v8.4: 从 ltm_facts 读取；若新表为空回退老表（迁移前兼容）。"""
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT fact_key, fact_value, confidence, updated_at, owner_session, source_query "
+            "FROM ltm_facts ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
+        if not rows:
+            rows = conn.execute(
+                "SELECT fact_key, fact_value, confidence, updated_at, owner_session, source_query "
+                "FROM long_term_memory ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
+        return rows
 
     def recall_long_term_memory(self, query: str, top_k: int = 5,
                                 owner_session: str = "", max_chars: int = 1500) -> str:
@@ -170,16 +320,12 @@ class MemoryStore:
         from pathlib import Path
         from src.config import PROJECT_ROOT
 
-        db_path = PROJECT_ROOT / "state" / "sessions.db"
+        db_path = self.db_path
         if not db_path.exists():
             return ""
         with sqlite3.connect(str(db_path)) as conn:
-            conn.row_factory = sqlite3.Row
             self._ensure_ltm_schema(conn)
-            rows = conn.execute(
-                "SELECT fact_key, fact_value, confidence, updated_at, owner_session, source_query "
-                "FROM long_term_memory ORDER BY updated_at DESC LIMIT 500"
-            ).fetchall()
+            rows = self._fetch_ltm_rows(conn)
         if not rows:
             return ""
 
@@ -193,23 +339,41 @@ class MemoryStore:
         d_norm = doc_vecs / np.linalg.norm(doc_vecs, axis=1, keepdims=True)
         scores = (q_norm @ d_norm.T)
 
-        top_indices = np.argsort(scores)[::-1][:top_k]
-        parts = []
         now = datetime.now()
-        for i in top_indices:
-            score = float(scores[i])
-            if score < 0.30:
-                continue
-            row = rows[i]
+        eff_confs = np.zeros(len(rows), dtype=np.float32)
+        for i, row in enumerate(rows):
             conf = float(row["confidence"])
             ts = row["updated_at"] or ""
             try:
                 days = max((now - datetime.fromisoformat(ts)).days, 0)
             except Exception:
                 days = 0
-            eff_conf = conf * (0.95 ** days)  # AG-5: 时间衰减
+            eff_confs[i] = conf * (0.95 ** days)  # AG-5: 时间衰减
+
+        # v8.4 (Mem0 v3): 混合信号排序 = 语义相似度 × 有效置信度
+        # 同 key 的多版本（ADD-only 并存）同时参与排序，由时间衰减自然
+        # 让最新版本胜出——冲突在检索阶段解决，不写时覆盖
+        combined = scores * eff_confs
+        top_indices = np.argsort(combined)[::-1][:top_k * 2]
+
+        parts = []
+        seen_values = set()
+        for i in top_indices:
+            if len(parts) >= top_k:
+                break
+            score = float(scores[i])
+            if score < 0.30:
+                continue
+            row = rows[i]
+            eff_conf = float(eff_confs[i])
             if eff_conf < 0.30:
                 continue
+            # 完全相同的 value 去重（多版本共存但同值只列一次）
+            dedup_key = row["fact_value"]
+            if dedup_key in seen_values:
+                continue
+            seen_values.add(dedup_key)
+            ts = row["updated_at"] or ""
             src = (row["source_query"] or "")[:20]
             parts.append(
                 f"- [{eff_conf:.1f}] {row['fact_value']} "
@@ -226,16 +390,12 @@ class MemoryStore:
             import sqlite3
             from pathlib import Path
             from src.config import PROJECT_ROOT
-            db_path = PROJECT_ROOT / "state" / "sessions.db"
+            db_path = self.db_path
             if not db_path.exists():
                 return ""
             with sqlite3.connect(str(db_path)) as conn:
-                conn.row_factory = sqlite3.Row
                 self._ensure_ltm_schema(conn)
-                rows = conn.execute(
-                    "SELECT fact_key, fact_value, confidence, updated_at, owner_session, source_query "
-                    "FROM long_term_memory ORDER BY updated_at DESC LIMIT 200"
-                ).fetchall()
+                rows = self._fetch_ltm_rows(conn, limit=200)
             query_tokens = set(re.findall(r'[\w\u4e00-\u9fff]{2,}', query.lower()))
             scored = []
             now = datetime.now()
@@ -257,8 +417,14 @@ class MemoryStore:
             if not scored:
                 return ""
             parts = []
-            for score, value, conf, ts, src in scored[:top_k]:
+            seen_values = set()
+            for score, value, conf, ts, src in scored:
+                if value in seen_values:
+                    continue
+                seen_values.add(value)
                 parts.append(f"- [{conf:.1f}] {value} (更新: {ts[:10]} 来源: {src[:20] or 'N/A'})")
+                if len(parts) >= top_k:
+                    break
             text = ("## 跨会话记忆\n以下为历史会话中提取的相关事实（可能过期，"
                     "若与本次检索证据冲突，以本次检索证据为准）：\n" + "\n".join(parts))
             return text[:max_chars]
@@ -306,7 +472,7 @@ class MemoryStore:
             import sqlite3
             from pathlib import Path
             from src.config import PROJECT_ROOT
-            db_path = PROJECT_ROOT / "state" / "sessions.db"
+            db_path = self.db_path
             if not db_path.exists():
                 return {}
             with sqlite3.connect(str(db_path)) as conn:
@@ -328,7 +494,7 @@ class MemoryStore:
             import sqlite3
             from pathlib import Path
             from src.config import PROJECT_ROOT
-            db_path = PROJECT_ROOT / "state" / "sessions.db"
+            db_path = self.db_path
             with sqlite3.connect(str(db_path)) as conn:
                 conn.execute(
                     "CREATE TABLE IF NOT EXISTS memory_store ("
@@ -353,7 +519,7 @@ class MemoryStore:
             import sqlite3
             from pathlib import Path
             from src.config import PROJECT_ROOT
-            db_path = PROJECT_ROOT / "state" / "sessions.db"
+            db_path = self.db_path
             with sqlite3.connect(str(db_path)) as conn:
                 conn.execute(
                     "CREATE TABLE IF NOT EXISTS memory_store ("

@@ -91,8 +91,13 @@ _usage_last: dict = {}
 
 
 def emit_usage_delta(session_id: str, source: str, input_tokens: int = 0,
-                     output_tokens: int = 0, total: int = 0) -> None:
-    """context_usage 增量推送 (v8.3.3): total 为单次调用累计，delta 为相对上次的增量。"""
+                     output_tokens: int = 0, total: int = 0,
+                     cache_hit: int = 0, cache_miss: int = 0) -> None:
+    """context_usage 增量推送 (v8.3.3): total 为单次调用累计，delta 为相对上次的增量。
+
+    cache_hit/cache_miss 为 DeepSeek prompt_cache 命中/未命中 token
+    （阶段0 缓存观测，见 core/cache_metrics.py）。
+    """
     if not total:
         return
     key = f"{session_id}:{source}"
@@ -104,12 +109,16 @@ def emit_usage_delta(session_id: str, source: str, input_tokens: int = 0,
     if delta == 0:
         return  # 同值重复（如调用未消耗新 token），不发零增量
     _usage_last[key] = total
+    cache_denom = cache_hit + cache_miss
     emit_encoded("context_usage", {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "total": total,
         "delta": delta,
         "source": source,
+        "cache_hit": cache_hit,
+        "cache_miss": cache_miss,
+        "cache_ratio": round(cache_hit / cache_denom, 4) if cache_denom else 0,
     })
 
 

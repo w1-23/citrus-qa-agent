@@ -14,7 +14,6 @@ from langchain_core.messages import (
     AIMessage,
     ToolMessage,
 )
-from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 
 from src.graph.state import AgentState
@@ -26,178 +25,16 @@ logger = logging.getLogger(__name__)
 from src.core.progress_bus import (
     emit_encoded, emit_thinking, emit_text,
     emit_tool_call_start, emit_tool_executing, emit_tool_result,
-    emit_status, emit_usage_delta, mark_tool_start,
+    emit_status, mark_tool_start,
 )
 
 # v8.3.3: 轮次上限接线 config.yaml supervisor.max_turns（此前硬编码 4）
 SUPERVISOR_MAX_TURNS = settings.SUPERVISOR_MAX_TURNS
 
-_AGENT_TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "call_retrieve_agent",
-            "description": "Search academic literature for citrus research. "
-                           "Use for factual queries, mechanisms, comparisons, reviews. "
-                           "Query must be English keywords (5-15 words), NOT a full sentence. "
-                           "If first search is insufficient, call again with synonyms or "
-                           "narrower terms (up to 3 different angles).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "English search keywords (5-15 words)",
-                    },
-                    "goal": {
-                        "type": "string",
-                        "description": "What to retrieve and why",
-                    },
-                },
-                "required": ["query", "goal"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "call_write_agent",
-            "description": "Write, compose, or synthesize NEW content (reviews, reports, structured "
-                           "answers) from material and save it to a file. MUST call this when the user "
-                           "asks to WRITE/COMPOSE/DRAFT content like a review, report or article — "
-                           "even simple content like 'write 111 to test.md' when it requires writing. "
-                           "Do NOT use when the content ALREADY EXISTS in the conversation "
-                           "(e.g. 'save this answer'): use write_local_file directly instead. "
-                           "For complex writing, ensure sufficient literature has been retrieved first. "
-                           "context can be a finished document (will be saved directly) or "
-                           "raw material to synthesize.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "goal": {
-                        "type": "string",
-                        "description": "Writing goal",
-                    },
-                    "context": {
-                        "type": "string",
-                        "description": "Previous retrieval results or document content to base writing on",
-                    },
-                    "output_path": {
-                        "type": "string",
-                        "description": "File path to save (only if user requested saving)",
-                    },
-                },
-                "required": ["goal", "context"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "call_analyze_agent",
-            "description": "Perform statistical analysis or design experiments. "
-                           "Call when user asks for data analysis, statistics, "
-                           "or experiment planning.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "goal": {
-                        "type": "string",
-                        "description": "Analysis or experiment design goal",
-                    },
-                    "data_context": {
-                        "type": "string",
-                        "description": "Data or background for analysis",
-                    },
-                },
-                "required": ["goal", "data_context"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_local_file",
-            "description": "Read a local file from disk (.pdf, .md, .txt, .csv, .xlsx). "
-                           "PDFs default to first 30000 chars (~8-12 pages). "
-                           "For full PDF text, set max_chars=0. "
-                           "Use FIRST when user asks to read/open/view a local file. "
-                           "Absolute paths (e.g. E:/data/paper.pdf) work for files anywhere. "
-                           "Relative paths resolve from workspace/. "
-                           "For academic paper content extraction, prefer pdf_read.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Absolute path (e.g. E:/docs/paper.pdf) or relative path (e.g. upload/data.csv)",
-                    },
-                    "max_chars": {
-                        "type": "integer",
-                        "description": "Max chars to read (default 0 = auto: PDF 30000, others unlimited). Set 0 for full text.",
-                    },
-                },
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "pdf_read",
-            "description": "Extract abstract and key sections from an academic research PDF. "
-                           "Use for literature PAPERS found via DOI, search results, or online sources. "
-                           "Do NOT use for local files (use read_local_file instead). "
-                           "Suitable for extracting structured content like Abstract, Introduction, Methods, Results, Conclusion. "
-                           "Returns plain text with section headers.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "File path to the PDF paper (absolute or relative to workspace)",
-                    },
-                    "cross_reference": {
-                        "type": "boolean",
-                        "description": "Whether to validate metadata via CrossRef (default false)",
-                    },
-                },
-                "required": ["file_path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "write_local_file",
-            "description": "Directly save EXISTING finished content to a file (workspace/output only). "
-                           "Use when the user asks to save/preserve text that ALREADY EXISTS in the "
-                           "conversation (e.g. save this answer, save this paragraph) — content is "
-                           "written verbatim WITHOUT rewriting. "
-                           "Do NOT use for writing new content: when the user asks to WRITE, COMPOSE, "
-                           "or synthesize a review/report/article from material, use call_write_agent instead.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "File path relative to workspace/output/ (e.g. 'notes/answer.md')",
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "The exact finished content to save (verbatim, no rewriting)",
-                    },
-                    "mode": {
-                        "type": "string",
-                        "enum": ["write", "append"],
-                        "description": "'write' overwrites, 'append' appends (default write)",
-                    },
-                },
-                "required": ["path", "content"],
-            },
-        },
-    },
-]
+# 阶段1: supervisor 工具 schema 单一来源（原内联 _AGENT_TOOLS 已迁至
+# src/tools/supervisor_tools.py —— 固定顺序/字节级稳定，勿重排勿改写）
+from src.tools.supervisor_tools import get_supervisor_tool_schemas
+_AGENT_TOOLS = get_supervisor_tool_schemas()
 
 
 def _make_tool_call(tc: dict) -> dict:
@@ -463,7 +300,7 @@ async def expert_load_node(state: AgentState) -> dict:
     try:
         from src.session.manager import session_manager
         from src.core.context_budget import ContextBudget, ContextBudgetConfig
-        from src.core.context_manager import ContextManager
+        from src.core.context_manager import ContextManager, finalize_load_result
         from src.guardrails.memory import memory_store
 
         budget_config = ContextBudgetConfig(
@@ -480,56 +317,64 @@ async def expert_load_node(state: AgentState) -> dict:
         )
 
         ctx = await ctx_mgr.load(session_id, query, mode)
-        result["session_id"] = ctx.session_id
-        result["history_summary"] = ctx.history_summary
-        result["long_term_memory"] = ctx.long_term_memory
-        result["search_suggestions"] = ctx.search_suggestions
-        result["format_hint"] = ctx.format_hint
-
-        history_msgs = list(ctx.history_messages) if ctx.history_messages else []
-        if history_msgs:
-            result["messages"] = history_msgs
-
-        # v8.3.8: 历史检索证据块（跨轮复用）——supervisor 装配时注入
-        try:
-            block = session_manager.build_evidence_block(session_id, limit=2)
-            if block:
-                result["history_evidence_block"] = block
-        except Exception as e:
-            logger.warning(f"[ExpertGraph:load] evidence block failed: {e}")
-
-        load_summary = f"history={len(history_msgs)}msgs"
-        if result.get("history_evidence_block"):
-            load_summary += ", evidence_block=yes"
-        if ctx.format_hint:
-            load_summary += f", fmt={ctx.format_hint}"
-        result["_trace"] = {"node": "expert_load", "elapsed_ms": 0, "summary": load_summary}
-
-        hist_chars = sum(len(m.content or "") for m in history_msgs if hasattr(m, 'content'))
-        est_tokens = budget.estimate_tokens(history_msgs)
-        try:
-            emit_encoded("context_status", {
-                "history_msgs": len(history_msgs),
-                "history_chars": hist_chars,
-                "ltm_recalled": bool(ctx.long_term_memory),
-                "ltm_chars": len(ctx.long_term_memory or ""),
-                "suggestions": ctx.search_suggestions[:3] if ctx.search_suggestions else [],
-                "format_hint": ctx.format_hint or "",
-                "estimated_tokens": est_tokens,
-                "max_tokens": budget_config.max_tokens,
-                "soft_threshold": budget_config.soft_threshold,
-                "hard_threshold": budget_config.hard_threshold,
-                "compressed": bool(ctx.history_summary),
-                "compression_len": len(ctx.history_summary or ""),
-            })
-        except Exception:
-            pass
-        return result
+        # v8.4: 收尾装配收敛至 context_manager.finalize_load_result
+        # （与 light 图共用，消除双实现漂移）
+        return finalize_load_result(
+            ctx,
+            session_manager=session_manager,
+            session_id=session_id,
+            budget=budget,
+            node_label="expert_load",
+            log_prefix="ExpertGraph",
+        )
 
     except Exception as e:
         logger.warning(f"[ExpertGraph:load] failed: {e}")
         result["_trace"] = {"node": "expert_load", "elapsed_ms": 0, "summary": "unavailable"}
         return result
+
+
+def _build_status_content(
+    *,
+    turn: int,
+    max_turns: int,
+    tool_call_count: int,
+    max_tools_per_turn: int,
+    unique_docs: int,
+    used_queries: list,
+    consecutive_failures: int,
+    tool_names_called: list,
+    budget_ratio: float | None = None,
+) -> str:
+    """v8.4: 状态栏内容构建（代码确定性维护，书 2.6 三经验之一：
+    状态栏用代码算、绝不拿 LLM 维护；准确率是一线指标）。
+    抽离为纯函数以便单测（状态栏正确性 = 生产指标）。"""
+    todo: list[str] = []
+    if tool_call_count > 0:
+        todo.append("[✓] 评估需求")
+        has_retrieve = "call_retrieve_agent" in tool_names_called
+        todo.append("[✓] 检索文献" if has_retrieve else "[ ] 检索文献（如需）")
+        if any(n in tool_names_called for n in ("call_write_agent", "write_local_file")):
+            todo.append("[✓] 撰写/保存内容")
+        elif "call_analyze_agent" in tool_names_called:
+            todo.append("[✓] 分析/实验设计")
+        todo.append("[ ] 输出最终回答")
+    else:
+        todo = ["[ ] 评估需求", "[ ] 检索文献（如需）", "[ ] 输出最终回答"]
+
+    lines = [
+        "<agent_status>",
+        f"当前轮次: {turn}/{max_turns}",
+        f"已执行工具调用: {tool_call_count} 次 | 每轮预算: {max_tools_per_turn}",
+        f"已检索去重文献: {unique_docs} 篇",
+        f"已用检索关键词: {('; '.join(used_queries[-5:]) or '(暂无)')}",
+        f"连续工具失败: {consecutive_failures} 次 (≥3 强制收尾)",
+        f"TODO: {' '.join(todo)}",
+    ]
+    if budget_ratio is not None:
+        lines.append(f"上下文占用: {budget_ratio:.1%}")
+    lines.append("</agent_status>")
+    return "\n".join(lines)
 
 
 async def supervisor_node(state: AgentState) -> dict:
@@ -551,6 +396,7 @@ async def supervisor_node(state: AgentState) -> dict:
         query=query,
         history_summary=state.get("history_summary"),
         long_term_memory=state.get("long_term_memory"),
+        resident_cards=state.get("resident_cards"),
         search_suggestions=state.get("search_suggestions", []),
         format_hint=format_hint,
     )
@@ -567,7 +413,9 @@ async def supervisor_node(state: AgentState) -> dict:
     # v8.3.8: 本轮轨迹起点（save 节点完整持久化含工具配对）
     trace_start_index = len(messages) - 1
 
-    llm_base = ChatOpenAI(
+    # v8.4: 客户端进程级复用（llm_pool），避免每请求新建 ChatOpenAI/连接池
+    from src.core.llm_pool import get_llm as _pool_get_llm
+    llm_base = _pool_get_llm(
         model=get_deepseek_model(),
         api_key=settings.RESOLVED_MAIN_API_KEY,
         base_url=settings.MAIN_BASE_URL,
@@ -610,15 +458,20 @@ async def supervisor_node(state: AgentState) -> dict:
             t_llm = time.perf_counter()
             # v8.3.5 Agent 状态栏 (规范 2.6): 上下文末尾注入显式状态，
             # 模型无需从长历史"数"工具调用/文献数——"数不清"是预算超支的深层根因
+            # v8.4: 内容由 _build_status_content 代码确定性维护（含 TODO 列表/预算占用率）
             status_msg = HumanMessage(content=(
-                "<agent_status>\n"
-                f"当前轮次: {turn+1}/{SUPERVISOR_MAX_TURNS}\n"
-                f"已执行工具调用: {tool_call_count} 次 | 每轮预算: {max_tools_per_turn}\n"
-                f"已检索去重文献: {_count_unique_dois(all_main_results)} 篇\n"
-                f"已用检索关键词: {( '; '.join(used_queries[-5:]) or '(暂无)')}\n"
-                f"连续工具失败: {consecutive_failures} 次 (≥3 强制收尾)\n"
-                "</agent_status>\n"
-                "以上为系统注入的运行时状态摘要，请据此决策，不要重复已完成步骤。"))
+                _build_status_content(
+                    turn=turn + 1,
+                    max_turns=SUPERVISOR_MAX_TURNS,
+                    tool_call_count=tool_call_count,
+                    max_tools_per_turn=max_tools_per_turn,
+                    unique_docs=_count_unique_dois(all_main_results),
+                    used_queries=used_queries,
+                    consecutive_failures=consecutive_failures,
+                    tool_names_called=tool_names_called,
+                )
+                + "\n\n以上为系统注入的运行时状态摘要，请据此决策，不要重复已完成步骤。"
+            ))
             call_messages = list(messages) + [status_msg]
             # v8.3.6 预算前移: 每次调用前估算，超硬阈值强制收尾（防窗口溢出），
             # 超软阈值在状态栏提示模型收敛
@@ -632,6 +485,22 @@ async def supervisor_node(state: AgentState) -> dict:
                             f"硬阈值 {supervisor_budget.config.hard_threshold:.0%}，强制收尾")
                         forced_final = True
                         break
+                    # v8.4: 预算占用率进状态栏（模型随时可见，无需自己估算）
+                    status_msg = HumanMessage(content=(
+                        _build_status_content(
+                            turn=turn + 1,
+                            max_turns=SUPERVISOR_MAX_TURNS,
+                            tool_call_count=tool_call_count,
+                            max_tools_per_turn=max_tools_per_turn,
+                            unique_docs=_count_unique_dois(all_main_results),
+                            used_queries=used_queries,
+                            consecutive_failures=consecutive_failures,
+                            tool_names_called=tool_names_called,
+                            budget_ratio=ratio,
+                        )
+                        + "\n\n以上为系统注入的运行时状态摘要，请据此决策，不要重复已完成步骤。"
+                    ))
+                    call_messages = list(messages) + [status_msg]
                     if ratio >= supervisor_budget.config.soft_threshold:
                         logger.warning(
                             f"[ExpertGraph:supervisor] 上下文占用 {ratio:.1%} ≥ "
@@ -657,14 +526,10 @@ async def supervisor_node(state: AgentState) -> dict:
             dt_llm = (time.perf_counter() - t_llm) * 1000
             messages.append(response)
             # v8.3.3: 推送真实 token 增量（前端面板实时刷新，避免累计值重复计数）
+            # 阶段0: 统一经 cache_metrics 提取（含 prompt_cache 命中字段）
             try:
-                usage = (getattr(response, "usage_metadata", None)
-                         or (getattr(response, "response_metadata", {}) or {}).get("usage", {}))
-                if isinstance(usage, dict) and usage.get("total_tokens"):
-                    emit_usage_delta(session_id, "supervisor",
-                                     usage.get("input_tokens", 0),
-                                     usage.get("output_tokens", 0),
-                                     usage.get("total_tokens", 0))
+                from src.core.cache_metrics import emit_usage_from_response
+                emit_usage_from_response(session_id, "supervisor", response)
             except Exception:
                 pass
 
@@ -895,7 +760,9 @@ async def supervisor_node(state: AgentState) -> dict:
                 messages.append(HumanMessage(content=(
                     "检测到连续工具失败，立即停止调用工具，"
                     "基于已有信息给出最终回答（信息不足请明确说明）。")))
-                final_resp = await llm_base.ainvoke(messages)
+                # v8.4: 收尾保持带工具客户端（请求载荷结构一致，前缀缓存友好；
+                # 停止行为由 HumanMessage 指令约束，不靠切换无工具客户端）
+                final_resp = await llm_with_tools.ainvoke(messages)
                 answer = final_resp.content or ""
                 break
 
@@ -911,7 +778,7 @@ async def supervisor_node(state: AgentState) -> dict:
             messages.append(HumanMessage(content=(
                 "上下文接近上限，立即停止调用工具，"
                 "基于已有信息给出最终回答（信息不足请明确说明）。")))
-            final_resp = await llm_base.ainvoke(messages)
+            final_resp = await llm_with_tools.ainvoke(messages)
             answer = final_resp.content or ""
         else:
             logger.info("[ExpertGraph:supervisor] max turns, forcing final")
@@ -921,7 +788,7 @@ async def supervisor_node(state: AgentState) -> dict:
                 "Provide your final answer now. "
                 "If information is insufficient, explain what is missing."
             )))
-            final_resp = await llm_base.ainvoke(messages)
+            final_resp = await llm_with_tools.ainvoke(messages)
             answer = final_resp.content or ""
 
     except Exception as e:
@@ -1079,22 +946,33 @@ async def expert_save_node(state: AgentState) -> dict:
         logger.warning(f"[ExpertGraph:save] failed: {e}")
 
     try:
-        from src.guardrails.memory import memory_store
+        # v8.4: LTM 提取转后台（spawn），不与响应抢时间；写入走 ADD-only + 置信度门槛
+        # （书 3.1 记忆生命周期: 后台提取候选 → 核验 → 更新；提取器不阻塞主链路）
+        from src.core.background import spawn as _spawn
+
+        def _extract_and_save_ltm(q: str, a: str, sid: str):
+            try:
+                from src.guardrails.memory import memory_store
+                facts = memory_store.extract_key_facts(q, a)
+                for f in facts:
+                    memory_store.save_long_term_fact(
+                        f.get("key", ""),
+                        f.get("value", ""),
+                        f.get("confidence", 0.5),
+                        owner_session=sid,
+                        source_query=q,
+                    )
+            except Exception as e:
+                logger.debug(f"[ExpertGraph:save] LTM background extract failed: {e}")
+
         if len(answer) > 500:
             is_substantial = any(
                 kw in answer
                 for kw in ("###", "结论", "摘要", "引言", "核心结论", "局限与边界")
             )
             if is_substantial:
-                facts = await asyncio.to_thread(memory_store.extract_key_facts, query, answer)
-                for f in facts:
-                    memory_store.save_long_term_fact(
-                        f.get("key", ""),
-                        f.get("value", ""),
-                        f.get("confidence", 0.5),
-                        owner_session=session_id,
-                        source_query=query,
-                    )
+                _spawn(asyncio.to_thread(
+                    _extract_and_save_ltm, query, answer, session_id))
     except Exception as e:
         logger.debug(f"[ExpertGraph:save] LTM skip: {e}")
 

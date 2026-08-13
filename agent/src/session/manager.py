@@ -159,6 +159,21 @@ class SessionManager:
                             logger.info(f"[SessionManager] added column: {col}")
                         except Exception:
                             pass
+                # v8.4 压缩检查点（存储全量·发送裁剪：记录"已摘要至哪条消息 + 摘要文本"，
+                # 原始轨迹永不删除——发送视图基于 checkpoint 增量构建，防摘要套摘要）
+                cur = conn.execute("PRAGMA table_info(sessions)")
+                session_cols = {row[1] for row in cur.fetchall()}
+                for col, col_type in [
+                    ("checkpoint_msg_id", "INTEGER DEFAULT 0"),
+                    ("checkpoint_summary", "TEXT DEFAULT ''"),
+                    ("checkpoint_updated_at", "TEXT DEFAULT ''"),
+                ]:
+                    if col not in session_cols:
+                        try:
+                            conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} {col_type}")
+                            logger.info(f"[SessionManager] added column: {col}")
+                        except Exception:
+                            pass
                 conn.commit()
         except Exception as e:
             logger.debug(f"[SessionManager] schema migration: {e}")
@@ -207,13 +222,16 @@ class SessionManager:
     async def get_messages(self, session_id: str) -> List[BaseMessage]:
         return await asyncio.to_thread(self._get_messages_sync, session_id)
 
-    def _get_messages_sync(self, session_id: str) -> List[BaseMessage]:
+    def _get_messages_sync(self, session_id: str, with_ids: bool = False):
+        """读回会话历史。with_ids=True 时返回 (messages, row_ids)，
+        row_ids 与 messages 一一对应（压缩 checkpoint 定位用）。"""
         import sqlite3
         messages: List[BaseMessage] = []
+        row_ids: List[int] = []
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.execute(
-                "SELECT msg_type, content, tool_call_id, tool_calls_json, name "
+                "SELECT id, msg_type, content, tool_call_id, tool_calls_json, name "
                 "FROM messages WHERE session_id = ? ORDER BY id ASC",
                 (session_id,),
             )
@@ -248,9 +266,55 @@ class SessionManager:
                         ))
                     elif msg_type == "system":
                         messages.append(SystemMessage(content=content))
+                    else:
+                        continue
+                    row_ids.append(row["id"])
                 except Exception as e:
                     logger.debug(f"[SessionManager] skip unparseable message: {e}")
+        if with_ids:
+            return messages, row_ids
         return messages
+
+    async def get_messages_with_ids(self, session_id: str):
+        """v8.4: 返回 (messages, row_ids)（压缩视图构建/checkpoint 定位用）。"""
+        return await asyncio.to_thread(self._get_messages_sync, session_id, True)
+
+    # ── v8.4 压缩检查点（存储全量·发送裁剪）──
+
+    def get_checkpoint(self, session_id: str) -> dict:
+        """返回 {"msg_id": int, "summary": str}；无则 msg_id=0。"""
+        import sqlite3
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    "SELECT checkpoint_msg_id, checkpoint_summary "
+                    "FROM sessions WHERE session_id = ?",
+                    (session_id,)).fetchone()
+                if not row:
+                    return {"msg_id": 0, "summary": ""}
+                return {"msg_id": row["checkpoint_msg_id"] or 0,
+                        "summary": row["checkpoint_summary"] or ""}
+        except Exception as e:
+            logger.debug(f"[SessionManager] get_checkpoint failed: {e}")
+            return {"msg_id": 0, "summary": ""}
+
+    def set_checkpoint(self, session_id: str, msg_id: int, summary: str) -> None:
+        """持久化压缩检查点：原始消息永不删除，只记录摘要位置。"""
+        import sqlite3
+        try:
+            lock = _get_session_lock(session_id)
+            with lock:
+                with sqlite3.connect(self.db_path) as conn:
+                    conn.execute(
+                        "UPDATE sessions SET checkpoint_msg_id=?, "
+                        "checkpoint_summary=?, checkpoint_updated_at=? "
+                        "WHERE session_id=?",
+                        (int(msg_id or 0), summary or "",
+                         datetime.now().isoformat(), session_id))
+                    conn.commit()
+        except Exception as e:
+            logger.warning(f"[SessionManager] set_checkpoint failed: {e}")
 
     async def save_messages(self, session_id: str, messages: List[BaseMessage],
                             idempotency_key: str = "") -> bool:
@@ -339,10 +403,15 @@ class SessionManager:
         return True
 
     async def replace_history(self, session_id: str, messages: List[BaseMessage]) -> None:
-        """原子替换会话历史（压缩/截断后持久化，v8.3.1）。事务内 DELETE+INSERT，失败不改动原数据。"""
+        """[DEPRECATED v8.4] 原子替换会话历史。
+
+        存储全量·发送裁剪架构下不再调用：原始轨迹 append-only 永不改写，
+        压缩改为发送视图构建 + checkpoint（见 set_checkpoint）。
+        保留此方法仅为兼容旧调用方。
+        """
         try:
             await asyncio.to_thread(self._replace_history_sync, session_id, messages)
-            logger.info(f"[SessionManager] history replaced: {len(messages)} msgs for {session_id[:8]}")
+            logger.info(f"[SessionManager] history replaced (DEPRECATED): {len(messages)} msgs for {session_id[:8]}")
         except Exception as e:
             logger.error(f"[SessionManager] replace_history failed: {e}")
 
@@ -374,7 +443,8 @@ class SessionManager:
             conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
             conn.execute("DELETE FROM session_evidence WHERE session_id = ?", (session_id,))
             conn.execute(
-                "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
+                "UPDATE sessions SET updated_at = ?, checkpoint_msg_id = 0, "
+                "checkpoint_summary = '' WHERE session_id = ?",
                 (datetime.now().isoformat(), session_id),
             )
             conn.commit()
