@@ -131,6 +131,17 @@ def _build_plan_prompt(material_pack: list[dict], target_chars: int, retry_info:
             f"检索材料:\n{material_text}{extra}")
 
 
+MATERIAL_EVIDENCE_MAX_CHARS = 1500  # v8.3.7 G1: 证据保真——chunk 正文中位数 1054 字符，此前 300 截断丢失机制细节
+
+
+def _material_evidence(r: dict) -> str:
+    """取材料证据文本：chunk 正文（text）优先（含机制/数字细节），摘要次之。"""
+    text = str(r.get("text", "") or "").strip()
+    if text:
+        return text[:MATERIAL_EVIDENCE_MAX_CHARS]
+    return str(r.get("abstract", r.get("snippet", "")))[:MATERIAL_EVIDENCE_MAX_CHARS]
+
+
 def _format_material_pack(material_pack: list[dict], max_entries: int = 25) -> str:
     """材料包 → 文本（供 Plan 阶段 LLM 阅读）。"""
     if not material_pack:
@@ -139,8 +150,8 @@ def _format_material_pack(material_pack: list[dict], max_entries: int = 25) -> s
     for i, r in enumerate(material_pack[:max_entries], 1):
         doi = r.get("doi", "")
         title = r.get("title", r.get("name", "Untitled"))[:120]
-        abstract = str(r.get("abstract", r.get("snippet", r.get("text", ""))))[:300]
-        lines.append(f"[{i}] {title} | DOI: {doi or 'N/A'}\n    {abstract}")
+        evidence = _material_evidence(r)
+        lines.append(f"[{i}] {title} | DOI: {doi or 'N/A'}\n    {evidence}")
     return "\n".join(lines)
 
 
@@ -353,6 +364,7 @@ def _extract_material_subsets(plan_section: dict, material_pack: list[dict]) -> 
         if doi:
             by_doi[doi] = r
     picked = []
+    unmatched_refs = []
     for ref in refs:
         ref_s = str(ref).strip()
         if not ref_s:
@@ -368,19 +380,26 @@ def _extract_material_subsets(plan_section: dict, material_pack: list[dict]) -> 
                     break
         if r and r not in picked:
             picked.append(r)
+        elif r is None:
+            # v8.3.7 G3: 未匹配 refs 显式反馈——LLM 明确知道证据缺口
+            unmatched_refs.append(ref_s[:80])
     if not picked:
         # 兜底: 取材料包前 3 篇
         picked = material_pack[:3]
     lines = []
     total = 0
     for r in picked:
-        snippet = str(r.get("abstract", r.get("snippet", r.get("text", ""))))[:400]
-        line = f"- {r.get('title', 'Untitled')[:100]} | DOI: {r.get('doi', 'N/A')}\n  {snippet}"
+        evidence = _material_evidence(r)
+        line = f"- {r.get('title', 'Untitled')[:100]} | DOI: {r.get('doi', 'N/A')}\n  {evidence}"
         total += len(line)
-        if total > 2000:
+        if total > 8000:
             break
         lines.append(line)
-    return "\n".join(lines) or "(无匹配材料)"
+    out = "\n".join(lines) or "(无匹配材料)"
+    if unmatched_refs:
+        out += (f"\n\n⚠️ 以下大纲 refs 未在材料库中匹配到: {'; '.join(unmatched_refs)}"
+                f"——相关内容需标注 [模型知识] 或省略，不得虚构文献支撑。")
+    return out
 
 
 def _build_section_prompt(plan: dict, idx: int, section: dict, running_context: str,
@@ -680,7 +699,7 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
     except Exception:
         pass
 
-    # 断点续传: 同 session+path 的未完成任务 → 复用已完成的 Plan
+    # 断点续传: 同 session+path 的未完成任务 → 复用已完成的 Plan 与材料
     # (fix: plan 必须前置初始化，否则非续传路径引用未绑定变量 → UnboundLocalError)
     resume_completed = []
     task_id = ""
@@ -693,6 +712,11 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
                 plan = resumable["plan"]
                 resume_completed = resumable["completed"]
                 task_id = resumable["task_id"]
+                # v8.3.7 G2: 材料持久化复用——断点续传不再依赖重新检索
+                saved_materials = resumable.get("materials") or []
+                if saved_materials and len(saved_materials) >= len(material_pack):
+                    material_pack = saved_materials
+                    logger.info(f"[WritePipeline] resume: 复用持久化材料 {len(material_pack)} 篇")
                 logger.info(f"[WritePipeline] resume task {task_id}: "
                             f"{len(resume_completed)}/{len(plan.get('sections', []))} 章已完成")
     except Exception as e:
@@ -719,7 +743,7 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
     if not task_id:
         try:
             from src.core.write_pipeline_state import start_task
-            task_id = start_task(session_id, output_path, plan)
+            task_id = start_task(session_id, output_path, plan, material_pack)
         except Exception as e:
             logger.warning(f"[WritePipeline] start_task failed: {e}")
 

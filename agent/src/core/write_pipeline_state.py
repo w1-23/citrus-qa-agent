@@ -38,22 +38,36 @@ def _connect() -> sqlite3.Connection:
         )
     """)
     conn.commit()
+    # v8.3.7 G2: materials_json 列迁移（材料持久化，断点续传复用）
+    try:
+        cur = conn.execute("PRAGMA table_info(pipeline_tasks)")
+        existing = {row[1] for row in cur.fetchall()}
+        if "materials_json" not in existing:
+            conn.execute("ALTER TABLE pipeline_tasks ADD COLUMN materials_json TEXT")
+            conn.commit()
+    except Exception as e:
+        logger.warning(f"[WritePipeline] materials column migration: {e}")
     return conn
 
 
-def start_task(session_id: str, output_path: str, plan: dict) -> str:
+def start_task(session_id: str, output_path: str, plan: dict,
+               materials: Optional[list] = None) -> str:
     """Plan 成功后写入任务记录。返回 task_id。"""
     task_id = uuid.uuid4().hex[:12]
     try:
         with _connect() as conn:
             conn.execute(
                 "INSERT INTO pipeline_tasks (task_id, session_id, output_path, plan_json, "
-                "completed_sections, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                "completed_sections, status, materials_json, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
                 (task_id, session_id, output_path, json.dumps(plan, ensure_ascii=False),
-                 "[]", "running", datetime.now().isoformat(), datetime.now().isoformat()),
+                 "[]", "running",
+                 json.dumps(materials or [], ensure_ascii=False)[:2_000_000],
+                 datetime.now().isoformat(), datetime.now().isoformat()),
             )
             conn.commit()
-        logger.info(f"[WritePipeline] task {task_id} started ({output_path})")
+        logger.info(f"[WritePipeline] task {task_id} started ({output_path}, "
+                    f"{len(materials or [])} materials)")
         return task_id
     except Exception as e:
         logger.warning(f"[WritePipeline] start_task failed: {e}")
@@ -72,10 +86,17 @@ def find_resumable_task(session_id: str, output_path: str) -> Optional[dict]:
             ).fetchone()
         if row is None:
             return None
+        materials = None
+        try:
+            mj = row["materials_json"] if "materials_json" in row.keys() else None
+            materials = json.loads(mj) if mj else None
+        except Exception:
+            materials = None
         return {
             "task_id": row["task_id"],
             "plan": json.loads(row["plan_json"]),
             "completed": json.loads(row["completed_sections"] or "[]"),
+            "materials": materials,
         }
     except Exception as e:
         logger.warning(f"[WritePipeline] find_resumable failed: {e}")

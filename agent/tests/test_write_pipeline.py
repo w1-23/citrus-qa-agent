@@ -374,6 +374,34 @@ def test_output_path_fallback():
             h.unlink()
 
 
+def test_evidence_fidelity():
+    import json
+    print("[证据] G1/G3 材料保真 + 缺口反馈 + G2 持久化")
+    # G1: text（chunk 正文）优先，机制细节保留
+    r = {"doi": "10.1/x", "title": "T1", "abstract": "摘要短",
+         "text": "Ruby 启动子中 Copia 型逆转录转座子插入是血橙低温着色关键机制，细节" * 20}
+    out = wp._format_material_pack([r], max_entries=5)
+    check("chunk 正文(text)优先进入材料", "逆转录转座子" in out and "机制" in out, out[:80])
+    check("证据长度放宽(>300)", len(out) > 300, f"len={len(out)}")
+    # G3: 未匹配 refs 显式反馈
+    sec = {"refs": ["10.1/nonexistent", "10.1/x"]}
+    sub = wp._extract_material_subsets(sec, [r])
+    check("未匹配 refs 提示", "未在材料库中匹配到" in sub and "10.1/nonexistent" in sub,
+          sub[:120])
+    # G2: 材料持久化（start_task 存 / find_resumable_task 取）
+    from src.core.write_pipeline_state import start_task, find_resumable_task, finish_task
+    import uuid as _u
+    sid = f"evd-{_u.uuid4().hex[:6]}"
+    op = f"test_evd_{_u.uuid4().hex[:6]}.md"
+    plan_obj = {"title": "T", "sections": [{"heading": "a"}]}
+    tid = start_task(sid, op, plan_obj, [r])
+    res = find_resumable_task(sid, op)
+    check("材料已持久化并可恢复", res is not None
+          and res.get("materials") and res["materials"][0]["doi"] == "10.1/x",
+          str(res and res.get("materials"))[:80])
+    finish_task(tid, "done")
+
+
 def json_doc(obj):
     import json
     return json.dumps(obj, ensure_ascii=False)
@@ -393,6 +421,7 @@ if __name__ == "__main__":
     test_verify_functions()
     test_react_fallback()
     test_output_path_fallback()
+    test_evidence_fidelity()
     print(f"\n结果: {len(passed)} passed / {len(failed)} failed")
     if failed:
         print("失败项:", failed)

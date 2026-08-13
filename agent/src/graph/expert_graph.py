@@ -246,19 +246,22 @@ def check_citation_support(answer: str, main_results: list,
 
 
 def _build_full_retrieval_context(main_results: list, web_results: list) -> str:
+    # v8.3.7 G1: 证据保真——chunk 正文（text）优先，摘要次之；此前 abstract[:500] 丢失机制细节
     parts = []
     for i, r in enumerate(main_results[:20]):
+        text = str(r.get("text", "") or "").strip()
+        evidence = (text or str(r.get("abstract", r.get("snippet", ""))))[:1500]
         parts.append(
             f"[{i+1}] {r.get('title', r.get('name', 'Untitled'))}\n"
             f"    Authors: {r.get('authors', 'N/A')}\n"
             f"    Year: {r.get('year', 'N/A')}  DOI: {r.get('doi', 'N/A')}\n"
-            f"    Abstract: {str(r.get('abstract', r.get('snippet', '')))[:500]}"
+            f"    证据: {evidence}"
         )
     for i, wr in enumerate(web_results[:10]):
         parts.append(
             f"[Web-{i+1}] {wr.get('title', wr.get('name', 'Untitled'))}\n"
             f"    URL: {wr.get('url', wr.get('link', 'N/A'))}\n"
-            f"    Snippet: {str(wr.get('snippet', wr.get('content', '')))[:300]}"
+            f"    Snippet: {str(wr.get('snippet', wr.get('content', '')))[:500]}"
         )
     body = "\n\n".join(parts) if parts else ""
     # v8.3.1: 明确标记检索结果性质，防止被 _looks_like_document 误判为"已成文文档"
