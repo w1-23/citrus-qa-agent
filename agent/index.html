@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Citrus QA Agent v8.4.10</title>
+<title>Citrus QA Agent v8.4.11</title>
 <script src="https://cdn.jsdelivr.net/npm/marked@4.3.0/marked.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -360,6 +360,19 @@ footer {
 .send-btn:hover { background: var(--accent-hover); box-shadow: 0 0 16px var(--accent-glow); }
 .send-btn:active { transform: scale(0.97); }
 .send-btn:disabled { opacity: 0.3; cursor: not-allowed; transform: none; box-shadow: none; }
+
+/* v8.4.11 停止按钮：运行中显示，点击中断当前任务（可修改问题后重新发送） */
+.stop-btn {
+  padding: 0 16px; height: 40px;
+  background: var(--error, #e5484d); color: #FFF;
+  border: none; border-radius: 8px;
+  font-weight: 600; font-size: 13px;
+  cursor: pointer; font-family: inherit;
+  margin-left: 6px;
+  transition: all 0.2s var(--ease-out-quint);
+}
+.stop-btn:hover { filter: brightness(1.15); box-shadow: 0 0 14px rgba(229,72,77,.45); }
+.stop-btn:active { transform: scale(0.97); }
 
 /* ── Sidebar ── */
 .sidebar {
@@ -794,7 +807,7 @@ footer {
 <header>
   <div class="logo-mark">C</div>
   <h1>Citrus QA Agent</h1>
-  <span class="version-badge" id="versionBadge">v8.4.10</span>
+  <span class="version-badge" id="versionBadge">v8.4.11</span>
   <!-- v8.4.8 HITL 服务端化：权限模式徽标 + 切换菜单 -->
   <span class="perm-badge" id="permBadge" onclick="togglePermMenu(event)" title="权限模式（HITL）：点击切换">权限: --</span>
   <div class="perm-menu" id="permMenu" style="display:none">
@@ -823,7 +836,7 @@ footer {
       <div class="message bot">
         <div class="avatar">◆</div>
         <div class="content">
-          您好，我是 <span id="welcomeVersion">Citrus QA Agent v8.4.10</span>。<br>
+          您好，我是 <span id="welcomeVersion">Citrus QA Agent v8.4.11</span>。<br>
           <span style="color:var(--text-muted);font-size:13px">本地 RAG 检索 · CrossRef 学术搜索 · 文献综述写作 · 实验设计 · 文件读写</span>
         </div>
       </div>
@@ -833,6 +846,8 @@ footer {
       <div class="input-box">
         <input type="text" id="user-input" placeholder="有什么想做的？" onkeypress="if(event.key==='Enter')sendMsg()">
         <button class="send-btn" id="send-btn" onclick="sendMsg()">发送</button>
+        <!-- v8.4.11 停止按钮：运行中显示；点击中断当前任务（修改问题后重新发送） -->
+        <button class="stop-btn" id="stop-btn" onclick="stopCurrentTask()" style="display:none" title="停止当前任务（输入有误时可停止后修改问题重新发送）">⏹ 停止</button>
       </div>
     </footer>
   </div>
@@ -945,7 +960,7 @@ function loadRuntimeConfig() {
 }
 /* v8.4.5: 版本单源——后端 /api/v2/config.version 下发，静态文案仅为离线回退 */
 function _appVersion() {
-  return (_runtimeConfig && _runtimeConfig.version) || '8.4.10';
+  return (_runtimeConfig && _runtimeConfig.version) || '8.4.11';
 }
 function applyAppVersion() {
   var v = _appVersion();
@@ -1074,6 +1089,44 @@ function setSendDisabled(val) {
   var exec = document.getElementById('buildExecBtn');
   if (btn) btn.disabled = val;
   if (exec) exec.disabled = val;
+  // v8.4.11: 停止按钮与发送按钮显隐联动（运行中显示，结束/出错/停止后隐藏）
+  var stopBtn = document.getElementById('stop-btn');
+  if (stopBtn) stopBtn.style.display = val ? 'inline-block' : 'none';
+}
+
+/* v8.4.11 用户中断（书中 §4.7.6 取消式处理）：
+   1) abort SSE 流（服务端普通问答在断开时取消 graph 任务）
+   2) POST /api/v2/chat/cancel 兜底取消该会话所有 running job
+      （覆盖 write 断连保活任务——此类任务客户端断开后仍在后台执行）
+   停止后可修改输入框内容直接重新发送（新请求 = 新 job）。 */
+function stopCurrentTask() {
+  if (currentAbortController) {
+    currentAbortController.abort();
+    currentAbortController = null;
+  }
+  if (sessionId) {
+    try {
+      fetch('/api/v2/chat/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId }),
+      }).catch(function() {});
+    } catch (e) {}
+  }
+  setSendDisabled(false);
+  userInput.focus();
+  userInput.placeholder = '已停止——可修改问题后按 Enter 重新发送';
+  var stopMsg = document.getElementById('stop-msg');
+  if (stopMsg) {
+    stopMsg.style.display = '';
+  } else if (currentRoundId > 0) {
+    var div = document.createElement('div');
+    div.id = 'stop-msg';
+    div.style.cssText = 'color:var(--error);font-weight:500;font-size:13px;padding:4px 0;margin-top:6px';
+    div.textContent = '⏹ 已停止当前任务（输入有误可修改后重新发送）';
+    chatContainer.appendChild(div);
+    chatContainer.scrollTop = chatContainer.scrollHeight;
+  }
 }
 
 var togglingMode = false;
@@ -1328,6 +1381,11 @@ async function sendMsg(isFollowUp) {
   currentQuery = query;
   _ctxData = null;
   _totalTokensUsed = 0;
+
+  // v8.4.11: 新发送清理停止提示，恢复输入框占位
+  var stopMsg = document.getElementById('stop-msg');
+  if (stopMsg) stopMsg.style.display = 'none';
+  userInput.placeholder = '有什么想做的？';
 
   addMessage('user', query);
   userInput.value = '';

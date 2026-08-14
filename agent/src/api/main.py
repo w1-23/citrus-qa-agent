@@ -116,6 +116,12 @@ app.add_middleware(
 )
 
 
+# v8.4.11 用户中断（停止功能）：运行中 graph 任务注册表 job_id -> asyncio.Task。
+# cancel 端点按会话找到 running job 后在此安全点取消（书中 §4.7.6 取消式处理：
+# 不在任意时刻强行掐断，而是向任务发取消信号，在 LLM/tool await 处抛 CancelledError）。
+_running_graph_tasks: dict = {}
+
+
 class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     # v8.3.7: 长度上限（防单条超长文本打爆预算/日志）+ 客户端幂等 ID（重试复用）
@@ -270,6 +276,8 @@ async def chat_v2(req: ChatRequest):
                 await event_queue.put(evt)
 
         async def process_graph():
+            # v8.4.11: 注册运行任务（cancel 端点按 job_id 定位取消）
+            _running_graph_tasks[job_id] = asyncio.current_task()
             try:
                 async for node_output in graph.astream(initial_state, stream_mode="updates",
                                                        recursion_limit=settings.RECURSION_LIMIT):
@@ -353,6 +361,8 @@ async def chat_v2(req: ChatRequest):
                 except Exception:
                     pass
             finally:
+                # v8.4.11: 注销运行任务（正常/取消/异常路径统一清理）
+                _running_graph_tasks.pop(job_id, None)
                 # Drain pending bridge/log events before sending sentinel
                 for _ in range(10):
                     if request_queue.empty() and log_queue.empty():
@@ -429,6 +439,48 @@ async def list_session_jobs(session_id: str):
     """v8.3.7 M2: 会话最近任务列表。"""
     from src.core import jobs as jobs_mod
     return {"jobs": jobs_mod.list_for_session(session_id)}
+
+
+# ── v8.4.11 用户中断：停止当前任务（书中 §4.7.6 取消式处理）──
+# 用户输入有误/改变主意时点"停止"：前端 abort SSE + 本端点取消该会话
+# 所有 running job（普通问答与 write 断连保活任务都覆盖）。取消在安全点
+# 生效（task.cancel() → LLM/tool await 处抛 CancelledError，不强行掐断
+# 文件写入等临界操作）；停止后可直接修改问题重新发送（新请求 = 新 job）。
+
+class CancelRequest(BaseModel):
+    session_id: str
+
+
+@app.post("/api/v2/chat/cancel")
+async def cancel_chat(req: CancelRequest):
+    from src.core import jobs as jobs_mod
+    cancelled: list[str] = []
+    try:
+        jobs = jobs_mod.list_for_session(req.session_id, limit=20)
+    except Exception as e:
+        logger.warning(f"[API] cancel list jobs failed: {e}")
+        jobs = []
+    for j in jobs:
+        if j.get("status") != "running":
+            continue
+        jid = j.get("job_id") or ""
+        if not jid:
+            continue
+        t = _running_graph_tasks.get(jid)
+        if t is not None and not t.done():
+            t.cancel()
+            cancelled.append(jid)
+            # 状态即时置 cancelled（任务内部 CancelledError 分支幂等重复置）
+            jobs_mod.update_job(jid, status="cancelled")
+            logger.info(f"[API] cancel signal sent: job={jid[:12]} session={req.session_id[:8]}")
+        else:
+            # 任务不在本进程（如服务重启后残留）——仅修正状态一致性
+            jobs_mod.update_job(jid, status="cancelled")
+            cancelled.append(jid)
+            logger.info(f"[API] stale running job marked cancelled: {jid[:12]}")
+    if not cancelled:
+        logger.info(f"[API] cancel: no running job for session={req.session_id[:8]}")
+    return {"status": "ok", "cancelled": cancelled, "count": len(cancelled)}
 
 
 @app.get("/api/v1/flags")

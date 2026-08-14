@@ -583,6 +583,57 @@ def test_retrieve_budget_and_convergence():
         pool.get_llm = orig_get_llm
 
 
+def test_chat_cancel_endpoint():
+    """v8.4.11 停止功能：cancel 端点取消会话所有 running job（安全点取消）。
+
+    书中 §4.7.6 取消式处理：向运行任务发取消信号（task.cancel() →
+    LLM/tool await 处抛 CancelledError），不在任意时刻强行掐断。
+    """
+    print("[SF-17] 用户中断：cancel 端点取消 running job")
+    import asyncio as _asyncio
+    import src.api.main as api_main
+    import src.core.jobs as jobs_mod
+
+    sid = "cancel-test-session"
+
+    async def _run():
+        # 1) 创建 job + 注册表挂一个"运行中"任务（模拟 graph 任务）
+        job_id = jobs_mod.create_job(sid, "rid-cancel", "chat")
+        ran = {"cancelled": False}
+
+        async def fake_graph_task():
+            try:
+                await _asyncio.sleep(60)
+            except _asyncio.CancelledError:
+                ran["cancelled"] = True
+                raise
+
+        loop = _asyncio.get_event_loop()
+        task = loop.create_task(fake_graph_task())
+        api_main._running_graph_tasks[job_id] = task
+        await _asyncio.sleep(0.05)  # 让任务进入 sleep
+
+        # 2) cancel 端点（无运行任务注册时仅置状态；有则发取消信号）
+        req = api_main.CancelRequest(session_id=sid)
+        r = await api_main.cancel_chat(req)
+        await _asyncio.sleep(0.1)  # 让取消传播
+
+        # 3) 断言
+        job = jobs_mod.get_job(job_id)
+        check("cancel 返回 job_id", job_id in r.get("cancelled", []),
+              str(r.get("cancelled")))
+        check("运行任务收到取消信号", ran["cancelled"], f"cancelled={ran['cancelled']}")
+        check("job 状态置 cancelled", (job or {}).get("status") == "cancelled",
+              str((job or {}).get("status")))
+        api_main._running_graph_tasks.pop(job_id, None)
+
+        # 4) 无 running job 时：幂等返回 count=0
+        r2 = await api_main.cancel_chat(req)
+        check("无 running job 幂等", r2.get("count") == 0, f"count={r2.get('count')}")
+
+    _asyncio.run(_run())
+
+
 def _restore_llm_pool(orig):
     import src.core.llm_pool as pool
     pool.get_llm = orig
@@ -674,6 +725,7 @@ if __name__ == "__main__":
     test_output_profile()
     test_retrieve_budget_and_convergence()
     test_session_history_restore()
+    test_chat_cancel_endpoint()
     test_pii_mask()
     test_hard_trim_identifiers()
     test_tool_meta_envelope()
