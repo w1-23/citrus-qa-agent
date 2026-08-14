@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Citrus QA Agent v8.4.7</title>
+<title>Citrus QA Agent v8.4.8</title>
 <script src="https://cdn.jsdelivr.net/npm/marked@4.3.0/marked.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -125,6 +125,30 @@ header h1 { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
   color: var(--text-muted); background: var(--bg-elevated);
   padding: 2px 7px; border-radius: 5px; border: 1px solid var(--border-hairline);
 }
+/* v8.4.8 HITL：权限模式徽标 + 切换菜单 */
+.perm-badge {
+  font-size: 10px; font-family: var(--font-mono); cursor: pointer;
+  color: var(--text-muted); background: var(--bg-elevated);
+  padding: 2px 7px; border-radius: 5px; border: 1px solid var(--border-hairline);
+  user-select: none; position: relative;
+}
+.perm-badge:hover { border-color: var(--accent); color: var(--accent); }
+.perm-badge.ask { color: #e8a33d; border-color: rgba(232,163,61,.5); background: rgba(232,163,61,.08); }
+.perm-badge.deny { color: var(--error); border-color: rgba(220,80,80,.5); background: rgba(220,80,80,.08); }
+.perm-menu {
+  position: absolute; top: 44px; right: 96px; z-index: 50;
+  min-width: 260px; background: var(--bg-surface);
+  border: 1px solid var(--border-hairline); border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0,0,0,.35); padding: 8px;
+}
+.perm-menu-title { font-size: 11px; color: var(--text-muted); padding: 4px 8px; }
+.perm-menu-item {
+  font-size: 12px; padding: 7px 8px; border-radius: 6px; cursor: pointer;
+  color: var(--text-primary);
+}
+.perm-menu-item:hover { background: var(--bg-hover); }
+.perm-menu-item.active { color: var(--accent); background: var(--bg-elevated); }
+.perm-menu-note { font-size: 10px; color: var(--text-muted); padding: 6px 8px 2px; opacity: .8; }
 .header-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
 .header-btn {
   padding: 5px 11px; border-radius: 6px; border: 1px solid var(--border-hairline);
@@ -770,7 +794,16 @@ footer {
 <header>
   <div class="logo-mark">C</div>
   <h1>Citrus QA Agent</h1>
-  <span class="version-badge" id="versionBadge">v8.4.7</span>
+  <span class="version-badge" id="versionBadge">v8.4.8</span>
+  <!-- v8.4.8 HITL 服务端化：权限模式徽标 + 切换菜单 -->
+  <span class="perm-badge" id="permBadge" onclick="togglePermMenu(event)" title="权限模式（HITL）：点击切换">权限: --</span>
+  <div class="perm-menu" id="permMenu" style="display:none">
+    <div class="perm-menu-title">权限模式（HITL）</div>
+    <div class="perm-menu-item" data-mode="auto_workspace" onclick="setPermMode('auto_workspace')">auto_workspace — 工作区写文件免询问（默认）</div>
+    <div class="perm-menu-item" data-mode="ask" onclick="setPermMode('ask')">ask — 危险操作弹卡片审批</div>
+    <div class="perm-menu-item" data-mode="deny" onclick="setPermMode('deny')">deny — 一律拒绝危险操作</div>
+    <div class="perm-menu-note">重启后回落到 config.yaml 配置值</div>
+  </div>
   <div class="header-actions">
     <button class="ctx-circle-btn" id="ctxCircleBtn" onclick="toggleCtxDrawer()" title="上下文用量">
       <svg viewBox="0 0 36 36" width="22" height="22">
@@ -790,7 +823,7 @@ footer {
       <div class="message bot">
         <div class="avatar">◆</div>
         <div class="content">
-          您好，我是 <span id="welcomeVersion">Citrus QA Agent v8.4.7</span>。<br>
+          您好，我是 <span id="welcomeVersion">Citrus QA Agent v8.4.8</span>。<br>
           <span style="color:var(--text-muted);font-size:13px">本地 RAG 检索 · CrossRef 学术搜索 · 文献综述写作 · 实验设计 · 文件读写</span>
         </div>
       </div>
@@ -882,7 +915,7 @@ function renderMarkdownSafe(text) {
   var renderer = new marked.Renderer();
   var origCode = renderer.code;
   renderer.code = function(code, lang) {
-    // v8.4.7: 兼容 marked>=5 的 token 对象签名（code 可能为 {text:...}），
+    // v8.4.8: 兼容 marked>=5 的 token 对象签名（code 可能为 {text:...}），
     // 否则代码块会渲染成 "[object Object]"
     if (code && typeof code === 'object') { lang = code.lang || ''; code = code.text || ''; }
     var cls = lang ? ' class="lang-' + escapeHtml(lang) + '"' : '';
@@ -912,7 +945,7 @@ function loadRuntimeConfig() {
 }
 /* v8.4.5: 版本单源——后端 /api/v2/config.version 下发，静态文案仅为离线回退 */
 function _appVersion() {
-  return (_runtimeConfig && _runtimeConfig.version) || '8.4.7';
+  return (_runtimeConfig && _runtimeConfig.version) || '8.4.8';
 }
 function applyAppVersion() {
   var v = _appVersion();
@@ -921,6 +954,40 @@ function applyAppVersion() {
   var w = document.getElementById('welcomeVersion');
   if (w) w.textContent = 'Citrus QA Agent v' + v;
   if (document.title) document.title = document.title.replace(/v\d+(\.\d+)+/, 'v' + v);
+  updatePermBadge();
+}
+/* v8.4.8 HITL 服务端化：权限模式徽标与 WebUI 切换 */
+var _permMode = null;
+var _permLabels = { 'auto_workspace': '权限: 自动(工作区免询问)', 'ask': '权限: 审批(ask)', 'deny': '权限: 拒绝(deny)' };
+function updatePermBadge() {
+  var mode = (_runtimeConfig && _runtimeConfig.permission_mode) || _permMode;
+  if (!mode) return;
+  _permMode = mode;
+  var b = document.getElementById('permBadge');
+  if (b) { b.textContent = _permLabels[mode] || ('权限: ' + mode); b.className = 'perm-badge ' + mode; }
+  var items = document.querySelectorAll('.perm-menu-item');
+  for (var i = 0; i < items.length; i++) {
+    items[i].className = 'perm-menu-item' + (items[i].getAttribute('data-mode') === mode ? ' active' : '');
+  }
+}
+function togglePermMenu(ev) {
+  var m = document.getElementById('permMenu');
+  if (ev) ev.stopPropagation();
+  m.style.display = m.style.display === 'none' ? 'block' : 'none';
+}
+document.addEventListener('click', function() {
+  var m = document.getElementById('permMenu');
+  if (m) m.style.display = 'none';
+});
+function setPermMode(mode) {
+  if (!confirm('切换权限模式为「' + (_permLabels[mode] || mode) + '」？\nask 模式下写文件需在审批卡片中点击允许。')) return;
+  fetch('/api/v2/permission/mode', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode: mode }),
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d && d.permission_mode) { _permMode = d.permission_mode; updatePermBadge(); }
+    document.getElementById('permMenu').style.display = 'none';
+  }).catch(function(e) { alert('切换失败: ' + e.message); });
 }
 loadRuntimeConfig();
 
@@ -1171,7 +1238,7 @@ function renderContextPanel(data) {
     } else if (stage === 'agent_start') {
       updateStatus('agent', '启动子Agent: ' + (data.agent || ''));
     } else if (stage === 'retrieval_done') {
-      // v8.4.7 F1: light 模式代码级预检索完成
+      // v8.4.8 F1: light 模式代码级预检索完成
       updateStatus('tool', '预检索完成 (' + (data.main_count||0) + ' 篇)');
       appendTerminal('✓ 预检索完成 · 通过阈值 ' + (data.main_count||0) + ' 篇');
     }
@@ -1379,7 +1446,7 @@ async function sendMsg(isFollowUp) {
       case 'tool_progress': updateStatus('tool', data.message||''); break;
       case 'tool_result':
         updateContextTokens((data.output||'').length * 0.7);
-        // v8.4.7 F3: 执行日志层级化——工具完成打一行汇总，不再逐条刷内部进度
+        // v8.4.8 F3: 执行日志层级化——工具完成打一行汇总，不再逐条刷内部进度
         appendTerminal('✓ ' + (data.tool_name||'工具') + ' · ' + (data.summary||'完成'));
         break;
       case 'agent_switch':

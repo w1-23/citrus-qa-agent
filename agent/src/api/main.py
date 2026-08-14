@@ -482,6 +482,27 @@ async def permission_grant(req: GrantRequest):
     return {"status": "ok", "tool_name": req.tool_name, "scope": req.scope}
 
 
+# ── v8.4.8 HITL 服务端化：权限模式运行时切换（WebUI 徽标菜单）──
+
+class ModeRequest(BaseModel):
+    mode: str
+
+
+@app.post("/api/v2/permission/mode")
+async def permission_mode_switch(req: ModeRequest):
+    """运行时切换权限模式（ask/auto_workspace/deny）。
+
+    生效即时（settings 运行时更新）；重启后回落到 config.yaml 配置值。
+    单用户部署下的 HITL 管理通道：WebUI 徽标菜单切换 + ask 模式审批卡片闭环。
+    """
+    if req.mode not in ("ask", "auto_workspace", "deny"):
+        raise HTTPException(status_code=400,
+                            detail=f"mode 必须为 ask/auto_workspace/deny，got {req.mode}")
+    settings.PERMISSION_MODE = req.mode
+    logger.info(f"[API] permission mode switched to {req.mode}")
+    return {"status": "ok", "permission_mode": settings.PERMISSION_MODE}
+
+
 # ── v8.4.3 运行时配置（前端"上下文概览"面板单一来源，删本地硬编码）──
 
 @app.get("/api/v2/config")

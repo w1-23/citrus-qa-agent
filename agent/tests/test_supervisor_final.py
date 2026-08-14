@@ -489,6 +489,100 @@ def test_tool_meta_envelope():
           meta1.get("status") == "error" and meta1.get("code") == "ERR_PARSE")
 
 
+def test_retrieve_budget_and_convergence():
+    print("[SF-15] 检索预算与代码收敛（v8.4.8）")
+    import asyncio as _asyncio
+    from langchain_core.messages import AIMessage, ToolMessage
+    from src.core import agent_runner as ar
+
+    state = {"rag": 0, "aca": 0, "turns": 0, "same_doi": False}
+
+    class FakeLLM2:
+        def __init__(self):
+            self._turn = 0
+
+        async def ainvoke(self, messages):
+            # 每轮换新检索角度：查询 token 差异显著（同轮 Jaccard≈0.56、
+            # 跨轮≈0.56，均 <0.85 去重阈值），确保测到的是预算上限而非去重
+            self._turn += 1
+            return AIMessage(content="", tool_calls=[
+                {"id": f"r{i}", "name": "citrus_rag_search",
+                 "args": {"query": f"retrieval angle {i} round {self._turn} "
+                                   f"specific {self._turn * 10 + i}"}}
+                for i in range(3)
+            ] + [
+                {"id": "a1", "name": "academic_search", "args": {"query": "web angle"}},
+                {"id": "a2", "name": "academic_search", "args": {"query": "web angle 2"}},
+            ])
+
+    class FakeChat2:
+        def __init__(self, *a, **k):
+            self.fake = FakeLLM2()
+
+        def bind_tools(self, tools=None):
+            return self
+
+        async def ainvoke(self, messages):
+            return await self.fake.ainvoke(messages)
+
+    orig_exec = ar.PartitionedToolNode.execute_tools
+
+    async def fake_exec(self, tool_calls):
+        msgs = []
+        for tc in tool_calls:
+            name = tc.get("name")
+            if name == "citrus_rag_search":
+                state["rag"] += 1
+                # same_doi=True: 恒返回同一批 8 个 DOI（≥6 触发收敛判定），
+                # 第 2 轮起新增 0 → 代码收敛提前结束（预期 rag=4）
+                n_items = 8 if state["same_doi"] else 3
+                n = 1 if state["same_doi"] else state["rag"]
+                msgs.append(ToolMessage(
+                    content="ok", tool_call_id=tc["id"], name=name,
+                    artifact={"main_results": [
+                        {"doi": f"10.{i}/{n}", "title": f"p{i}", "text": "x"}
+                        for i in range(1, n_items + 1)
+                    ]}))
+            else:
+                state["aca"] += 1
+                msgs.append(ToolMessage(content="ok", tool_call_id=tc["id"],
+                                        name=name, artifact={}))
+        return msgs
+
+    import src.core.llm_pool as pool
+    orig_get_llm = pool.get_llm
+
+    def _run():
+        loop = _asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(ar.run_agent(
+                "retrieve-agent", {"goal": "g", "query": "q"}))
+        finally:
+            loop.close()
+
+    try:
+        ar.PartitionedToolNode.execute_tools = fake_exec
+        pool.get_llm = lambda **kw: FakeChat2(**kw)
+
+        # A) 预算: 每轮 3 rag 请求 → 只执行 2；academic 每轮只执行 1
+        state.update(rag=0, aca=0, turns=0, same_doi=False)
+        r = _run()
+        check("每轮 rag 上限 2（3 轮共 6）", state["rag"] == 6, f"rag={state['rag']}")
+        check("请求级 rag 预算 ≤6", state["rag"] <= 6, f"rag={state['rag']}")
+        check("每轮 academic 上限 1（3 轮共 3）", state["aca"] == 3, f"aca={state['aca']}")
+        check("回执含预算拦截说明", "SEARCH_BUDGET" in r.get("result", ""),
+              "result 未含预算说明")
+
+        # B) 收敛: 从第 2 轮起无新证据（同 DOI）→ 代码提前结束（2 轮 4 次 rag）
+        state.update(rag=0, aca=0, turns=0, same_doi=True)
+        r2 = _run()
+        check("边际收益过低 → 提前收敛（rag=4）", state["rag"] == 4,
+              f"rag={state['rag']}")
+    finally:
+        ar.PartitionedToolNode.execute_tools = orig_exec
+        pool.get_llm = orig_get_llm
+
+
 def _restore_llm_pool(orig):
     import src.core.llm_pool as pool
     pool.get_llm = orig
@@ -508,9 +602,11 @@ if __name__ == "__main__":
     test_evidence_report_builder()
     test_draft_publish()
     test_output_profile()
+    test_retrieve_budget_and_convergence()
     test_pii_mask()
     test_hard_trim_identifiers()
     test_tool_meta_envelope()
+    test_retrieve_budget_and_convergence()
     print(f"supervisor final tests: {len(passed)} passed, {len(failed)} failed")
     if failed:
         print("FAILED:", failed)
