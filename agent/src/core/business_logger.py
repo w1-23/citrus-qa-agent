@@ -55,10 +55,12 @@ def blog(event: str, **fields) -> None:
     """写一条业务事件。永不抛异常（日志失败不得影响主链路）。"""
     try:
         from src.core.tracing import get_request_id
+        from src.core.pii_mask import mask_sensitive
         rid = get_request_id() or "-"
         parts = [f"req={rid}", f"event={event}"]
         for k, v in fields.items():
-            s = str(v).replace("|", "/").replace("\r", " ").replace("\n", " ")
+            s = mask_sensitive(str(v))  # v8.4.6 B6: 日志脱敏
+            s = s.replace("|", "/").replace("\r", " ").replace("\n", " ")
             if len(s) > 300:
                 s = s[:300] + "..."
             parts.append(f"{k}={s}")

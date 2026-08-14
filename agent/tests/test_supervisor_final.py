@@ -423,6 +423,72 @@ def test_output_profile():
     check("综述类不注入", _build_output_profile(10, "review") == "")
 
 
+def test_pii_mask():
+    print("[SF-12] 日志脱敏（v8.4.6 B6）")
+    from src.core.pii_mask import mask_sensitive
+    s = "联系 zhang@test.com 或 13800138000，身份证 11010119900307123X，key=sk-abc1234567890123456789"
+    m = mask_sensitive(s)
+    check("邮箱脱敏", "zhang@test.com" not in m and "<email>" in m)
+    check("手机号脱敏", "13800138000" not in m and "<phone>" in m)
+    check("身份证脱敏", "11010119900307123X" not in m and "<idcard>" in m)
+    check("API Key 脱敏", "sk-abc1234567890123456789" not in m and "<api_key>" in m)
+    check("正常文本不受影响", mask_sensitive("柑橘黄龙病研究") == "柑橘黄龙病研究")
+
+
+def test_hard_trim_identifiers():
+    print("[SF-13] 硬截断保留标识符（v8.4.6 B2）")
+    from src.core.context_budget import ContextBudget, ContextBudgetConfig
+    from langchain_core.messages import HumanMessage, ToolMessage
+    cfg = ContextBudgetConfig(max_tokens=10, hard_threshold=0.9,
+                              keep_recent_turns=1, protect_recent_turns=1)
+    budget = ContextBudget(cfg)
+    msgs = [
+        HumanMessage(content="q1"),
+        ToolMessage(content="[1] DOI: 10.1000/abc 证据内容", tool_call_id="a", name="t"),
+        HumanMessage(content="q2"),
+        ToolMessage(content="[2] DOI: 10.2000/xyz 证据内容", tool_call_id="b", name="t"),
+        HumanMessage(content="q3"),
+        HumanMessage(content="q4"),
+    ]
+    out = budget._hard_trim(msgs, cfg)
+    text = "\n".join(str(getattr(m, "content", "")) for m in out)
+    check("被丢轮次的 DOI 已保留", "10.1000/abc" in text and "10.2000/xyz" in text)
+    check("保留标识符标记存在", "硬截断保留标识符" in text)
+    check("最近轮次保留(keep=1 仅保留 q4)", "q4" in text and "q3" not in text)
+
+
+def test_tool_meta_envelope():
+    print("[SF-14] 工具结果结构化 envelope（v8.4.6 B8）")
+    import asyncio as _asyncio
+    from langchain_core.tools import tool
+    from src.tools.registry import PartitionedToolNode
+
+    @tool
+    def _ok_tool(x: str) -> str:
+        """返回 ok 前缀字符串。"""
+        return f"ok:{x}"
+
+    @tool
+    def _err_tool(x: str) -> str:
+        """返回错误标记字符串。"""
+        return "[ERR_PARSE] 解析失败"
+
+    node = PartitionedToolNode([_ok_tool, _err_tool])
+    loop = _asyncio.new_event_loop()
+    try:
+        rs = loop.run_until_complete(node.execute_tools([
+            {"id": "1", "name": "_ok_tool", "args": {"x": "a"}},
+            {"id": "2", "name": "_err_tool", "args": {"x": "b"}},
+        ]))
+    finally:
+        loop.close()
+    meta0 = (getattr(rs[0], "artifact", {}) or {}).get("_meta", {})
+    meta1 = (getattr(rs[1], "artifact", {}) or {}).get("_meta", {})
+    check("成功工具 meta=ok/OK", meta0.get("status") == "ok" and meta0.get("code") == "OK")
+    check("失败工具 meta=error/ERR_PARSE",
+          meta1.get("status") == "error" and meta1.get("code") == "ERR_PARSE")
+
+
 def _restore_llm_pool(orig):
     import src.core.llm_pool as pool
     pool.get_llm = orig
@@ -442,6 +508,9 @@ if __name__ == "__main__":
     test_evidence_report_builder()
     test_draft_publish()
     test_output_profile()
+    test_pii_mask()
+    test_hard_trim_identifiers()
+    test_tool_meta_envelope()
     print(f"supervisor final tests: {len(passed)} passed, {len(failed)} failed")
     if failed:
         print("FAILED:", failed)

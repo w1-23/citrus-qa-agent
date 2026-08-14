@@ -1082,6 +1082,22 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
         location = f"未产生可保存内容（{output_path}）"
     summary = (f"综述{location}（{exec_result['total_chars']} 字符，"
                f"{exec_result['chapters']} 章）")
+    # v8.4.6 B9: 写作自检由代码校验（对照书 §1.2.2 验证 / 实验7-17"口头声称去验证"教训）
+    code_checks = {
+        "sections_ok": exec_result["chapters"],
+        "sections_total": len(plan.get("sections", [])),
+        "ref_issues": len(ref_issues),
+        "published": published,
+    }
+    if exec_result["chapters"] == len(plan.get("sections", [])) and not ref_issues:
+        summary += "\n代码自检: 章节完整、引用配对通过。"
+    else:
+        _issues = []
+        if exec_result["missing_sections"]:
+            _issues.append(f"缺章 {len(exec_result['missing_sections'])} 个")
+        if ref_issues:
+            _issues.append(f"引用问题 {len(ref_issues)} 项")
+        summary += f"\n代码自检: 未全部通过（{'；'.join(_issues)}）。"
     if exec_result["missing_sections"]:
         summary += f"\n⚠️ 缺章: {', '.join(exec_result['missing_sections'])}（生成失败）"
     if exec_result.get("truncated_sections"):
@@ -1097,4 +1113,6 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
             "chapters": exec_result["chapters"], "total_chars": exec_result["total_chars"],
             "missing_sections": exec_result["missing_sections"],
             "truncated_sections": exec_result.get("truncated_sections", []),
-            "reference_issues": ref_issues, "material_gap": gap}
+            "reference_issues": ref_issues, "material_gap": gap,
+            # v8.4.6 B8: 结构化状态（缺章/引用问题 → partial）
+            "status": "ok" if (not exec_result["missing_sections"] and not ref_issues) else "partial"}

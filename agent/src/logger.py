@@ -34,6 +34,18 @@ class RequestIdFilter(logging.Filter):
         return True
 
 
+class MaskingFormatter(logging.Formatter):
+    """v8.4.6 B6: 日志脱敏（PII 正则过滤）——输出到文件/控制台前统一掩码。"""
+
+    def format(self, record: logging.LogRecord) -> str:
+        s = super().format(record)
+        try:
+            from src.core.pii_mask import mask_sensitive
+            return mask_sensitive(s)
+        except Exception:
+            return s
+
+
 def setup_logging():
     """Configure root logger: INFO+ to file, WARNING+ to console."""
     log_level = getattr(logging, (settings.LOG_LEVEL or "INFO").upper(), logging.INFO)
@@ -49,7 +61,7 @@ def setup_logging():
         encoding="utf-8", backupCount=7
     )
     file_handler.setLevel(log_level)
-    file_handler.setFormatter(logging.Formatter(
+    file_handler.setFormatter(MaskingFormatter(
         "%(asctime)s | %(levelname)-5s | %(name)s | req=%(request_id)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     ))

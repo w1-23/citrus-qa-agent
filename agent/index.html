@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Citrus QA Agent v8.4.6</title>
+<title>Citrus QA Agent v8.4.7</title>
 <script src="https://cdn.jsdelivr.net/npm/marked@4.3.0/marked.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -770,7 +770,7 @@ footer {
 <header>
   <div class="logo-mark">C</div>
   <h1>Citrus QA Agent</h1>
-  <span class="version-badge" id="versionBadge">v8.4.6</span>
+  <span class="version-badge" id="versionBadge">v8.4.7</span>
   <div class="header-actions">
     <button class="ctx-circle-btn" id="ctxCircleBtn" onclick="toggleCtxDrawer()" title="上下文用量">
       <svg viewBox="0 0 36 36" width="22" height="22">
@@ -790,7 +790,7 @@ footer {
       <div class="message bot">
         <div class="avatar">◆</div>
         <div class="content">
-          您好，我是 <span id="welcomeVersion">Citrus QA Agent v8.4.6</span>。<br>
+          您好，我是 <span id="welcomeVersion">Citrus QA Agent v8.4.7</span>。<br>
           <span style="color:var(--text-muted);font-size:13px">本地 RAG 检索 · CrossRef 学术搜索 · 文献综述写作 · 实验设计 · 文件读写</span>
         </div>
       </div>
@@ -882,7 +882,7 @@ function renderMarkdownSafe(text) {
   var renderer = new marked.Renderer();
   var origCode = renderer.code;
   renderer.code = function(code, lang) {
-    // v8.4.6: 兼容 marked>=5 的 token 对象签名（code 可能为 {text:...}），
+    // v8.4.7: 兼容 marked>=5 的 token 对象签名（code 可能为 {text:...}），
     // 否则代码块会渲染成 "[object Object]"
     if (code && typeof code === 'object') { lang = code.lang || ''; code = code.text || ''; }
     var cls = lang ? ' class="lang-' + escapeHtml(lang) + '"' : '';
@@ -912,7 +912,7 @@ function loadRuntimeConfig() {
 }
 /* v8.4.5: 版本单源——后端 /api/v2/config.version 下发，静态文案仅为离线回退 */
 function _appVersion() {
-  return (_runtimeConfig && _runtimeConfig.version) || '8.4.6';
+  return (_runtimeConfig && _runtimeConfig.version) || '8.4.7';
 }
 function applyAppVersion() {
   var v = _appVersion();
@@ -1171,7 +1171,7 @@ function renderContextPanel(data) {
     } else if (stage === 'agent_start') {
       updateStatus('agent', '启动子Agent: ' + (data.agent || ''));
     } else if (stage === 'retrieval_done') {
-      // v8.4.6 F1: light 模式代码级预检索完成
+      // v8.4.7 F1: light 模式代码级预检索完成
       updateStatus('tool', '预检索完成 (' + (data.main_count||0) + ' 篇)');
       appendTerminal('✓ 预检索完成 · 通过阈值 ' + (data.main_count||0) + ' 篇');
     }
@@ -1379,7 +1379,7 @@ async function sendMsg(isFollowUp) {
       case 'tool_progress': updateStatus('tool', data.message||''); break;
       case 'tool_result':
         updateContextTokens((data.output||'').length * 0.7);
-        // v8.4.6 F3: 执行日志层级化——工具完成打一行汇总，不再逐条刷内部进度
+        // v8.4.7 F3: 执行日志层级化——工具完成打一行汇总，不再逐条刷内部进度
         appendTerminal('✓ ' + (data.tool_name||'工具') + ' · ' + (data.summary||'完成'));
         break;
       case 'agent_switch':

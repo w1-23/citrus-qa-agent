@@ -592,13 +592,18 @@ class SessionManager:
                     "SELECT COUNT(*) FROM session_evidence WHERE session_id=?",
                     (session_id,))
                 turn_seq = (cur.fetchone()[0] or 0) + 1
+                # v8.4.6 B3: report_text 超 8000 字符必须带截断标记（INV-08 透明）
+                _report = report_text
+                if len(_report) > 8000:
+                    _report = (_report[:8000]
+                               + "\n[报告已截断：原文超 8000 字符，全文见 messages 表]")
                 conn.execute(
                     "INSERT INTO session_evidence "
                     "(session_id, turn_seq, query, evidence_json, report_text, created_at) "
                     "VALUES (?,?,?,?,?,?)",
                     (session_id, turn_seq, query[:500],
                      json.dumps(evidence, ensure_ascii=False)[:1_000_000],
-                     report_text[:8000], datetime.now().isoformat()),
+                     _report, datetime.now().isoformat()),
                 )
                 conn.commit()
         logger.info(f"[SessionManager] evidence saved: session={session_id[:8]} "

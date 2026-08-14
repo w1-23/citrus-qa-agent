@@ -128,6 +128,30 @@ async def light_retrieve_node(state: AgentState) -> dict:
                            "summary": "unavailable"}}
 
 
+async def _light_force_final(messages: list) -> str:
+    """light 收尾统一函数（v8.4.6 B1：预算超限与跑满轮次共用）。
+
+    详尽中文措辞 + 临时列表（不入 turn_trace/历史）+ 未绑工具客户端
+    （杜绝收尾再发 tool_calls 导致空答）。
+    """
+    final_prompt = (
+        "请立即给出最终回答：基于已检索的全部证据，完整、详尽、结构化地作答；"
+        "不要精简、不要省略、不要提及工具或轮次限制；信息不足请逐条说明缺口。"
+    )
+    try:
+        final_resp = await _build_light_llm().ainvoke(
+            messages + [HumanMessage(content=final_prompt)])
+        answer = final_resp.content or ""
+    except Exception:
+        answer = ""
+    if not answer:
+        for m in reversed(messages):
+            if getattr(m, "content", None):
+                answer = m.content
+                break
+    return answer
+
+
 async def light_supervisor_node(state: AgentState) -> dict:
     """LLM autonomous routing supervisor.
 
@@ -185,6 +209,24 @@ async def light_supervisor_node(state: AgentState) -> dict:
 
     try:
         for turn in range(LIGHT_MAX_TURNS):
+            # v8.4.6 B1: 预算前移（与 expert 一致）——每次模型调用前检查上下文占用，
+            # 超硬阈值直接统一收尾（light 无独立熔断，窗口 1M 下风险低但须兜底）
+            try:
+                from src.core.context_budget import ContextBudget, ContextBudgetConfig
+                _budget = ContextBudget(ContextBudgetConfig(
+                    max_tokens=settings.CONTEXT_BUDGET_MAX_TOKENS,
+                    soft_threshold=settings.CONTEXT_BUDGET_SOFT_THRESHOLD,
+                    hard_threshold=settings.CONTEXT_BUDGET_HARD_THRESHOLD,
+                ))
+                _est = _budget.estimate_tokens(messages)
+                if _est / _budget.config.max_tokens >= _budget.config.hard_threshold:
+                    logger.warning(
+                        f"[LightGraph:supervisor] 上下文占用 "
+                        f"{_est / _budget.config.max_tokens:.1%} ≥ 硬阈值，强制收尾")
+                    answer = await _light_force_final(messages)
+                    break
+            except Exception:
+                pass
             t_llm = time.perf_counter()
             for attempt in range(3):
                 try:
@@ -236,13 +278,43 @@ async def light_supervisor_node(state: AgentState) -> dict:
                 except Exception:
                     pass
 
+            # v8.4.6 B4: light 补充检索同样代码级去重（与预检索 query 及本轮
+            # 已执行角度共享 seen 集）——防"预检索后模型又搜同一角度"
+            from src.core.agent_runner import check_query_redundant
+            from langchain_core.messages import ToolMessage
+            _seen = [query]
+            exec_calls: list = []
+            placeholder_results: dict = {}
+            for _idx, _tc in enumerate(response.tool_calls):
+                _td = (_tc if isinstance(_tc, dict)
+                       else {"id": getattr(_tc, "id", ""), "name": getattr(_tc, "name", ""),
+                             "args": dict(getattr(_tc, "args", None) or {})})
+                if _td.get("name") == "citrus_rag_search":
+                    _q = str((_td.get("args") or {}).get("query", "") or "")
+                    _reason = check_query_redundant(_q, _seen)
+                    if _reason:
+                        placeholder_results[_idx] = ToolMessage(
+                            content=f"[DEDUP] 检索角度重复: {_reason}。该检索未执行，请更换关键词/角度。",
+                            tool_call_id=_td.get("id", ""), name="citrus_rag_search",
+                            artifact={"main_results": [], "web_results": []})
+                        logger.info(f"[LightGraph:supervisor] 重复检索角度跳过: {_reason}")
+                        continue
+                    _seen.append(_q)
+                exec_calls.append((_idx, _tc))
+
             # Batch execute all tool calls (preserves original API call IDs)
             t_tool = time.perf_counter()
             from src.tools.registry import PartitionedToolNode
             tn = PartitionedToolNode(tools)
-            tool_results = await tn.execute_tools(list(response.tool_calls))
+            exec_results = (await tn.execute_tools([tc for _, tc in exec_calls])
+                            if exec_calls else [])
             dt_tool = (time.perf_counter() - t_tool) * 1000
             tool_call_count += len(response.tool_calls)
+            tool_results: list = [None] * len(response.tool_calls)
+            for (_idx, _tc), tr in zip(exec_calls, exec_results):
+                tool_results[_idx] = tr
+            for _idx, tr in placeholder_results.items():
+                tool_results[_idx] = tr
 
             for idx, tr in enumerate(tool_results):
                 messages.append(tr)
@@ -264,20 +336,7 @@ async def light_supervisor_node(state: AgentState) -> dict:
 
         else:
             logger.info("[LightGraph:supervisor] max turns, forcing final")
-            # v8.4.3 工单7: 与 expert 统一——详尽中文措辞 + 临时列表（不入 turn_trace/历史）
-            # + 未绑工具客户端（杜绝收尾再发 tool_calls 导致空答）
-            final_prompt = (
-                "请立即给出最终回答：基于已检索的全部证据，完整、详尽、结构化地作答；"
-                "不要精简、不要省略、不要提及工具或轮次限制；信息不足请逐条说明缺口。"
-            )
-            final_resp = await _build_light_llm().ainvoke(
-                messages + [HumanMessage(content=final_prompt)])
-            answer = final_resp.content or ""
-            if not answer:
-                for m in reversed(messages):
-                    if getattr(m, "content", None):
-                        answer = m.content
-                        break
+            answer = await _light_force_final(messages)
 
     except Exception as e:
         logger.error(f"[LightGraph:supervisor] error: {e}")

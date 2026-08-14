@@ -2,6 +2,7 @@
 import asyncio
 import contextvars
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -338,6 +339,26 @@ class PartitionedToolNode:
             msg = await _run_single_tool(tool, tc)
             dt_tool = (time.perf_counter() - t_tool) * 1000
             logger.info(f"[PartitionedNode] tool {tool.name} done ({dt_tool:.0f}ms)")
+            # v8.4.6 B8: 结构化结果 envelope——熔断/统计只读 _meta 字段，
+            # 不解析自由文本（书 §1.2.2"验证：输入隔离"）
+            try:
+                _content = str(getattr(msg, "content", "") or "")
+                _meta = {"tool": tool.name, "status": "ok", "code": "OK"}
+                if _content.startswith("[DEDUP]"):
+                    _meta.update(status="skipped", code="DEDUP")
+                elif _content.startswith("[ERR") or _content.startswith("[Error"):
+                    _m = re.match(r"\[([A-Z_]+)\]", _content)
+                    _meta.update(status="error",
+                                 code=_m.group(1) if _m else "ERR_UNKNOWN")
+                _art = getattr(msg, "artifact", None) or {}
+                if isinstance(_art, dict):
+                    _art = dict(_art)
+                else:
+                    _art = {}
+                _art["_meta"] = _meta
+                msg.artifact = _art
+            except Exception:
+                pass
             # v8.4.1: 业务日志——工具级事件（成功/失败/结果长度，排查检索与工具问题）
             try:
                 from src.core.business_logger import blog

@@ -329,7 +329,13 @@ class ContextBudget:
         return "（规则式摘要）\n" + "\n".join(parts)[:2000]
 
     def _hard_trim(self, messages: list, cfg: ContextBudgetConfig) -> list:
-        """硬阈值兜底: 大工具输出只留标识符行，仍超限则缩到最近 keep_recent_turns 轮。"""
+        """硬阈值兜底: 大工具输出只留标识符行，仍超限则缩到最近 keep_recent_turns 轮。
+
+        v8.4.6 B2: 丢弃中间轮次前先提取其标识符行（DOI/evidence_id/artifact_id/
+        chunk_id/URL 等），以"[硬截断保留标识符]"消息并入视图——对照书 2.7.5
+        "保留标识符"，压缩/截断不得破坏引用锚点。
+        """
+        import re as _re
         from langchain_core.messages import ToolMessage
         trimmed = []
         for m in messages:
@@ -349,4 +355,22 @@ class ContextBudget:
             return trimmed
         head = [turns[0][0]]
         tail = [item for turn in turns[-keep:] for item in turn]
-        return head + tail
+        # 被丢弃的中间轮次：先保留标识符行（引用锚点不丢）；
+        # 首轮（head 只保留首条消息）中其余消息同样纳入提取
+        dropped_items = [item for turn in turns[1:-keep] for item in turn]
+        dropped_items += list(turns[0][1:])
+        ident_lines: list[str] = []
+        for item in dropped_items:
+            m = item[0] if isinstance(item, tuple) else item
+            content = str(getattr(m, "content", "") or "")
+            for line in content.splitlines():
+                if _re.search(
+                    r"\b(doi|evidence_id|artifact_id|chunk_id|source_id|pmid|url)\b",
+                    line, _re.IGNORECASE):
+                    ident_lines.append(line[:200])
+        result = head + tail
+        if ident_lines:
+            from langchain_core.messages import HumanMessage
+            result.insert(1, HumanMessage(
+                content="[硬截断保留标识符]\n" + "\n".join(ident_lines[:40])))
+        return result
