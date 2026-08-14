@@ -21,6 +21,8 @@ def check(name, cond, detail=""):
 
 def test_static_prefix_system_stability():
     print("[SP-1] SystemMessage 字节级稳定")
+    # v8.6: 保存并还原原始开关值（此前 finally 硬编码 False，污染后续测试全局）
+    _orig = settings.CONTEXT_STATIC_PREFIX
     settings.CONTEXT_STATIC_PREFIX = True
     try:
         from src.prompts.loader import assemble_system_prompt, build_dynamic_blocks
@@ -37,21 +39,27 @@ def test_static_prefix_system_stability():
         check("动态块含 format_guide 标签", "<format_guide>" in d1)
         check("动态块含 output_guide 标签", "<output_guide>" in d1)
     finally:
-        settings.CONTEXT_STATIC_PREFIX = False
+        settings.CONTEXT_STATIC_PREFIX = _orig
 
 
 def test_static_prefix_legacy_behavior():
-    print("[SP-2] 旧模式行为不变（灰度开关默认 off）")
+    print("[SP-2] 旧模式行为不变（灰度开关 off）")
     from src.prompts.loader import assemble_system_prompt, build_dynamic_blocks
 
-    s1 = assemble_system_prompt(mode="expert", format_hint="fact", query="salt tolerance")
-    s2 = assemble_system_prompt(mode="expert", format_hint="review", query="huanglongbing")
-    check("旧模式 SystemMessage 仍含动态内容", s1 != s2)
-    check("旧模式动态块为空", build_dynamic_blocks(format_hint="fact", query="x") == "")
+    _orig = settings.CONTEXT_STATIC_PREFIX
+    settings.CONTEXT_STATIC_PREFIX = False
+    try:
+        s1 = assemble_system_prompt(mode="expert", format_hint="fact", query="salt tolerance")
+        s2 = assemble_system_prompt(mode="expert", format_hint="review", query="huanglongbing")
+        check("旧模式 SystemMessage 仍含动态内容", s1 != s2)
+        check("旧模式动态块为空", build_dynamic_blocks(format_hint="fact", query="x") == "")
+    finally:
+        settings.CONTEXT_STATIC_PREFIX = _orig
 
 
 def test_static_prefix_agent_prompt():
     print("[SP-3] 子 Agent 前缀稳定")
+    _orig = settings.CONTEXT_STATIC_PREFIX
     settings.CONTEXT_STATIC_PREFIX = True
     try:
         from src.prompts.loader import assemble_agent_prompt, build_agent_extra_block
@@ -64,7 +72,7 @@ def test_static_prefix_agent_prompt():
             skills=["citrus-review-writer"], system_prompt_extra="EXTRA_INSTR")
         check("skills+extra 进独立块", "EXTRA_INSTR" in e and "写作技能" in e)
     finally:
-        settings.CONTEXT_STATIC_PREFIX = False
+        settings.CONTEXT_STATIC_PREFIX = _orig
 
     e2 = build_agent_extra_block(system_prompt_extra="EXTRA_INSTR")
     check("旧模式 extra 块透传（拼进 system）", e2 == "EXTRA_INSTR")
@@ -72,6 +80,7 @@ def test_static_prefix_agent_prompt():
 
 def test_static_prefix_human_message():
     print("[SP-4] 当前轮 HumanMessage 尾部追加动态块")
+    _orig = settings.CONTEXT_STATIC_PREFIX
     settings.CONTEXT_STATIC_PREFIX = True
     try:
         from src.core.context_manager import LoadedContext, build_human_message
@@ -84,7 +93,7 @@ def test_static_prefix_human_message():
         check("动态块位于 user_query 之后",
               msg.content.find("<user_query>") < msg.content.find("<format_guide>"))
     finally:
-        settings.CONTEXT_STATIC_PREFIX = False
+        settings.CONTEXT_STATIC_PREFIX = _orig
 
 
 def test_supervisor_tool_schemas_single_source():

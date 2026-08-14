@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
@@ -205,6 +205,20 @@ header h1 { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
 }
 .user .avatar { background: var(--accent-muted); color: var(--accent); }
 .bot .avatar { background: var(--success-glow); color: var(--success); }
+/* v8.6 用户反馈（书 §4.6 反馈循环）: 回答下方的 👍/👎 记录条 */
+.msg-feedback {
+  display: flex; align-items: center; gap: 6px;
+  margin: 6px 2px 2px 0; padding-left: 2px;
+}
+.fb-btn {
+  background: none; border: 1px solid var(--border-hairline);
+  border-radius: 6px; color: var(--text-muted);
+  font-size: 12px; line-height: 1; padding: 4px 8px; cursor: pointer;
+  transition: all 0.15s var(--ease-out-quint);
+}
+.fb-btn:hover { border-color: var(--accent); color: var(--accent); }
+.fb-btn:disabled { opacity: 0.4; cursor: default; }
+.fb-msg { font-size: 11px; color: var(--text-muted); }
 .content {
   background: var(--bg-elevated);
   border: 1px solid var(--border-hairline);
@@ -1556,10 +1570,41 @@ function addMessage(role, html) {
   var div = document.createElement('div');
   div.className = 'message ' + role;
   div.innerHTML = '<div class="avatar">' + (role === 'user' ? '→' : '◆') + '</div><div class="content">' + html + '</div>';
+  // v8.6 用户反馈（书 §4.6 反馈循环）: 助手回答下方追加 👍/👎 记录条（纯记录，不影响回答）
+  if (role === 'bot') {
+    var fb = document.createElement('div');
+    fb.className = 'msg-feedback';
+    fb.innerHTML = '<button class="fb-btn" data-rating="1" title="回答有帮助">👍 有用</button>' +
+                   '<button class="fb-btn" data-rating="-1" title="回答有问题">👎 有问题</button>' +
+                   '<span class="fb-msg"></span>';
+    div.appendChild(fb);
+  }
   chatContainer.appendChild(div);
   chatContainer.scrollTop = chatContainer.scrollHeight;
   return div.querySelector('.content');
 }
+
+/* v8.6 反馈提交：内容哈希作 message_id（幂等去重），仅记录不阻断 */
+document.addEventListener('click', function (e) {
+  var btn = e.target.closest ? e.target.closest('.fb-btn') : null;
+  if (!btn) return;
+  var rating = parseInt(btn.getAttribute('data-rating'), 10);
+  var msgEl = btn.closest('.message');
+  var contentEl = msgEl ? msgEl.querySelector('.content') : null;
+  var text = (contentEl ? contentEl.textContent || '' : '').substring(0, 2000);
+  var hash = 0;
+  for (var i = 0; i < text.length; i++) { hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0; }
+  var mid = 'h' + (hash >>> 0).toString(16);
+  var fbMsg = btn.closest('.msg-feedback') ? btn.closest('.msg-feedback').querySelector('.fb-msg') : null;
+  btn.disabled = true;
+  fetch('/api/v2/feedback', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId || '', message_id: mid, rating: rating, comment: '' })
+  }).then(function (r) { return r.json(); }).then(function (d) {
+    if (d && d.status === 'ok' && fbMsg) { fbMsg.textContent = rating === 1 ? '已记录 👍' : '已记录 👎'; }
+  }).catch(function () { btn.disabled = false; });
+});
 
 async function clearSession() {
   if (!confirm('确定清空当前会话？')) return;

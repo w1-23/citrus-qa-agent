@@ -757,5 +757,52 @@ class SessionManager:
                     return materials
         return materials
 
+    # ── v8.6 用户反馈落库（书 §4.6 反馈循环 / O7 经验学习第一步）──
+    # 纯记录、零副作用：不进入对话历史、不影响问答/检索/写作流程；
+    # 数据作为未来"经验沉淀"（书 §8.2.1）的原料，等待离线分析。
+
+    def record_feedback(self, session_id: str, message_id: str,
+                        rating: int, comment: str = "") -> bool:
+        """记录 👍(1)/👎(-1) 反馈。幂等（同 session+message+rating 去重）。"""
+        try:
+            import sqlite3
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    """CREATE TABLE IF NOT EXISTS feedback (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id TEXT NOT NULL,
+                        message_id TEXT DEFAULT '',
+                        rating INTEGER NOT NULL,
+                        comment TEXT DEFAULT '',
+                        created_at TEXT NOT NULL)""")
+                conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_feedback_dedup "
+                    "ON feedback(session_id, message_id, rating)")
+                conn.execute(
+                    """INSERT OR IGNORE INTO feedback
+                       (session_id, message_id, rating, comment, created_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (session_id, message_id or "", int(rating),
+                     str(comment or "")[:500], datetime.now().isoformat()))
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.warning(f"[SessionManager] record feedback failed: {e}")
+            return False
+
+    def get_feedback_stats(self) -> dict:
+        """反馈统计（正向/负向计数），供运营查看与测试断言。"""
+        try:
+            import sqlite3
+            with sqlite3.connect(self.db_path) as conn:
+                pos = conn.execute(
+                    "SELECT COUNT(*) FROM feedback WHERE rating=1").fetchone()[0]
+                neg = conn.execute(
+                    "SELECT COUNT(*) FROM feedback WHERE rating=-1").fetchone()[0]
+            return {"positive": int(pos), "negative": int(neg), "total": int(pos) + int(neg)}
+        except Exception as e:
+            logger.debug(f"[SessionManager] feedback stats failed: {e}")
+            return {"positive": 0, "negative": 0, "total": 0}
+
 
 session_manager = SessionManager()

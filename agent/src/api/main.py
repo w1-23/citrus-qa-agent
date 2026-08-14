@@ -488,6 +488,32 @@ async def cancel_chat(req: CancelRequest):
 # 权限确认由 /api/v2/permission/grant + 前端审批卡片承担。
 
 
+# ── v8.6 用户反馈（书 §4.6 反馈循环 / O7 经验学习第一步）──
+# 纯记录端点：👍/👎 落库 feedback 表（sessions.db），不进入对话历史、
+# 不影响任何问答/检索/写作流程；数据供未来离线"经验沉淀"分析使用。
+
+class FeedbackRequest(BaseModel):
+    session_id: str = ""
+    message_id: str = ""
+    rating: int
+    comment: str = ""
+
+
+@app.post("/api/v2/feedback")
+async def submit_feedback(req: FeedbackRequest):
+    if req.rating not in (1, -1):
+        raise HTTPException(status_code=400,
+                            detail="rating 必须为 1(👍) 或 -1(👎)")
+    ok = await asyncio.to_thread(
+        session_manager.record_feedback,
+        req.session_id, req.message_id, req.rating, req.comment)
+    if not ok:
+        raise HTTPException(status_code=500, detail="反馈记录失败")
+    logger.info(f"[API] feedback recorded: session={req.session_id[:8] or '-'} "
+                f"rating={req.rating}")
+    return {"status": "ok", "rating": req.rating}
+
+
 # ── v8.4.3 结构化权限确认（前端审批卡片闭环）──
 
 class GrantRequest(BaseModel):

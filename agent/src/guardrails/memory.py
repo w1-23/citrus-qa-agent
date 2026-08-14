@@ -104,6 +104,9 @@ class MemoryStore:
         store = self._load_store(session_id, "preference_memory")
         if not store:
             return ""
+        header = ("## 用户偏好（历史交互中用户明确表达的偏好；如与用户最新要求冲突，"
+                  "以用户最新要求为准）\n")
+        budget = max(0, max_chars - len(header))
         parts: list[str] = []
         total = 0
         for key, item in list(store.items())[:10]:
@@ -111,14 +114,13 @@ class MemoryStore:
             if not value:
                 continue
             line = f"- {str(key)[:60]}: {str(value)[:120]}"
-            if total + len(line) > max_chars:
+            if total + len(line) > budget:
                 break
             parts.append(line)
             total += len(line)
         if not parts:
             return ""
-        return ("## 用户偏好（历史交互中用户明确表达的偏好；如与用户最新要求冲突，"
-                "以用户最新要求为准）\n" + "\n".join(parts))
+        return header + "\n".join(parts)
 
     # ─── Long-term Memory (Cross-session) ───
 

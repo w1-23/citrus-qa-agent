@@ -216,6 +216,7 @@ async def _execute_tool_call(tc: dict, tc_id: str = "", material_pack: list | No
         task["context_queries"] = list(seen_queries[-5:])
     context = args.get("context", "") or args.get("data_context", "")
     skill_prompt = ""
+    skill_map = None   # v8.6 渐进式披露 {skill_id: {name, content}}
 
     if agent_name == "write-agent":
         all_retrieved = args.get("_all_retrieved", "")
@@ -231,10 +232,15 @@ async def _execute_tool_call(tc: dict, tc_id: str = "", material_pack: list | No
             query_for_skill = task.get("goal", task.get("query", ""))
             matches = st.search(query_for_skill, top_k=5)
             skill_parts = []
+            skill_map = {}   # v8.6 渐进式披露: {skill_id: {name, content}}
             for skill_id, score, meta in matches:
                 content = st.load_content(skill_id)
                 if content:
                     skill_parts.append(f"## Skill: {meta.get('name', skill_id)}\n\n{content}")
+                    skill_map[skill_id] = {
+                        "name": meta.get("name", skill_id),
+                        "content": content,
+                    }
             if skill_parts:
                 # v8.4.5: 与 plan_execute 的 _format_skill_block 一致——前 3 块 ≤4000 字符
                 skill_blocks = [b.strip() for b in
@@ -292,9 +298,12 @@ async def _execute_tool_call(tc: dict, tc_id: str = "", material_pack: list | No
             if cls["mode"] == "plan_execute" and len(pack) >= 1:
                 # v8.4.3: 写作 skill 注入流水线（此前只进 ReAct 回退路径——
                 # plan_execute 主路径"匹配了但没用上"）
+                # v8.6: 渐进式披露——Plan 阶段只注入目录，模型声明 skills_used
+                # 后注入全文（书 §2.5/4.8.2；未声明兜底 top-1，不劣于旧行为）
                 result = await run_write_pipeline(
                     task, pack, session_id=session_id,
                     skill_prompt=skill_prompt,
+                    skill_map=skill_map if skill_map else None,
                 )
                 result["agent"] = "write-agent"
             else:

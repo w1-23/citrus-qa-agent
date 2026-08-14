@@ -689,20 +689,17 @@ def _resolve_skills_used(plan: dict, plan_text: str, skill_map: dict) -> list[st
 
 
 def _build_selected_skill_prompt(skill_map: dict, skills_used: list[str]) -> str:
-    """按声明顺序拼装选中技能的全文；未声明 → 默认取匹配度第 1 个（质量兜底）。
+    """按声明拼装选中技能全文；未声明 → 保持旧行为（匹配顺序全部注入，
+    _format_skill_block 截前 3 块 ≤4000 字符）——渐进式披露只增不减。
 
-    输出格式与旧 skill_prompt 一致（"## Skill: name\ncontent" 块，\n---\n 连接），
-    供 _format_skill_block 统一做前 3 块 ≤4000 字符截断。
+    输出格式与旧 skill_prompt 一致（"## Skill: name\ncontent" 块，\n---\n 连接）。
     """
     if not skill_map:
         return ""
-    ordered: list[str] = []
-    for sid in skills_used:
-        if sid in skill_map and sid not in ordered:
-            ordered.append(sid)
-    for sid in skill_map:      # 保持匹配顺序补足
-        if sid not in ordered:
-            ordered.append(sid)
+    if skills_used:
+        ordered = [sid for sid in skills_used if sid in skill_map]
+    else:
+        ordered = list(skill_map.keys())
     parts = []
     for sid in ordered[:5]:
         meta = skill_map[sid]
@@ -751,13 +748,13 @@ async def run_stage2_execute(llm, plan: dict, material_pack: list[dict],
     from src.tools.file_ops import write_local_file
     from src.core.write_pipeline_state import mark_section_done
 
-    # v8.6: 渐进式披露——模型声明的技能全文（兜底=匹配度第 1 个）
+    # v8.6: 渐进式披露——模型声明的技能全文（未声明 → 旧行为全量注入，零回归）
     if skill_map:
         selected = _build_selected_skill_prompt(skill_map, skills_used or [])
         if selected:
             skill_prompt = selected
             logger.info(f"[WritePipeline] progressive disclosure: "
-                        f"skills_used={skills_used or ['<fallback top-1>']} "
+                        f"skills_used={skills_used or ['<未声明: 全量(旧行为)>']} "
                         f"({len(skill_prompt)} chars)")
     resume_completed = resume_completed or []
     running_context = ""
@@ -1148,7 +1145,7 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
     skills_used: list = []
     if skill_map:
         skills_used = _resolve_skills_used(plan, plan_text, skill_map)
-        logger.info(f"[WritePipeline] skills_used={skills_used or ['<fallback top-1>']}")
+        logger.info(f"[WritePipeline] skills_used={skills_used or ['<未声明: 全量(旧行为)>']}")
 
     exec_result = await run_stage2_execute(llm, plan, material_pack, output_path,
                                            task_id=task_id, resume_completed=resume_completed,
