@@ -126,6 +126,23 @@ citrus-qa-agent/
 └── README.md
 ```
 
+## 📚 添加自己的语料库
+
+检索器启动时自动扫描 `agent/data/` 下的所有批次目录（无需改配置、无需重新打包）。每个批次目录的约定结构：
+
+```
+agent/data/
+└── 我的批次名/            # 任意命名，自动被发现
+    ├── chunks/
+    │   └── chunks.jsonl   # 分块文本（每行一条：{text, doi?, title?, ...}）
+    ├── qdrant_data/       # Qdrant 本地向量库（用你习惯的方式写入向量）
+    └── metadata.json      # 批次元数据（可选）
+```
+
+- `data/` 属于你的私有知识库：**不进 Git 仓库、不进发布包**（`pack_release.ps1` 与 `.gitignore` 均已排除）
+- 新增/更新批次后**重启服务即生效**；检索与写作、引用、证据回执全链路自动适配
+- 检索阈值可在 `agent/config.yaml` 的 `retrieval:` 段调整（相似度下限、动态阈值比例等）
+
 ## 🔒 安全设计
 
 - **API Key**：只存本机 `state/api_key`（权限 600），API 响应永不回传 Key，仓库不含任何密钥
