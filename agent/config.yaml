@@ -10,8 +10,7 @@ retrieval:
     orig_dense: 1.0          # original_query 向量检索权重
     hyde_dense: 1.0          # HyDE 假想答案向量检索权重
     bm25: 1.0                # BM25 词法检索权重
-  rerank_threshold: 0.25    # Sigmoid 概率绝对底线阈值
-  rerank_threshold_hyde: 0.15  # v8.4.3: HyDE 混合路地板阈值（英文 HyDE 与库分数分布不匹配，0.25 会全拦）
+  rerank_threshold: 0.25    # Sigmoid 概率绝对底线阈值（RAG 与 HyDE 路一致，动态阈值 = max(0.25, top×ratio)）
   dynamic_threshold_ratio: 0.60  # 动态阈值 = top_score * ratio
   web_relevance_threshold: 0.3   # Web 语义过滤阈值（BGE reranker 分数，0=不相关 1=完美匹配）
   rag_hyde_enabled: true         # HyDE: 本地RAG检索前生成英文假想答案提升召回
@@ -222,13 +221,13 @@ tools:
       category: analysis
       readonly: true
       concurrency_key: analysis
-    - name: call_specialist
-      category: agent
-      readonly: true
-      concurrency_key: agent
     - name: read_local_file
       category: file
       readonly: true
+      concurrency_key: file
+    - name: write_local_file
+      category: write
+      readonly: false
       concurrency_key: file
     - name: statistical_analysis
       category: analysis

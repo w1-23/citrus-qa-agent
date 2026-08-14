@@ -596,7 +596,7 @@ def _extract_material_subsets(plan_section: dict, material_pack: list[dict]) -> 
 
 
 def _build_section_prompt(plan: dict, idx: int, section: dict, running_context: str,
-                          material_pack: list[dict]) -> str:
+                          material_pack: list[dict], skill_prompt: str = "") -> str:
     prompt_file = _read_prompt("write-section.md")
     outline_summary = {
         "title": plan.get("title", ""),
@@ -604,18 +604,27 @@ def _build_section_prompt(plan: dict, idx: int, section: dict, running_context: 
         "all_headings": [s.get("heading", "") for s in plan.get("sections", [])],
     }
     material = _extract_material_subsets(section, material_pack)
+    # v8.4.3: 写作 skill 注入（段落骨架/风格参考，追加语义不影响静态缓存）
+    skill_block = ""
+    if skill_prompt:
+        # 取前 3 个 skill 块、≤4000 字符（控制单章 prompt 成本）
+        blocks = [b.strip() for b in skill_prompt.split("\n---\n") if b.strip()]
+        picked = "\n---\n".join(blocks[:3])[:4000]
+        skill_block = f"\n\n## 写作技能参考\n{picked}"
     return (f"{prompt_file}\n\n---\n"
             f"全文大纲: {json.dumps(outline_summary, ensure_ascii=False)[:400]}\n"
             f"已完成章节概要: {running_context[:500] or '(本文第一章)'}\n"
             f"本章: {idx+1}/{len(plan.get('sections', []))} — {section.get('heading', '')}\n"
             f"本章要点: {json.dumps(section.get('points', []), ensure_ascii=False)[:400]}\n"
             f"本章目标字数: {section.get('target_chars', 600)}\n"
-            f"相关材料:\n{material}")
+            f"相关材料:\n{material}"
+            f"{skill_block}")
 
 
 async def run_stage2_execute(llm, plan: dict, material_pack: list[dict],
                              output_path: str, task_id: str = "",
-                             resume_completed: Optional[list] = None) -> dict:
+                             resume_completed: Optional[list] = None,
+                             skill_prompt: str = "") -> dict:
     """Stage 2: 逐章生成并写盘。返回 {chapters, total_chars, missing_sections, truncated_sections}。"""
     sections = plan.get("sections", [])
     if not sections:
@@ -644,7 +653,8 @@ async def run_stage2_execute(llm, plan: dict, material_pack: list[dict],
         except Exception:
             pass
         _update_job(f"writing {idx+1}/{len(sections)}", section.get("heading", ""))
-        prompt = _build_section_prompt(plan, idx, section, running_context, material_pack)
+        prompt = _build_section_prompt(plan, idx, section, running_context,
+                                       material_pack, skill_prompt)
         resp_content = ""
         for attempt in range(3):
             try:
@@ -840,13 +850,15 @@ async def modify_document(llm, output_path: str, target_section: str, user_goal:
 # ─────────────────────────────────────────────
 
 async def run_write_pipeline(task: dict, material_pack: list[dict],
-                             llm_factory=None, session_id: str = "") -> dict:
+                             llm_factory=None, session_id: str = "",
+                             skill_prompt: str = "") -> dict:
     """Plan-Execute 流水线总入口。
 
     Args:
         task: {"goal", "query", "output_path"}
         material_pack: 检索材料包（结构化 list[dict]）
         llm_factory: 可注入（测试用），默认构造 main 模型 ChatOpenAI
+        skill_prompt: v8.4.3 写作 skill 内容（追加到单章 prompt，不影响静态缓存）
     Returns:
         {"result": str, "mode": str, "chapters": int, "total_chars": int,
          "missing_sections": list, "truncated_sections": list,
@@ -960,7 +972,8 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
                 plan.get("title", ""))
 
     exec_result = await run_stage2_execute(llm, plan, material_pack, output_path,
-                                           task_id=task_id, resume_completed=resume_completed)
+                                           task_id=task_id, resume_completed=resume_completed,
+                                           skill_prompt=skill_prompt)
     # v8.4.1: 分章写作后统一引用——各章"本章参考文献"提取合并为文末全局引用
     unify_info = {"unified": 0}
     if exec_result["chapters"] > 0 and output_path:

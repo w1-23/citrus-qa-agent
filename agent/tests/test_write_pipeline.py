@@ -490,6 +490,19 @@ def test_write_receipt_extract():
     check("无法解析返回空", r3 == "")
 
 
+def test_section_prompt_skills():
+    print("[skill] v8.4.3 写作 skill 注入单章 prompt（追加语义）")
+    from src.core.write_pipeline import _build_section_prompt
+    plan = {"title": "T", "sections": [{"heading": "h1", "points": ["p"]}]}
+    sec = plan["sections"][0]
+    p = _build_section_prompt(plan, 0, sec, "", [],
+                              skill_prompt="SKILL-A\n---\nSKILL-B\n---\nSKILL-C\n---\nSKILL-D")
+    check("skill 注入单章 prompt", "写作技能参考" in p and "SKILL-A" in p, p[-80:])
+    check("skill 上限 3 块", "SKILL-D" not in p)
+    p0 = _build_section_prompt(plan, 0, sec, "", [])
+    check("无 skill 不注入", "写作技能参考" not in p0)
+
+
 def json_doc(obj):
     import json
     return json.dumps(obj, ensure_ascii=False)
@@ -512,6 +525,7 @@ if __name__ == "__main__":
     test_evidence_fidelity()
     test_unify_references()
     test_write_receipt_extract()
+    test_section_prompt_skills()
     print(f"\n结果: {len(passed)} passed / {len(failed)} failed")
     if failed:
         print("失败项:", failed)

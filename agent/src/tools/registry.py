@@ -360,8 +360,8 @@ class PartitionedToolNode:
 def init_tool_registry():
     from src.tools import _TOOL_REGISTRY_BY_NAME, _TOOL_REGISTRY
     import yaml
-    from pathlib import Path
-    cfg_path = Path(__file__).resolve().parent.parent / "config.yaml"
+    from src.config import PROJECT_ROOT
+    cfg_path = PROJECT_ROOT / "config.yaml"
     try:
         if cfg_path.exists():
             with open(cfg_path, encoding="utf-8") as f:

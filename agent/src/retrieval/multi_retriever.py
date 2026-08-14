@@ -442,8 +442,8 @@ class MultiBatchRetriever:
             logger.info("[Retriever] HyDE: no reranked results, falling back to original search")
             return self.search(original_query)
 
-        # v8.4.3 工单6: HyDE 混合路分数分布与基础路不同（英文 HyDE 与库分数分布
-        # 不匹配导致 0.25 地板全拦）——HyDE 路地板降至 0.15 + 记录分布供校准
+        # v8.4.3: 分数分布日志（校准用）；阈值与 RAG 基础路保持一致
+        # （0.25 地板 + 动态阈值 max(0.25, top*ratio)）
         scores = sorted(c.get("rerank_score", 0) for c in reranked)
         p50 = scores[len(scores) // 2] if scores else 0
         p90 = scores[int(len(scores) * 0.9)] if scores else 0
@@ -453,8 +453,7 @@ class MultiBatchRetriever:
 
         top_score = reranked[0].get("rerank_score", 0)
         dynamic_thresh = top_score * settings.DYNAMIC_THRESHOLD_RATIO
-        hyde_floor = getattr(settings, "RERANK_THRESHOLD_HYDE", 0.15)
-        final_threshold = max(hyde_floor, dynamic_thresh)
+        final_threshold = max(settings.RERANK_THRESHOLD, dynamic_thresh)
         passed = [c for c in reranked if c.get("rerank_score", 0) >= final_threshold]
         if not passed:
             logger.warning(f"[Retriever] HyDE: threshold {final_threshold:.4f} blocked all, falling back")

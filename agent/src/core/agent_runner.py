@@ -108,20 +108,19 @@ async def run_agent(
         logger.warning(f"[AgentRunner] prompt assembly failed: {e}")
         system_content = f"You are {agent_name}."
 
-    # 阶段1 静态前缀: system_prompt_extra / skills 不进入 SystemMessage，
-    # 经 build_agent_extra_block 追加到首条 HumanMessage（前缀字节级稳定）
+    # v8.4.3: skills/system_prompt_extra 一律经 build_agent_extra_block 追加到
+    # 首条 HumanMessage（<instructions> 块）——追加语义不改 SystemMessage 前缀，
+    # KV/Prompt Cache 不受 skill 加载影响（skill 加载 = append，不是 modify）
     _extra_block = ""
-    if settings.CONTEXT_STATIC_PREFIX:
-        try:
-            from src.prompts.loader import build_agent_extra_block
-            _extra_block = build_agent_extra_block(
-                skills=skills,
-                system_prompt_extra=system_prompt_extra,
-            )
-        except Exception as e:
-            logger.warning(f"[AgentRunner] extra block build failed: {e}")
-    elif system_prompt_extra:
-        system_content += f"\n\n---\n{system_prompt_extra}"
+    try:
+        from src.prompts.loader import build_agent_extra_block
+        _extra_block = build_agent_extra_block(
+            skills=skills,
+            task_type=None,
+            system_prompt_extra=system_prompt_extra,
+        )
+    except Exception as e:
+        logger.warning(f"[AgentRunner] extra block build failed: {e}")
 
     # v8.4.3 工单4: skill 注入审计——"匹配了但没用上"排查第一现场
     if skills or system_prompt_extra:

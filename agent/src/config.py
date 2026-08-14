@@ -101,8 +101,6 @@ class Settings(BaseSettings):
     TOP_K_FINAL: int = Field(default_factory=lambda: _yaml_val("retrieval", "top_k_final", default=10))
     RRF_K: int = Field(default_factory=lambda: _yaml_val("retrieval", "rrf_k", default=60))
     RERANK_THRESHOLD: float = Field(default_factory=lambda: _yaml_val("retrieval", "rerank_threshold", default=0.25))
-    # v8.4.3 工单6: HyDE 混合路地板阈值（英文 HyDE 与库分数分布不匹配，0.25 全拦）
-    RERANK_THRESHOLD_HYDE: float = Field(default_factory=lambda: _yaml_val("retrieval", "rerank_threshold_hyde", default=0.15))
     MAX_REACT_STEPS: int = Field(default_factory=lambda: _yaml_val("react", "max_steps", default=5))
     DYNAMIC_THRESHOLD_RATIO: float = Field(default_factory=lambda: _yaml_val("retrieval", "dynamic_threshold_ratio", default=0.60))
     RAG_HYDE_ENABLED: bool = Field(default_factory=lambda: _yaml_val("retrieval", "rag_hyde_enabled", default=True))

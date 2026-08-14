@@ -262,8 +262,11 @@ async def _execute_tool_call(tc: dict, tc_id: str = "", material_pack: list | No
             file_exists = bool(target and target.exists())
             cls = classify_write_task(task.get("goal", ""), context, file_exists)
             if cls["mode"] == "plan_execute" and len(pack) >= 1:
+                # v8.4.3: 写作 skill 注入流水线（此前只进 ReAct 回退路径——
+                # plan_execute 主路径"匹配了但没用上"）
                 result = await run_write_pipeline(
                     task, pack, session_id=session_id,
+                    skill_prompt=skill_prompt,
                 )
                 result["agent"] = "write-agent"
             else:

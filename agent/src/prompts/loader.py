@@ -159,6 +159,12 @@ def assemble_agent_prompt(
     skills: list[str] | None = None,
     task_type: str | None = None,
 ) -> str:
+    """子 Agent 系统提示——只含 agent 基础文件，按 agent_name 字节级稳定。
+
+    v8.4.3: skills/task_type 一律不进入 SystemMessage（参数保留签名兼容，
+    实际被忽略）——动态内容经 build_agent_extra_block 追加到首条 HumanMessage，
+    属于"追加"而非"修改前缀"，静态缓存不受影响。
+    """
     agent_normalized = (agent_name or "").strip().lower()
     if agent_normalized not in VALID_AGENTS:
         raise ValueError(
@@ -166,26 +172,6 @@ def assemble_agent_prompt(
         )
     parts: list[str] = []
     parts.append(_read_prompt_cached(AGENT_FILES[agent_normalized]))
-
-    if _static_prefix_enabled():
-        # 阶段1: skills/task_type 移出 SystemMessage（见 build_agent_extra_block），
-        # 子 Agent 系统提示按 agent_name 字节级稳定，跨请求可缓存
-        return _join_parts(parts)
-
-    if skills:
-        skill_parts: list[str] = []
-        for skill in skills:
-            skill_content = _read_prompt_cached(f"skills/{skill}.md")
-            if skill_content:
-                skill_parts.append(skill_content)
-        if skill_parts:
-            parts.append("## 写作技能\n\n" + "\n\n".join(skill_parts))
-
-    if task_type:
-        task_prompt = _read_prompt_cached(f"strategies/planning/{task_type}.md")
-        if task_prompt:
-            parts.append(f"## 任务策略\n\n{task_prompt}")
-
     return _join_parts(parts)
 
 
@@ -195,14 +181,12 @@ def build_agent_extra_block(
     task_type: str | None = None,
     system_prompt_extra: str = "",
 ) -> str:
-    """阶段1: 静态前缀模式下，子 Agent 的动态指令作为独立块返回。
+    """子 Agent 动态指令块——无条件生效（v8.4.3）。
 
-    由 agent_runner 追加到首条 HumanMessage，不进入 SystemMessage。
-    非静态前缀模式返回 system_prompt_extra（旧行为，由调用方拼进 system）。
+    由 agent_runner 追加到首条 HumanMessage（<instructions> 块）。
+    追加语义 = 新消息 append，SystemMessage 前缀字节级稳定，KV/Prompt Cache
+    不受 skill 加载影响。
     """
-    if not _static_prefix_enabled():
-        return system_prompt_extra or ""
-
     blocks: list[str] = []
     if system_prompt_extra:
         blocks.append(system_prompt_extra)

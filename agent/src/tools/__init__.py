@@ -16,3 +16,9 @@ _TOOL_REGISTRY_BY_NAME: dict[str, object] = {t.name: t for t in _TOOL_REGISTRY}
 
 def get_tool_names():
     return [t.name for t in _TOOL_REGISTRY]
+
+
+# v8.4.3: 接线 YAML 注册（category/concurrency_key 生效；此前 _TOOL_SPECS 恒空，
+# 分区并发与 spec 放行逻辑全部空转）。write_local_file 注册为 category=write
+# （不在沙箱自动放行的 analysis/agent/file 白名单内，权限判定继续生效）。
+init_tool_registry()
