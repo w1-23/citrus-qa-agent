@@ -294,16 +294,17 @@ async def _react_fallback_write(llm, goal: str, plan_text: str, material_pack: l
     max_per_section = int(settings.PIPELINE_SECTION_MAX_TOKENS / 1.2 * 0.9)
     blocks = [b.strip() for b in SECTION_SPLIT_RE.split(content) if b.strip()]
     total = 0
+    draft = _draft_path(output_path)
     try:
         if len(content) <= max_per_section or len(blocks) <= 1:
-            msg = write_local_file.func(output_path, content, "write")
+            msg = write_local_file.func(draft, content, "write")
             if msg.startswith("Error"):
                 raise RuntimeError(msg[:200])
             total = len(content)
         else:
             for i, b in enumerate(blocks):
                 mode = "write" if i == 0 else "append"
-                msg = write_local_file.func(output_path, b, mode)
+                msg = write_local_file.func(draft, b, mode)
                 if msg.startswith("Error"):
                     raise RuntimeError(msg[:200])
                 total += len(b)
@@ -313,8 +314,12 @@ async def _react_fallback_write(llm, goal: str, plan_text: str, material_pack: l
                 "mode": "react_fallback", "chapters": 0, "total_chars": 0,
                 "missing_sections": [], "truncated_sections": [], "material_gap": gap}
 
-    logger.info(f"[WritePipeline] react_fallback saved: {total} chars -> {output_path}")
-    return {"result": f"已保存到 {output_path}（{total} 字符，大纲失败回退模式）",
+    published = _publish_draft(output_path)
+    logger.info(f"[WritePipeline] react_fallback saved: {total} chars -> {output_path}"
+                f" (published={published})")
+    loc = f"已保存到 {output_path}" if published \
+        else f"草稿已保存到 {draft}（发布失败，可手动核对）"
+    return {"result": f"{loc}（{total} 字符，大纲失败回退模式）",
             "mode": "react_fallback", "chapters": len(blocks), "total_chars": total,
             "missing_sections": [], "truncated_sections": [], "material_gap": gap}
 
@@ -344,6 +349,29 @@ def extract_summary(resp: str) -> tuple[str, str]:
         body = SUMMARY_TAG_RE.sub("", resp).rstrip()
         return body, summary
     return resp.rstrip(), ""
+
+
+# ── v8.4.6 F7: 草稿-发布机制（在确认无法恢复之前不暴露中间态）──
+
+def _draft_path(output_path: str) -> str:
+    """写作期间的草稿文件名（同目录，.draft.md 后缀）。"""
+    return f"{output_path}.draft.md"
+
+
+def _publish_draft(output_path: str) -> bool:
+    """草稿校验通过后原子发布为正式文件（os.replace）。"""
+    draft = (_WORKSPACE_ROOT / _draft_path(output_path)).resolve()
+    final = (_WORKSPACE_ROOT / output_path).resolve()
+    try:
+        if not draft.exists():
+            return False
+        final.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(draft, final)
+        logger.info(f"[WritePipeline] 草稿已发布: {output_path}")
+        return True
+    except Exception as e:
+        logger.warning(f"[WritePipeline] 草稿发布失败（草稿保留）: {e}")
+        return False
 
 
 def _verify_section_written(output_path: str, heading: str) -> bool:
@@ -653,9 +681,76 @@ async def run_stage2_execute(llm, plan: dict, material_pack: list[dict],
     # 与 validate_plan 同一公式的单章安全容量（防 API 截断）
     max_per_section = int(settings.PIPELINE_SECTION_MAX_TOKENS / 1.2 * 0.9)
 
+    # v8.4.6 F7: 分章写入草稿文件（.draft.md），全部完成+引用统一+完整性校验后
+    # 原子发布为正式文件——中断/缺章时工作区不留半成品
+    draft = _draft_path(output_path)
+
+    # v8.4.6: 单章生成并发（parallel_sections，默认 3）——各章 prompt 共享
+    # 完整大纲（标题+全部章节名）与本章材料，章节间无强顺序依赖；
+    # 生成结果仍按章节序号顺序写盘（append 语义与引用统一不受影响）。
+    # 质量说明: 放弃"前章摘要"衔接（running_context），但大纲全貌保留，
+    # 综述章节独立性高、正文科学内容不受影响；1=串行可回退旧行为。
+    sem = asyncio.Semaphore(max(1, int(getattr(
+        settings, "PIPELINE_PARALLEL_SECTIONS", 3) or 3)))
+
+    async def _gen_section(idx: int, section: dict):
+        """生成单章（并发执行；返回 (body, summary) 或 None）。"""
+        async with sem:
+            prompt = _build_section_prompt(plan, idx, section, "",
+                                           material_pack, skill_prompt)
+            resp_content = ""
+            for attempt in range(3):
+                try:
+                    resp = await asyncio.wait_for(
+                        _call_llm(llm, prompt),
+                        timeout=settings.PIPELINE_SECTION_TIMEOUT)
+                    resp_content = (resp.content or "").strip()
+                    break
+                except Exception as e:
+                    logger.warning(
+                        f"[WritePipeline] section {idx+1} LLM failed "
+                        f"(attempt {attempt+1}/3): {e}")
+                    await asyncio.sleep(2 ** attempt + 0.5 * ((uuid.uuid4().int >> 32) % 1000) / 1000)
+            if not resp_content:
+                return idx, None, ""
+            body, summary = extract_summary(resp_content)
+            if len(body) > max_per_section:
+                logger.warning(f"[WritePipeline] section {idx+1} {len(body)} chars > "
+                               f"{max_per_section}, condensed retry")
+                try:
+                    condensed_prompt = prompt + (
+                        f"\n\n【上一版输出 {len(body)} 字，超过安全容量 {max_per_section} 字（API 会截断）。"
+                        f"请压缩到 {max_per_section} 字以内：保留核心内容与要点、删除冗余修饰与重复表述，"
+                        f"并照常输出 <summary> 标签。】")
+                    resp = await asyncio.wait_for(
+                        _call_llm(llm, condensed_prompt),
+                        timeout=settings.PIPELINE_SECTION_TIMEOUT)
+                    condensed, summary2 = extract_summary((resp.content or "").strip())
+                    if condensed and len(condensed) <= max_per_section:
+                        body, summary = condensed, summary2 or summary
+                        logger.info(f"[WritePipeline] section {idx+1} condensed ok: {len(body)} chars")
+                    else:
+                        logger.warning(f"[WritePipeline] section {idx+1} still {len(condensed)} chars "
+                                       f"after condensed retry, writing as-is")
+                        truncated.append(section.get("heading", f"第{idx+1}章"))
+                except Exception as e:
+                    logger.warning(f"[WritePipeline] section {idx+1} condensed retry failed: {e}")
+                    truncated.append(section.get("heading", f"第{idx+1}章"))
+            if not SECTION_HEADING_RE.search(body):
+                body = f"## {section.get('heading', '')}\n\n{body}"
+            return idx, body, summary
+
+    pending = [i for i in range(len(sections)) if i not in resume_completed]
+    for idx in resume_completed:
+        logger.info(f"[WritePipeline] resume: 跳过已完成章节 {idx+1} {sections[idx].get('heading', '')}")
+    gen_results: dict = {}
+    if pending:
+        results = await asyncio.gather(*[_gen_section(i, sections[i]) for i in pending])
+        gen_results = {idx: (body, summary) for idx, body, summary in results}
+
+    # 按章节序号顺序写盘（append 语义）
     for idx, section in enumerate(sections):
         if idx in resume_completed:
-            logger.info(f"[WritePipeline] resume: 跳过已完成章节 {idx+1} {section.get('heading', '')}")
             continue
         try:
             emit_encoded("section_start", {"heading": section.get("heading", ""),
@@ -663,49 +758,11 @@ async def run_stage2_execute(llm, plan: dict, material_pack: list[dict],
         except Exception:
             pass
         _update_job(f"writing {idx+1}/{len(sections)}", section.get("heading", ""))
-        prompt = _build_section_prompt(plan, idx, section, running_context,
-                                       material_pack, skill_prompt)
-        resp_content = ""
-        for attempt in range(3):
-            try:
-                resp = await asyncio.wait_for(_call_llm(llm, prompt),
-                                              timeout=settings.PIPELINE_SECTION_TIMEOUT)
-                resp_content = (resp.content or "").strip()
-                break
-            except Exception as e:
-                logger.warning(f"[WritePipeline] section {idx+1} LLM failed (attempt {attempt+1}/3): {e}")
-                await asyncio.sleep(2 ** attempt + 0.5 * ((uuid.uuid4().int >> 32) % 1000) / 1000)
-        if not resp_content:
+        gen = gen_results.get(idx)
+        if gen is None or not gen[0]:
             missing.append(section.get("heading", f"第{idx+1}章"))
             continue
-
-        body, summary = extract_summary(resp_content)
-        # v8.3.3 运行时容量兜底: 实际输出超单章安全容量 → 精简重写一次防截断
-        if len(body) > max_per_section:
-            logger.warning(f"[WritePipeline] section {idx+1} {len(body)} chars > "
-                           f"{max_per_section}, condensed retry")
-            try:
-                condensed_prompt = prompt + (
-                    f"\n\n【上一版输出 {len(body)} 字，超过安全容量 {max_per_section} 字（API 会截断）。"
-                    f"请压缩到 {max_per_section} 字以内：保留核心内容与要点、删除冗余修饰与重复表述，"
-                    f"并照常输出 <summary> 标签。】")
-                resp = await asyncio.wait_for(
-                    _call_llm(llm, condensed_prompt),
-                    timeout=settings.PIPELINE_SECTION_TIMEOUT)
-                condensed, summary2 = extract_summary((resp.content or "").strip())
-                if condensed and len(condensed) <= max_per_section:
-                    body, summary = condensed, summary2 or summary
-                    logger.info(f"[WritePipeline] section {idx+1} condensed ok: {len(body)} chars")
-                else:
-                    logger.warning(f"[WritePipeline] section {idx+1} still {len(condensed)} chars "
-                                   f"after condensed retry, writing as-is")
-                    truncated.append(section.get("heading", f"第{idx+1}章"))
-            except Exception as e:
-                logger.warning(f"[WritePipeline] section {idx+1} condensed retry failed: {e}")
-                truncated.append(section.get("heading", f"第{idx+1}章"))
-        # 标题契约: 缺失则自动补
-        if not SECTION_HEADING_RE.search(body):
-            body = f"## {section.get('heading', '')}\n\n{body}"
+        body, summary = gen
         mode = "write" if idx == 0 else "append"
         if idx == 0 and plan.get("title"):
             header = (f"# {plan['title']}\n\n"
@@ -713,7 +770,7 @@ async def run_stage2_execute(llm, plan: dict, material_pack: list[dict],
                       f"## 关键词\n{', '.join(plan.get('keywords', []) or [])}\n\n")
             body = header + body
         try:
-            msg = write_local_file.func(output_path, body, mode)
+            msg = write_local_file.func(draft, body, mode)
             if msg.startswith("Error"):
                 # write_local_file 失败时返回错误字符串而非抛异常，必须显式检测
                 logger.error(f"[WritePipeline] write failed section {idx+1}: {msg[:200]}")
@@ -727,8 +784,8 @@ async def run_stage2_execute(llm, plan: dict, material_pack: list[dict],
             missing.append(section.get("heading", f"第{idx+1}章"))
             continue
 
-        # v8.3.3 写后 read-back: 确认章节已落盘
-        if not _verify_section_written(output_path, section.get("heading", "")):
+        # v8.3.3 写后 read-back: 确认章节已落盘（草稿）
+        if not _verify_section_written(draft, section.get("heading", "")):
             logger.error(f"[WritePipeline] read-back FAILED section {idx+1} "
                          f"{section.get('heading', '')}")
             missing.append(section.get("heading", f"第{idx+1}章"))
@@ -750,7 +807,7 @@ async def run_stage2_execute(llm, plan: dict, material_pack: list[dict],
             from src.core.business_logger import blog
             blog("section_done", idx=idx + 1, total=len(sections),
                  heading=str(section.get("heading", ""))[:40],
-                 chars=len(body), attempts=attempt + 1)
+                 chars=len(body))
         except Exception:
             pass
 
@@ -985,10 +1042,12 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
                                            task_id=task_id, resume_completed=resume_completed,
                                            skill_prompt=skill_prompt)
     # v8.4.1: 分章写作后统一引用——各章"本章参考文献"提取合并为文末全局引用
+    # v8.4.6 F7: 统一引用与完整性校验作用于草稿，通过后原子发布正式文件
+    draft = _draft_path(output_path)
     unify_info = {"unified": 0}
     if exec_result["chapters"] > 0 and output_path:
         try:
-            unify_info = _unify_references(output_path)
+            unify_info = _unify_references(draft)
         except Exception as e:
             logger.warning(f"[WritePipeline] unify refs failed: {e}")
     try:
@@ -1008,10 +1067,20 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
     # v8.3.3 写后引用完整性校验（正文 [n] vs 参考文献列表；统一引用后再校验）
     ref_issues = []
     if exec_result["chapters"] > 0 and output_path:
-        ref_issues = verify_reference_integrity(output_path)
+        ref_issues = verify_reference_integrity(draft)
         for issue in ref_issues[:5]:
             logger.warning(f"[WritePipeline] ref integrity: {issue}")
-    summary = (f"综述已保存: {output_path}（{exec_result['total_chars']} 字符，"
+    # v8.4.6 F7: 校验通过 → 原子发布；缺章/失败 → 保留草稿并明确告知
+    published = False
+    if exec_result["chapters"] > 0 and not exec_result["missing_sections"]:
+        published = _publish_draft(output_path)
+    if published:
+        location = f"已保存到 {output_path}"
+    elif exec_result["chapters"] > 0:
+        location = f"草稿已保存到 {draft}（存在缺章/未发布，可续写或手动核对）"
+    else:
+        location = f"未产生可保存内容（{output_path}）"
+    summary = (f"综述{location}（{exec_result['total_chars']} 字符，"
                f"{exec_result['chapters']} 章）")
     if exec_result["missing_sections"]:
         summary += f"\n⚠️ 缺章: {', '.join(exec_result['missing_sections'])}（生成失败）"

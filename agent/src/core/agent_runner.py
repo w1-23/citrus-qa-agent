@@ -6,7 +6,6 @@ tool_executing, tool_result) with content and progress tracking.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 import uuid
@@ -87,6 +86,108 @@ def _last_content_fallback(messages: list) -> str:
     return ""
 
 
+# ── v8.4.6 检索代码级去重与确定性证据回执（管道而非漏斗）──
+
+def _normalize_query_tokens(q: str) -> list:
+    """查询归一化：小写 + 提取中英数字 token 排序（用于重复检索判定）。"""
+    import re
+    return sorted(set(re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]+", str(q or "").lower())))
+
+
+def check_query_redundant(q: str, seen_queries: list) -> str:
+    """判定检索角度是否与已执行角度重复（纯函数，可单测）。
+
+    规则（代码裁决，不依赖模型自觉）:
+      - token 集合完全相同 → 重复
+      - token 集合 Jaccard ≥ 0.85 → 高度重叠，视为重复
+    返回重复原因字符串；非重复返回 ""。
+    """
+    if not q or not q.strip():
+        return ""
+    norm = _normalize_query_tokens(q)
+    if not norm:
+        return ""
+    for prev in seen_queries:
+        pn = _normalize_query_tokens(prev)
+        if not pn:
+            continue
+        if norm == pn:
+            return f"与「{str(prev)[:60]}」角度相同"
+        inter = len(set(norm) & set(pn))
+        union = len(set(norm) | set(pn))
+        if union and inter / union >= 0.85:
+            return f"与「{str(prev)[:60]}」高度重叠 (Jaccard {inter / union:.2f})"
+    return ""
+
+
+def _dedup_evidence_items(items: list) -> list:
+    """按 DOI（无 DOI 按标题）去重，保持原始顺序。"""
+    seen_doi, seen_title, out = set(), set(), []
+    for r in items:
+        if not isinstance(r, dict):
+            continue
+        doi = str(r.get("doi") or "").strip().lower()
+        title = str(r.get("title") or "").strip().lower()[:80]
+        if doi and doi in seen_doi:
+            continue
+        if not doi and title and title in seen_title:
+            continue
+        if doi:
+            seen_doi.add(doi)
+        elif title:
+            seen_title.add(title)
+        out.append(r)
+    return out
+
+
+def build_evidence_report(collected_artifacts: dict, query: str,
+                          rag_search_count: int) -> str:
+    """确定性证据回执（v8.4.6，纯函数可单测）。
+
+    检索回执由代码组装而非模型转述——保证"管道而非漏斗"：
+      - summary: 检索次数 / 去重文献数 / 相关片段数
+      - 每条文献: 编号 / 标题 / 年份 / DOI + chunk 全文（reranker 已按相关性过滤）
+      - 全文直接进上下文（追问时历史可见；总量受 retrieve-agent cap 40000 控制）
+    """
+    main = _dedup_evidence_items(list(collected_artifacts.get("main_results") or []))
+    web = list(collected_artifacts.get("web_results") or [])
+    lines = [
+        "## 检索回执（系统组装）",
+        f"- 检索执行: {rag_search_count} 次",
+        f"- 去重后文献: {len(main)} 篇 / 学术源条目: {len(web)} 条",
+        f"- 检索目标: {str(query)[:200]}",
+        "",
+    ]
+    if not main and not web:
+        lines.append("未检索到相关文献。")
+    for i, r in enumerate(main[:15], 1):
+        text = str(r.get("text") or r.get("abstract") or r.get("snippet") or "").strip()
+        # chunk 语料单条 ≤~2000 字符，3000 为安全阀（语料零截断）
+        if len(text) > 3000:
+            text = text[:3000] + " …[超长片段截断]"
+        lines.append(
+            f"[{i}] {r.get('title', r.get('name', 'Untitled'))} | "
+            f"{r.get('year', 'N/A')} | DOI: {r.get('doi', 'N/A')} | "
+            f"score: {r.get('score', r.get('rerank_score', 0)) or 0}")
+        if text:
+            lines.append(f"    证据全文: {text}")
+    if web:
+        lines.append("")
+        lines.append("## 学术源补充条目")
+        for i, r in enumerate(web[:10], 1):
+            text = str(r.get("abstract") or r.get("snippet") or r.get("content") or "").strip()
+            if len(text) > 600:
+                text = text[:600] + " …"
+            lines.append(f"[W{i}] {r.get('title', r.get('name', 'Untitled'))} | "
+                         f"DOI/URL: {r.get('doi', r.get('url', 'N/A'))}")
+            if text:
+                lines.append(f"    片段: {text}")
+    lines.append("")
+    lines.append("引用编号请使用上述 [n] 清单；追问可直接引用上文证据，"
+                 "无需重复检索已覆盖的角度。")
+    return "\n".join(lines)
+
+
 async def run_agent(
     agent_name: str,
     task: dict,
@@ -96,6 +197,7 @@ async def run_agent(
     skills: Optional[list[str]] = None,
     timeout_sec: int = 120,
     session_id: str = "",
+    seen_queries: Optional[list] = None,
 ) -> dict:
     """Run a sub-agent in ReAct loop. Returns result dict.
 
@@ -107,6 +209,7 @@ async def run_agent(
         skills: skill IDs for write-agent
         timeout_sec: LLM call timeout
         session_id: 会话 ID（context_usage 增量追踪用）
+        seen_queries: v8.4.6 已执行的检索角度（跨子代理去重，代码级裁决）
 
     Returns:
         {"agent": str, "result": str, "artifacts": dict, "tools_called": int, "turns": int}
@@ -211,6 +314,9 @@ async def run_agent(
 
     result_content = ""
     turns_taken = 0
+    # v8.4.6: 检索角度去重（代码级裁决）——跨 supervisor 轮次/子代理共享
+    _seen_queries = list(seen_queries or [])
+    rag_search_count = 0
 
     for turn in range(max_turns):
         # v8.4.3 指令A: 移除"≥6 篇强制收敛"——动态阈值已过滤 chunk，检索到的
@@ -279,10 +385,32 @@ async def run_agent(
             except Exception:
                 pass
 
+        # v8.4.6: retrieve-agent 的 RAG 检索角度代码级去重（管道而非漏斗）——
+        # 重复/高度重叠的角度直接跳过执行并返回占位结果，杜绝重复 HyDE/rerank 浪费
+        exec_calls: list = []
+        placeholder_results: dict = {}
+        for idx, tc in enumerate(response.tool_calls):
+            tc_dict = _make_tool_call_dict(tc)
+            if agent_name == "retrieve-agent" and tc_dict.get("name") == "citrus_rag_search":
+                q = str((tc_dict.get("args") or {}).get("query", "") or "")
+                reason = check_query_redundant(q, _seen_queries)
+                if reason:
+                    tc_id = tc_ids[idx] if idx < len(tc_ids) else _tc_id(tc)
+                    placeholder_results[idx] = ToolMessage(
+                        content=f"[DEDUP] 检索角度重复: {reason}。该检索未执行，请更换关键词/角度。",
+                        tool_call_id=tc_id, name="citrus_rag_search",
+                        artifact={"main_results": [], "web_results": []})
+                    logger.info(
+                        f"[AgentRunner] {agent_name} 重复检索角度跳过: {reason}")
+                    continue
+                _seen_queries.append(q)
+            exec_calls.append((idx, tc))
+
         t_tool = time.perf_counter()
         try:
             tn = PartitionedToolNode(tools)
-            tool_results = await tn.execute_tools(list(response.tool_calls))
+            exec_results = (await tn.execute_tools([tc for _, tc in exec_calls])
+                            if exec_calls else [])
         except Exception as e:
             logger.error(f"[AgentRunner] {agent_name} tool exec failed: {e}")
             for idx, tc in enumerate(response.tool_calls):
@@ -294,6 +422,16 @@ async def run_agent(
                 except Exception:
                     pass
             break
+
+        # 按原始调用顺序合并执行结果与去重占位（INV-01 配对保持）
+        tool_results: list = [None] * len(response.tool_calls)
+        for (idx, _tc), tr in zip(exec_calls, exec_results):
+            tool_results[idx] = tr
+        for idx, tr in placeholder_results.items():
+            tool_results[idx] = tr
+        rag_search_count += sum(
+            1 for _, tc in exec_calls
+            if _make_tool_call_dict(tc).get("name") == "citrus_rag_search")
 
         dt_tool = (time.perf_counter() - t_tool) * 1000
 
@@ -324,11 +462,14 @@ async def run_agent(
             try:
                 result_text = str(getattr(tr, "content", ""))[:100000]
                 result_count = len(collected_artifacts["main_results"]) + len(collected_artifacts["web_results"])
+                _summary = f"完成 ({dt_tool:.0f}ms, {result_count} 条结果)"
+                if result_text.startswith("[DEDUP]"):
+                    _summary = "重复检索角度，已跳过"
                 emit_tool_result(
                     tc_name[:30],
                     result_text,
                     tc_id,
-                    summary=f"完成 ({dt_tool:.0f}ms, {result_count} 条结果)",
+                    summary=_summary,
                 )
             except Exception:
                 pass
@@ -345,22 +486,19 @@ async def run_agent(
             messages[-1] if messages else None, "tool_calls", None
         ):
             pass
+        elif agent_name == "retrieve-agent":
+            # v8.4.6: retrieve-agent 回执由代码确定性组装（见文末），不再调用
+            # LLM 写报告——省一次长生成（历史实测 44s）且杜绝模型压缩细节
+            logger.info(f"[AgentRunner] {agent_name} max turns, "
+                        f"report assembled by code (no LLM final call)")
         else:
             logger.info(f"[AgentRunner] {agent_name} max turns, forcing final")
-            # v8.4.3 指令A: retrieve-agent 收尾要求输出完整证据报告（全部检索到的 chunk）
-            if agent_name == "retrieve-agent":
-                final_prompt = (
-                    "已到达检索轮次上限。请立即输出最终结构化检索报告，"
-                    "包含本轮检索到的**全部**证据（逐条列出: 编号/标题/DOI/"
-                    "关键结论与数值），不要遗漏任何一条；最后说明信息缺口。"
-                )
-            else:
-                final_prompt = (
-                    "You have reached the maximum number of turns. "
-                    "Do NOT call any more tools. "
-                    "Provide your final answer based on the information you have. "
-                    "If information is insufficient, state what is missing."
-                )
+            final_prompt = (
+                "You have reached the maximum number of turns. "
+                "Do NOT call any more tools. "
+                "Provide your final answer based on the information you have. "
+                "If information is insufficient, state what is missing."
+            )
             # v8.4.3: 收尾消息不写入 messages（临时列表），避免进 turn_trace/历史
             # v8.4.5: 收尾用未绑工具客户端 llm_base（与 expert/light 一致，杜绝
             # 收尾再发 tool_calls 导致空回执）；空答兜底取最后 AIMessage.content
@@ -381,6 +519,18 @@ async def run_agent(
         doi = (r.get("doi") or "").strip()
         if doi and doi not in unique_dois:
             unique_dois.append(doi)
+
+    # v8.4.6: retrieve-agent 回执由代码确定性组装——summary + 文献细节 + chunk 全文
+    # 直接进上下文（ToolMessage → 历史可见，追问无需重检索）——不再依赖模型转述
+    # （"管道而非漏斗"，历史模型报告 34~176 字极短回执由此根治）。
+    if agent_name == "retrieve-agent":
+        code_report = build_evidence_report(
+            collected_artifacts, query, rag_search_count)
+        if result_content:
+            logger.info(
+                f"[AgentRunner] retrieve-agent 模型自述({len(result_content)} chars) "
+                f"被确定性回执替代({len(code_report)} chars)")
+        result_content = code_report
 
     try:
         emit_encoded("agent_summary", {
@@ -406,7 +556,8 @@ async def run_agent(
         blog("agent_done", agent=agent_name,
              turns=turns_taken, tools=tool_count,
              chars=len(result_content),
-             docs=len(unique_dois), ms=int(total_time))
+             docs=len(unique_dois), ms=int(total_time),
+             rag_searches=rag_search_count)
     except Exception:
         pass
 

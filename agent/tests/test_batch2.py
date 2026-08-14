@@ -438,7 +438,10 @@ def test_ag23_converge_behavior():
         loop.close()
         check("证据充分后自然完成（第 2 次调用即最终报告）", calls["n"] == 2,
               f"calls={calls['n']}")
-        check("结果含报告", "检索报告" in r.get("result", ""))
+        # v8.4.6: retrieve-agent 回执由代码确定性组装（检索回执 + 文献细节）
+        check("结果含代码组装的证据回执",
+              "检索回执" in r.get("result", "") and "paper0" in r.get("result", ""),
+              r.get("result", "")[:100])
     finally:
         ar.PartitionedToolNode.execute_tools = orig_exec
         pool.get_llm = orig_get_llm

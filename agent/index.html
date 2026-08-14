@@ -6,8 +6,8 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Citrus QA Agent v8.4.4</title>
-<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<title>Citrus QA Agent v8.4.6</title>
+<script src="https://cdn.jsdelivr.net/npm/marked@4.3.0/marked.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
@@ -770,7 +770,7 @@ footer {
 <header>
   <div class="logo-mark">C</div>
   <h1>Citrus QA Agent</h1>
-  <span class="version-badge" id="versionBadge">v8.4.4</span>
+  <span class="version-badge" id="versionBadge">v8.4.6</span>
   <div class="header-actions">
     <button class="ctx-circle-btn" id="ctxCircleBtn" onclick="toggleCtxDrawer()" title="上下文用量">
       <svg viewBox="0 0 36 36" width="22" height="22">
@@ -790,7 +790,7 @@ footer {
       <div class="message bot">
         <div class="avatar">◆</div>
         <div class="content">
-          您好，我是 <span id="welcomeVersion">Citrus QA Agent v8.4.4</span>。<br>
+          您好，我是 <span id="welcomeVersion">Citrus QA Agent v8.4.6</span>。<br>
           <span style="color:var(--text-muted);font-size:13px">本地 RAG 检索 · CrossRef 学术搜索 · 文献综述写作 · 实验设计 · 文件读写</span>
         </div>
       </div>
@@ -882,10 +882,14 @@ function renderMarkdownSafe(text) {
   var renderer = new marked.Renderer();
   var origCode = renderer.code;
   renderer.code = function(code, lang) {
+    // v8.4.6: 兼容 marked>=5 的 token 对象签名（code 可能为 {text:...}），
+    // 否则代码块会渲染成 "[object Object]"
+    if (code && typeof code === 'object') { lang = code.lang || ''; code = code.text || ''; }
     var cls = lang ? ' class="lang-' + escapeHtml(lang) + '"' : '';
     return '<pre><code' + cls + '>' + escapeHtmlCode(code) + '</code></pre>';
   };
   renderer.codespan = function(code) {
+    if (code && typeof code === 'object') { code = code.text || ''; }
     return '<code>' + escapeHtmlCode(code) + '</code>';
   };
   return marked.parse(String(text == null ? '' : text), { renderer: renderer, breaks: true });
@@ -908,7 +912,7 @@ function loadRuntimeConfig() {
 }
 /* v8.4.5: 版本单源——后端 /api/v2/config.version 下发，静态文案仅为离线回退 */
 function _appVersion() {
-  return (_runtimeConfig && _runtimeConfig.version) || '8.4.4';
+  return (_runtimeConfig && _runtimeConfig.version) || '8.4.6';
 }
 function applyAppVersion() {
   var v = _appVersion();
@@ -1166,6 +1170,10 @@ function renderContextPanel(data) {
       updateStatus('tool', (stepNames[data.step_id] || data.step_id) + '完成');
     } else if (stage === 'agent_start') {
       updateStatus('agent', '启动子Agent: ' + (data.agent || ''));
+    } else if (stage === 'retrieval_done') {
+      // v8.4.6 F1: light 模式代码级预检索完成
+      updateStatus('tool', '预检索完成 (' + (data.main_count||0) + ' 篇)');
+      appendTerminal('✓ 预检索完成 · 通过阈值 ' + (data.main_count||0) + ' 篇');
     }
   }
 
@@ -1368,11 +1376,16 @@ async function sendMsg(isFollowUp) {
       case 'thinking': updateStatus('thinking', (data.content||'').substring(0,80)); updateContextTokens(((data.content||'').length)*0.7); break;
       case 'tool_call_start': updateStatus('tool', (data.tool_name||'工具')+' 执行中...'); updateContextTokens(30); break;
       case 'tool_executing': updateStatus('tool', data.message||'执行中...'); break;
-      case 'tool_progress': appendTerminal(data.message||''); updateStatus('tool', data.message||''); break;
+      case 'tool_progress': updateStatus('tool', data.message||''); break;
       case 'tool_result':
         updateContextTokens((data.output||'').length * 0.7);
+        // v8.4.6 F3: 执行日志层级化——工具完成打一行汇总，不再逐条刷内部进度
+        appendTerminal('✓ ' + (data.tool_name||'工具') + ' · ' + (data.summary||'完成'));
         break;
-      case 'agent_switch': updateStatus('agent', '启动: '+(data.agent_name||'')); updateContextTokens(50); break;
+      case 'agent_switch':
+        updateStatus('agent', '启动: '+(data.agent_name||'')); updateContextTokens(50);
+        appendTerminal('── 子Agent「' + (data.agent_name||'') + '」启动 ── ' + (data.task||''));
+        break;
       case 'text':
         if (!isAnswerStarted) { isAnswerStarted=true; clearTimeout(spinnerTimeout); updateStatus('answer','生成回答中...'); answerDiv.style.display=''; }
         fullText+=data.content; updateContextTokens((data.content||'').length * 0.7); renderAnswer(); break;
@@ -1471,8 +1484,8 @@ async function sendMsg(isFollowUp) {
   _lastStreamOnce = streamOnce;
   streamOnce();
 
-  function renderCitationItem(item){var du=item.doi&&item.doi!=='N/A'?'https://doi.org/'+encodeURIComponent(item.doi):'#';var b=item.type==='main'?'citation-badge':item.type==='dynamic'?'citation-badge uncited':'citation-badge uncited';var sl=item.type==='dynamic'?'Agent 发现':item.type==='web'?'Web':(item.score?'CE='+item.score.toFixed(3):'');var h='<div class="citation-item" onclick="this.classList.toggle(\'expanded\')">';h+='<div class="citation-header"><span class="'+b+'">['+escapeHtml(item.ref_id)+']</span><span class="citation-score">'+escapeHtml(sl)+'</span></div>';if(item.type==='web'){if(item.url)h+='<a href="'+escapeHtml(item.url)+'" target="_blank" class="citation-doi" onclick="event.stopPropagation()">'+escapeHtml(item.url)+'</a>'}else if(item.doi&&item.doi!=='N/A'){h+='<a href="'+du+'" target="_blank" class="citation-doi" onclick="event.stopPropagation()">'+escapeHtml(item.doi)+'</a>'}if(item.section_name)h+='<div class="citation-text"><strong>Section:</strong> '+escapeHtml(item.section_name)+'</div>';if(item.text_preview)h+='<div class="citation-text">'+escapeHtml((item.text_preview||'').substring(0,250))+'</div>';h+='<div class="citation-detail">';if(item.title)h+='<div class="citation-text"><strong>Title:</strong> '+escapeHtml((item.title||'').substring(0,200))+'</div>';if(item.authors)h+='<div class="citation-text"><strong>Authors:</strong> '+escapeHtml(item.authors)+'</div>';if(item.year)h+='<div class="citation-text"><strong>Year:</strong> '+escapeHtml(item.year)+'</div>';h+='</div></div>';return h}
-  function renderRoundSidebar(){if(roundHistory.length===0){sidebarContent.innerHTML='<div class="empty-sidebar">提交问题后文献将在此展示</div>';citationCount.textContent='0';return}var tC=0,tU=0;for(var i=0;i<roundHistory.length;i++){tC+=roundHistory[i].cited.length;tU+=roundHistory[i].uncited.length}citationCount.textContent=(tC+tU);var html='';for(var i=roundHistory.length-1;i>=0;i--){var round=roundHistory[i];var all=[];for(var k=0;k<round.cited.length;k++){if(round.cited[k].type!=='web')all.push(round.cited[k])}for(var k=0;k<round.uncited.length;k++){if(round.uncited[k].type!=='web')all.push(round.uncited[k])}if(all.length===0)continue;var qp=round.query.length>25?round.query.substring(0,25)+'...':round.query;var open=i===roundHistory.length-1;html+='<div class="round-group">';html+='<div class="round-header" onclick="toggleRound(\'round-'+round.roundId+'\')">';html+='<span class="toggle-icon" id="round-'+round.roundId+'-icon">▶</span>';html+='<span class="round-title">Round '+round.roundId+': '+qp+'</span>';html+='<span class="round-count">'+all.length+'</span></div>';html+='<div class="round-body" id="round-'+round.roundId+'"'+(open?'':' style="display:none"')+'>';for(var m=0;m<all.length;m++){html+=renderCitationItem(all[m])}html+='</div></div>'}sidebarContent.innerHTML=html||'<div class="empty-sidebar">本轮未检索到相关文献</div>'}
+  function renderCitationItem(item){var du=item.doi&&item.doi!=='N/A'?'https://doi.org/'+encodeURIComponent(item.doi):'#';var b=item.type==='main'?'citation-badge':item.type==='dynamic'?'citation-badge uncited':'citation-badge uncited';var sl=item.type==='dynamic'?'Agent 发现':item.type==='web'?'Web':item.type==='historical'?'历史证据':(item.score?'CE='+item.score.toFixed(3):'');var h='<div class="citation-item" onclick="this.classList.toggle(\'expanded\')">';h+='<div class="citation-header"><span class="'+b+'">['+escapeHtml(item.ref_id)+']</span><span class="citation-score">'+escapeHtml(sl)+'</span></div>';if(item.type==='web'){if(item.url)h+='<a href="'+escapeHtml(item.url)+'" target="_blank" class="citation-doi" onclick="event.stopPropagation()">'+escapeHtml(item.url)+'</a>'}else if(item.doi&&item.doi!=='N/A'){h+='<a href="'+du+'" target="_blank" class="citation-doi" onclick="event.stopPropagation()">'+escapeHtml(item.doi)+'</a>'}if(item.section_name)h+='<div class="citation-text"><strong>Section:</strong> '+escapeHtml(item.section_name)+'</div>';if(item.text_preview)h+='<div class="citation-text">'+escapeHtml((item.text_preview||'').substring(0,250))+'</div>';h+='<div class="citation-detail">';if(item.title)h+='<div class="citation-text"><strong>Title:</strong> '+escapeHtml((item.title||'').substring(0,200))+'</div>';if(item.authors)h+='<div class="citation-text"><strong>Authors:</strong> '+escapeHtml(item.authors)+'</div>';if(item.year)h+='<div class="citation-text"><strong>Year:</strong> '+escapeHtml(item.year)+'</div>';if(item.chunk_id)h+='<div class="citation-text"><strong>Chunk:</strong> '+escapeHtml(item.chunk_id)+'</div>';h+='</div></div>';return h}
+  function renderRoundSidebar(){if(roundHistory.length===0){sidebarContent.innerHTML='<div class="empty-sidebar">提交问题后文献将在此展示</div>';citationCount.textContent='0';return}var tC=0,tU=0;for(var i=0;i<roundHistory.length;i++){tC+=roundHistory[i].cited.length;tU+=roundHistory[i].uncited.length}citationCount.textContent=(tC+tU);var html='';for(var i=roundHistory.length-1;i>=0;i--){var round=roundHistory[i];var all=[];for(var k=0;k<round.cited.length;k++){if(round.cited[k].type!=='web')all.push(round.cited[k])}for(var k=0;k<round.uncited.length;k++){if(round.uncited[k].type!=='web')all.push(round.uncited[k])}for(var k=0;k<(round.historical||[]).length;k++){all.push(round.historical[k])}if(all.length===0)continue;var qp=round.query.length>25?round.query.substring(0,25)+'...':round.query;var open=i===roundHistory.length-1;html+='<div class="round-group">';html+='<div class="round-header" onclick="toggleRound(\'round-'+round.roundId+'\')">';html+='<span class="toggle-icon" id="round-'+round.roundId+'-icon">▶</span>';html+='<span class="round-title">Round '+round.roundId+': '+qp+'</span>';html+='<span class="round-count">'+all.length+'</span></div>';html+='<div class="round-body" id="round-'+round.roundId+'"'+(open?'':' style="display:none"')+'>';for(var m=0;m<all.length;m++){html+=renderCitationItem(all[m])}html+='</div></div>'}sidebarContent.innerHTML=html||'<div class="empty-sidebar">本轮未检索到相关文献</div>'}
   }
 
 if (sessionId) { userInput.focus(); }

@@ -11,6 +11,9 @@ sys.path.insert(0, BASE)
 from src.core import write_pipeline as wp
 from src.config import PROJECT_ROOT, settings
 
+# v8.4.6: 测试环境固定串行生成（FakeLLM 按调用顺序弹响应，并发会打乱对应关系）
+settings.PIPELINE_PARALLEL_SECTIONS = 1
+
 passed, failed = [], []
 
 
@@ -117,7 +120,8 @@ def test_execute_stage():
     ])
     fname = f"test_pipe_{uuid.uuid4().hex[:6]}.md"
     r = run(wp.run_stage2_execute(llm, plan, [], fname))
-    target = PROJECT_ROOT / "workspace" / "output" / fname
+    # v8.4.6 F7: stage2 写入草稿（发布在流水线入口）
+    target = PROJECT_ROOT / "workspace" / "output" / wp._draft_path(fname)
     content = target.read_text(encoding="utf-8") if target.exists() else ""
     check("3 章完成", r["chapters"] == 3 and not r["missing_sections"])
     check("文件含标题+摘要+关键词", "# 综述T" in content and "摘要" in content and "关键词" in content)
@@ -146,7 +150,8 @@ def test_missing_section():
     r = run(wp.run_stage2_execute(llm, plan, [], fname))
     check("第1章失败→缺章", r["missing_sections"] == ["1 A"], str(r["missing_sections"]))
     check("第2章仍完成", r["chapters"] == 1)
-    target = PROJECT_ROOT / "workspace" / "output" / fname
+    # v8.4.6 F7: 草稿路径清理
+    target = PROJECT_ROOT / "workspace" / "output" / wp._draft_path(fname)
     if target.exists():
         target.unlink()
 
@@ -256,7 +261,8 @@ def test_runtime_capacity():
         llm = FakeLLM(["## 1 A\n" + "字" * 2000, "## 1 A\n精简版内容"])
         fname = f"test_cap_{uuid.uuid4().hex[:6]}.md"
         r = run(wp.run_stage2_execute(llm, plan, [], fname))
-        target = PROJECT_ROOT / "workspace" / "output" / fname
+        # v8.4.6 F7: stage2 写入草稿文件，发布由流水线入口完成
+        target = PROJECT_ROOT / "workspace" / "output" / wp._draft_path(fname)
         content = target.read_text(encoding="utf-8") if target.exists() else ""
         check("超容量 → 触发精简重试", llm.calls == 2, f"calls={llm.calls}")
         check("精简后内容落盘", "精简版内容" in content and len(content) < 2000)
@@ -267,7 +273,8 @@ def test_runtime_capacity():
         llm2 = FakeLLM(["## 1 A\n" + "字" * 2000, "## 1 A\n" + "字" * 1900])
         fname2 = f"test_cap2_{uuid.uuid4().hex[:6]}.md"
         r2 = run(wp.run_stage2_execute(llm2, plan, [], fname2))
-        t2 = PROJECT_ROOT / "workspace" / "output" / fname2
+        # v8.4.6 F7: stage2 写入草稿路径
+        t2 = PROJECT_ROOT / "workspace" / "output" / wp._draft_path(fname2)
         check("仍超限 → truncated 标记", r2["truncated_sections"] == ["1 A"],
               str(r2.get("truncated_sections")))
         check("仍超限 → 内容仍写盘", t2.exists())

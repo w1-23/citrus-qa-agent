@@ -92,6 +92,42 @@ async def load_context_node(state: AgentState) -> dict:
         return result
 
 
+async def light_retrieve_node(state: AgentState) -> dict:
+    """v8.4.6 F1: light 模式代码级预检索——科研问题保证至少一次本地检索。
+
+    此前 light 由 LLM 自主决定是否调用工具，实测经常 0 次工具直接作答
+    （无执行日志、无文献引用面板）。此处代码强制预检索：
+      - 走基础检索（无 HyDE，light 模式速度优先，省 ~6s/次）
+      - 结果经 <retrieval_context> 注入当前轮 HumanMessage（light_rules 已预留）
+      - artifacts 合流 references_data → 侧栏引用正常显示
+    LLM 仍可在此基础上自行补充工具调用（追问/缺口）。
+    """
+    query = state.get("query", "")
+    session_id = state.get("session_id", "default")
+    logger.info(f"[LightGraph:retrieve] pre-retrieve for session={session_id[:8]}...")
+    try:
+        from src.tools.search import format_rag_context
+        from src.retrieval.multi_retriever import MultiBatchRetriever
+        rag = MultiBatchRetriever()
+        results = await asyncio.to_thread(rag.search, query)
+        main = list(results or [])
+        content = format_rag_context(main, "main") if main else "未检索到相关文献。"
+        emit_status("retrieval_done", main_count=len(main))
+        logger.info(f"[LightGraph:retrieve] pre-retrieve done: {len(main)} items")
+        return {
+            "retrieval_context": content,
+            "main_results": main,
+            "web_results": [],
+            "_trace": {"node": "light_retrieve", "elapsed_ms": 0,
+                       "summary": f"pre-retrieve {len(main)} items"},
+        }
+    except Exception as e:
+        logger.warning(f"[LightGraph:retrieve] pre-retrieve failed: {e}")
+        return {"retrieval_context": "", "main_results": [], "web_results": [],
+                "_trace": {"node": "light_retrieve", "elapsed_ms": 0,
+                           "summary": "unavailable"}}
+
+
 async def light_supervisor_node(state: AgentState) -> dict:
     """LLM autonomous routing supervisor.
 
@@ -118,7 +154,9 @@ async def light_supervisor_node(state: AgentState) -> dict:
         search_suggestions=state.get("search_suggestions", []),
         format_hint=format_hint,
     )
-    human_msg = build_human_message(ctx)
+    # v8.4.6 F1: 代码级预检索结果注入 <retrieval_context>（light_rules 的既定通道）
+    human_msg = build_human_message(
+        ctx, retrieval_context=state.get("retrieval_context") or "")
 
     messages: list = [SystemMessage(content=system_prompt)]
     history_msgs = list(state.get("messages", []))
@@ -139,8 +177,9 @@ async def light_supervisor_node(state: AgentState) -> dict:
     llm = _build_light_llm(bind_tools=tools) if tools else _build_light_llm()
 
     answer = ""
-    all_main_results = []
-    all_web_results = []
+    # v8.4.6 F1: 预检索节点的 artifacts 合流（否则 side 栏引用为空）
+    all_main_results = list(state.get("main_results") or [])
+    all_web_results = list(state.get("web_results") or [])
     tool_call_count = 0
     t0 = time.perf_counter()
 
@@ -280,6 +319,17 @@ async def light_supervisor_node(state: AgentState) -> dict:
 
     references_data = {"cited": cited_refs, "uncited": [], "total": len(cited_refs)}
 
+    # v8.4.6 F2: 历史证据引用进侧栏（回答基于 [历史检索证据] 作答时不再空面板）
+    try:
+        from src.session.manager import session_manager
+        historical = session_manager.get_evidence_refs(
+            state.get("session_id", ""), limit=20)
+        if historical:
+            references_data["historical"] = historical
+            references_data["total"] = len(cited_refs) + len(historical)
+    except Exception:
+        pass
+
     if answer:
         chunk_size = 8
         for i in range(0, len(answer), chunk_size):
@@ -346,7 +396,8 @@ async def save_context_node(state: AgentState) -> dict:
                  "chunk_id": f"{r.get('paper_id', '')}:{r.get('chunk_index', '')}",
                  "title": str(r.get("title", ""))[:150],
                  "score": r.get("score", r.get("rerank_score", 0)) or 0,
-                 "snippet": str(r.get("text", "") or r.get("abstract", ""))[:500]}
+                 "year": str(r.get("year", "")),
+                 "snippet": str(r.get("text", "") or r.get("abstract", ""))[:2000]}
                 for r in main_results[:30]
             ]
             spawn(session_manager.save_evidence(
@@ -383,11 +434,14 @@ def build_light_graph() -> StateGraph:
     graph = StateGraph(AgentState)
 
     graph.add_node("load_context", load_context_node)
+    # v8.4.6 F1: 代码级预检索（科研问题保证 ≥1 次本地检索，日志/引用面板可见）
+    graph.add_node("light_retrieve", light_retrieve_node)
     graph.add_node("light_supervisor", light_supervisor_node)
     graph.add_node("save_context", save_context_node)
 
     graph.set_entry_point("load_context")
-    graph.add_edge("load_context", "light_supervisor")
+    graph.add_edge("load_context", "light_retrieve")
+    graph.add_edge("light_retrieve", "light_supervisor")
     graph.add_edge("light_supervisor", "save_context")
     graph.add_edge("save_context", END)
 

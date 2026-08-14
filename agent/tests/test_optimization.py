@@ -50,7 +50,8 @@ def test_budget_removed():
     check("agent_runner 无 BUDGET_LIMIT", "BUDGET_LIMIT" not in runner)
     check("config.yaml 无预算键", "search_budget_per_" not in cfg)
     check("config.py 无预算字段", "SEARCH_BUDGET" not in cfgpy)
-    check("agent_runner 恢复直接执行", "execute_tools(list(response.tool_calls))" in runner)
+    # v8.4.6: 直接执行（仅新增检索角度去重的代码级预过滤，无预算类过滤）
+    check("agent_runner 恢复直接执行", "execute_tools([tc for _, tc in exec_calls])" in runner)
 
 
 def test_reason_feedback():

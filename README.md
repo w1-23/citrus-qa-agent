@@ -1,4 +1,4 @@
-# Citrus QA Agent v8.4.5
+# Citrus QA Agent v8.4.6
 
 柑橘科研问答 RAG + Multi-Agent 系统：Light/Expert 双图、HyDE+RRF 混合检索、SSE 流式输出、上下文预算与长期记忆。
 

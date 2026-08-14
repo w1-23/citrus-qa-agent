@@ -98,6 +98,7 @@ pipeline:
   section_max_tokens: 4000      # 单章生成输出上限
   section_timeout: 120          # 单章 LLM 调用超时(秒)
   resume_enabled: true          # 中断续传（pipeline_tasks 表）开关
+  parallel_sections: 3          # v8.4.6: 单章生成并发度（生成并发、按序写盘；1=串行，兼容旧行为）
 
 # ── File I/O ──
 file_io:

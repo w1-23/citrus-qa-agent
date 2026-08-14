@@ -119,7 +119,8 @@ def test_max_turns_forces_detailed_final():
     orig_turns = eg.SUPERVISOR_MAX_TURNS
     eg.SUPERVISOR_MAX_TURNS = 2
 
-    async def fake_execute_tool_call(tc, tc_id="", material_pack=None, session_id=""):
+    async def fake_execute_tool_call(tc, tc_id="", material_pack=None,
+                                     session_id="", seen_queries=None):
         return {"agent": "retrieve-agent", "result": "检索报告：6 篇关键文献",
                 "artifacts": {}}
 
@@ -324,6 +325,8 @@ def test_offload_cleanup():
     print("[SF-7] offload 临时文件清理（v8.4.4 接线）")
     from src.tools.registry import (
         _offload_large_result, get_offload_file_list, cleanup_offload_files)
+    # v8.4.6: 前置清场——其它用例（如 retrieve-agent 证据暂存）可能已注册文件
+    cleanup_offload_files()
     p1 = _offload_large_result("x" * 20000, "test_tool")
     p2 = _offload_large_result("y" * 20000, "test_tool")
     check("offload 产生引用文本", "已自动卸载" in p1 and "test_tool" in p1, p1[:60])
@@ -350,6 +353,76 @@ def test_fast_guard():
     check("空白不命中", not _is_fast_guard_hit(""))
 
 
+def test_query_dedup():
+    print("[SF-8b] 检索角度代码级去重（v8.4.6）")
+    from src.core.agent_runner import check_query_redundant
+    seen = ["citrus anthocyanin regulation transcription factor MYB WRKY"]
+    check("完全相同角度 → 去重", bool(check_query_redundant(
+        "citrus anthocyanin regulation transcription factor MYB WRKY", seen)))
+    check("token 集合相同(乱序/大小写) → 去重", bool(check_query_redundant(
+        "WRKY MYB citrus regulation transcription factor ANTHOCYANIN", seen)))
+    check("高度重叠(Jaccard≥0.85) → 去重", bool(check_query_redundant(
+        "citrus anthocyanin MYB WRKY regulation factor", seen)))
+    check("实质不同角度 → 放行", not check_query_redundant(
+        "blood orange Ruby1 retrotransposon cold induced", seen))
+    check("空查询 → 放行", not check_query_redundant("", seen))
+
+
+def test_evidence_report_builder():
+    print("[SF-9] 确定性证据回执（v8.4.6）")
+    from src.core.agent_runner import build_evidence_report
+    arts = {"main_results": [
+        {"doi": "10.1/a", "title": "Paper A", "year": "2024", "score": 0.9,
+         "text": "Ruby1 受低温诱导，Corky 转座子插入启动子。"},
+        {"doi": "10.1/a", "title": "Paper A dup", "year": "2024", "score": 0.8,
+         "text": "重复条目"},
+        {"title": "Paper B", "year": "2023", "score": 0.7,
+         "text": "WRKY75 结合启动子。"},
+    ], "web_results": [
+        {"title": "W1", "doi": "10.2/x", "abstract": "非柑橘对照"},
+    ]}
+    rep = build_evidence_report(arts, "test query", 3)
+    check("summary 含检索次数", "检索执行: 3 次" in rep)
+    check("DOI 去重(2 条 main)", "[1]" in rep and "[2]" in rep and "[3]" not in rep)
+    check("文献细节含标题", "Paper A" in rep and "Paper B" in rep)
+    check("chunk 全文直接进上下文",
+          "Ruby1 受低温诱导，Corky 转座子插入启动子。" in rep
+          and "WRKY75 结合启动子。" in rep)
+    check("web 补充条目", "[W1]" in rep)
+    check("引用编号指引", "引用编号请使用上述" in rep)
+
+
+def test_draft_publish():
+    print("[SF-10] 写作草稿-发布（v8.4.6）")
+    import uuid
+    from src.core.write_pipeline import _draft_path, _publish_draft, _WORKSPACE_ROOT
+    from src.tools.file_ops import write_local_file
+    name = f"test_draft_{uuid.uuid4().hex[:6]}.md"
+    draft = _draft_path(name)
+    msg = write_local_file.func(draft, "# 测试\n内容", "write")
+    check("草稿已写入", not msg.startswith("Error"), msg[:60])
+    ok = _publish_draft(name)
+    check("发布成功", ok)
+    final = _WORKSPACE_ROOT / name
+    check("正式文件存在且内容正确",
+          final.exists() and "测试" in final.read_text(encoding="utf-8"))
+    check("草稿已移除", not (_WORKSPACE_ROOT / draft).exists())
+    if final.exists():
+        final.unlink()
+
+
+def test_output_profile():
+    print("[SF-11] 输出画像（指标决定回答，v8.4.6）")
+    from src.graph.expert_graph import _build_output_profile
+    p8 = _build_output_profile(10, "fact")
+    check("证据≥8 → 深度档", "1200~2000" in p8 and "至少覆盖 6 条" in p8, p8[:80])
+    p3 = _build_output_profile(5, "method")
+    check("3~7 → 标准档", "600~1200" in p3 and "覆盖全部 5 条" in p3, p3[:80])
+    p0 = _build_output_profile(0, "fact")
+    check("0 → 薄档", "300 字以内" in p0 and "模型知识" in p0, p0[:80])
+    check("综述类不注入", _build_output_profile(10, "review") == "")
+
+
 def _restore_llm_pool(orig):
     import src.core.llm_pool as pool
     pool.get_llm = orig
@@ -365,6 +438,10 @@ if __name__ == "__main__":
     test_permission_grant_flow()
     test_offload_cleanup()
     test_fast_guard()
+    test_query_dedup()
+    test_evidence_report_builder()
+    test_draft_publish()
+    test_output_profile()
     print(f"supervisor final tests: {len(passed)} passed, {len(failed)} failed")
     if failed:
         print("FAILED:", failed)

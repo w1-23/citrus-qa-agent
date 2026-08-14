@@ -659,5 +659,98 @@ class SessionManager:
             logger.debug(f"[SessionManager] count_evidence_items failed: {e}")
             return 0
 
+    def get_evidence_refs(self, session_id: str, limit: int = 20) -> list:
+        """v8.4.6 F2: 历史证据引用条目（前端侧栏 historical 面板）。
+
+        返回最近若干轮证据账本的去重条目（doi/title/year/score/chunk_id），
+        ref_id=H1..Hn；基于 [历史检索证据] 作答时侧栏不再为空。
+        """
+        import sqlite3
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    "SELECT evidence_json FROM session_evidence "
+                    "WHERE session_id=? ORDER BY id DESC LIMIT 4",
+                    (session_id,)).fetchall()
+        except Exception as e:
+            logger.debug(f"[SessionManager] get_evidence_refs failed: {e}")
+            return []
+        refs, seen_doi, seen_title = [], set(), set()
+        for row in rows:
+            try:
+                evd = json.loads(row["evidence_json"] or "[]")
+            except Exception:
+                continue
+            for e in evd if isinstance(evd, list) else []:
+                if not isinstance(e, dict):
+                    continue
+                doi = str(e.get("doi") or "").strip()
+                title = str(e.get("title") or "").strip()[:120]
+                key = doi or title
+                if not key or key in seen_doi or (not doi and key in seen_title):
+                    continue
+                if doi:
+                    seen_doi.add(key)
+                else:
+                    seen_title.add(key)
+                refs.append({
+                    "ref_id": f"H{len(refs) + 1}",
+                    "type": "historical",
+                    "doi": doi or "N/A",
+                    "title": title,
+                    "year": str(e.get("year", "")),
+                    "score": e.get("score", 0) or 0,
+                    "chunk_id": e.get("chunk_id", ""),
+                })
+                if len(refs) >= limit:
+                    return refs
+        return refs
+
+    def get_evidence_materials(self, session_id: str, limit: int = 30) -> list:
+        """v8.4.6 F7: 会话证据账本转写作材料包（dict 列表，供 write_pipeline 消费）。
+
+        本轮无新检索时，写任务仍可走 plan_execute 主路径（材料来自历史
+        证据的 chunk 片段），避免降级 ReAct 导致证据链二次转写。
+        """
+        import sqlite3
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    "SELECT evidence_json FROM session_evidence "
+                    "WHERE session_id=? ORDER BY id DESC LIMIT 4",
+                    (session_id,)).fetchall()
+        except Exception as e:
+            logger.debug(f"[SessionManager] get_evidence_materials failed: {e}")
+            return []
+        materials, seen = [], set()
+        for row in rows:
+            try:
+                evd = json.loads(row["evidence_json"] or "[]")
+            except Exception:
+                continue
+            for e in evd if isinstance(evd, list) else []:
+                if not isinstance(e, dict):
+                    continue
+                doi = str(e.get("doi") or "").strip()
+                title = str(e.get("title") or "").strip()
+                key = doi or title
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                materials.append({
+                    "doi": doi,
+                    "title": title,
+                    "year": str(e.get("year", "")),
+                    "score": e.get("score", 0) or 0,
+                    "chunk_id": e.get("chunk_id", ""),
+                    "text": str(e.get("snippet") or ""),
+                    "_source": "session_evidence",
+                })
+                if len(materials) >= limit:
+                    return materials
+        return materials
+
 
 session_manager = SessionManager()

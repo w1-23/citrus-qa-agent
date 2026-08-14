@@ -186,7 +186,7 @@ async def _classify_document(text: str) -> bool:
 
 
 async def _execute_tool_call(tc: dict, tc_id: str = "", material_pack: list | None = None,
-                             session_id: str = "") -> dict:
+                             session_id: str = "", seen_queries: list | None = None) -> dict:
     from src.core.agent_runner import run_agent
 
     name = tc.get("name", "")
@@ -267,6 +267,14 @@ async def _execute_tool_call(tc: dict, tc_id: str = "", material_pack: list | No
             # v8.3.2: 写任务四路路由 — 直写确认失败后，按意图分类
             from src.core.write_pipeline import classify_write_task, run_write_pipeline
             pack = material_pack or []
+            # v8.4.6: 本轮无新检索时并入会话证据账本（历史 chunk），使 plan_execute
+            # 主路径可用——此前 pack 为空恒降级 ReAct，写作素材退化为二手转述
+            if not pack:
+                try:
+                    from src.session.manager import session_manager
+                    pack = session_manager.get_evidence_materials(session_id, limit=30)
+                except Exception:
+                    pack = []
             target = (PROJECT_ROOT / "workspace" / "output" / task["output_path"]).resolve() \
                 if task["output_path"] else None
             file_exists = bool(target and target.exists())
@@ -292,7 +300,7 @@ async def _execute_tool_call(tc: dict, tc_id: str = "", material_pack: list | No
             result = await run_agent(
                 agent_name, task, context=context,
                 system_prompt_extra=skill_prompt, timeout_sec=120,
-                session_id=session_id,
+                session_id=session_id, seen_queries=seen_queries,
             )
         dt_agent = (time.perf_counter() - t_agent) * 1000
     except Exception as e:
@@ -412,6 +420,34 @@ def _build_status_content(
         lines.append(f"上下文占用: {budget_ratio:.1%}")
     lines.append("</agent_status>")
     return "\n".join(lines)
+
+
+def _build_output_profile(evidence_count: int, format_hint: str | None) -> str:
+    """v8.4.6: 输出画像（代码计算，指标决定回答）——篇幅与覆盖要求由
+    证据量确定性给出，而非让模型猜"适当篇幅"。
+
+    只设**下限**（证据覆盖率），不设上限——遵守"无质量预算"原则。
+    综述类（review）由 write-agent 承担，这里不注入。
+    """
+    if format_hint == "review":
+        return ""
+    if evidence_count >= 8:
+        target, cover = ("1200~2000 字（下限，上不封顶）",
+                         f"至少覆盖 6 条证据（从检索回执 [n] 清单选取），每条证据至少 1 段展开，"
+                         f"写出具体机制/基因/数值，禁止空泛概括")
+    elif evidence_count >= 3:
+        target, cover = ("600~1200 字（下限，上不封顶）",
+                         f"覆盖全部 {evidence_count} 条证据，每条至少 1 段并挂 [n]")
+    elif evidence_count >= 1:
+        target, cover = ("300~600 字",
+                         "基于现有证据回答并挂 [n]；证据不足处标注 [模型知识]")
+    else:
+        target, cover = ("300 字以内",
+                         "无本轮检索证据：如实说明，标注 [模型知识] 或给出检索方向")
+    return (
+        f"<output_profile>\n目标篇幅: {target}\n证据覆盖: {cover}\n"
+        f"这是输出下限要求而非上限；不得以'简洁'为由删减证据细节。\n</output_profile>"
+    )
 
 
 # ── v8.4.2 统一收尾（根治重构）──
@@ -559,19 +595,29 @@ async def supervisor_node(state: AgentState) -> dict:
             # v8.3.5 Agent 状态栏 (规范 2.6): 上下文末尾注入显式状态，
             # 模型无需从长历史"数"工具调用/文献数——"数不清"是预算超支的深层根因
             # v8.4: 内容由 _build_status_content 代码确定性维护（含 TODO 列表/预算占用率）
-            status_msg = HumanMessage(content=(
-                _build_status_content(
-                    turn=turn + 1,
-                    max_turns=SUPERVISOR_MAX_TURNS,
-                    tool_call_count=tool_call_count,
-                    max_tools_per_turn=max_tools_per_turn,
-                    unique_docs=_count_unique_dois(all_main_results),
-                    used_queries=used_queries,
-                    consecutive_failures=consecutive_failures,
-                    tool_names_called=tool_names_called,
+            # v8.4.6: 状态栏尾部追加输出画像（证据量驱动的篇幅/覆盖下限）
+            def _status_with_profile(ratio=None):
+                content = (
+                    _build_status_content(
+                        turn=turn + 1,
+                        max_turns=SUPERVISOR_MAX_TURNS,
+                        tool_call_count=tool_call_count,
+                        max_tools_per_turn=max_tools_per_turn,
+                        unique_docs=_count_unique_dois(all_main_results),
+                        used_queries=used_queries,
+                        consecutive_failures=consecutive_failures,
+                        tool_names_called=tool_names_called,
+                        budget_ratio=ratio,
+                    )
+                    + "\n\n以上为系统注入的运行时状态摘要，请据此决策，不要重复已完成步骤。"
                 )
-                + "\n\n以上为系统注入的运行时状态摘要，请据此决策，不要重复已完成步骤。"
-            ))
+                profile = _build_output_profile(
+                    _count_unique_dois(all_main_results), format_hint)
+                if profile:
+                    content += "\n\n" + profile
+                return HumanMessage(content=content)
+
+            status_msg = _status_with_profile(None)
             call_messages = list(messages) + [status_msg]
             # v8.3.6 预算前移: 每次调用前估算，超硬阈值强制收尾（防窗口溢出），
             # 超软阈值在状态栏提示模型收敛
@@ -587,20 +633,7 @@ async def supervisor_node(state: AgentState) -> dict:
                         answer = await _force_final_answer(llm_base, messages, "budget")
                         break
                     # v8.4: 预算占用率进状态栏（模型随时可见，无需自己估算）
-                    status_msg = HumanMessage(content=(
-                        _build_status_content(
-                            turn=turn + 1,
-                            max_turns=SUPERVISOR_MAX_TURNS,
-                            tool_call_count=tool_call_count,
-                            max_tools_per_turn=max_tools_per_turn,
-                            unique_docs=_count_unique_dois(all_main_results),
-                            used_queries=used_queries,
-                            consecutive_failures=consecutive_failures,
-                            tool_names_called=tool_names_called,
-                            budget_ratio=ratio,
-                        )
-                        + "\n\n以上为系统注入的运行时状态摘要，请据此决策，不要重复已完成步骤。"
-                    ))
+                    status_msg = _status_with_profile(ratio)
                     call_messages = list(messages) + [status_msg]
                     if ratio >= supervisor_budget.config.soft_threshold:
                         logger.warning(
@@ -791,6 +824,7 @@ async def supervisor_node(state: AgentState) -> dict:
                         tc_dict, tc_id,
                         material_pack=all_main_results,
                         session_id=state.get("session_id", ""),
+                        seen_queries=used_queries,
                     )
                     try:
                         emit_tool_result(
@@ -948,6 +982,17 @@ async def supervisor_node(state: AgentState) -> dict:
         "total": len(cited_refs),
     }
 
+    # v8.4.6 F2: 历史证据引用进侧栏——回答基于 [历史检索证据] 作答时，
+    # 侧栏展示历史证据条目（ref_id=H1..Hn），引用面板不再"消失"
+    try:
+        from src.session.manager import session_manager
+        historical = session_manager.get_evidence_refs(session_id, limit=20)
+        if historical:
+            references_data["historical"] = historical
+            references_data["total"] = len(cited_refs) + len(historical)
+    except Exception:
+        pass
+
     if answer:
         try:
             emit_status("step_done", step_id="retrieve")
@@ -977,12 +1022,15 @@ async def supervisor_node(state: AgentState) -> dict:
     )
 
     # v8.4.1: 业务日志——supervisor 完成（回答长度/工具/证据量，排查"回答太短"类问题）
+    # v8.4.6: 附加 evidence_avail/cited 指标（输出画像与后续评估的度量基础）
     try:
         from src.core.business_logger import blog
         blog("supervisor_done", answer_chars=len(answer),
              tools=tool_call_count,
              tool_names=",".join(tool_names_called[:8]) or "-",
              main_results=len(deduped_main), web_results=len(all_web_results),
+             evidence_avail=len(deduped_main),
+             cited=citation_info.get("citation_count", 0),
              ms=int(elapsed))
     except Exception:
         pass
@@ -1079,7 +1127,10 @@ async def expert_save_node(state: AgentState) -> dict:
                     "chunk_id": f"{r.get('paper_id', '')}:{r.get('chunk_index', '')}",
                     "title": str(r.get("title", ""))[:150],
                     "score": r.get("score", r.get("rerank_score", 0)) or 0,
-                    "snippet": str(r.get("text", "") or r.get("abstract", ""))[:500],
+                    "year": str(r.get("year", "")),
+                    # v8.4.6: 账本片段升级（500→2000 字符）——追问时
+                    # 可回查的"其它有关信息"更完整（全量在 evidence_id 暂存文件）
+                    "snippet": str(r.get("text", "") or r.get("abstract", ""))[:2000],
                 }
                 for r in main_results[:30]
             ]
