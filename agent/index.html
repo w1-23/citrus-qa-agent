@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Citrus QA Agent v8.4.11</title>
+<title>Citrus QA Agent v8.4.12</title>
 <script src="https://cdn.jsdelivr.net/npm/marked@4.3.0/marked.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -336,9 +336,12 @@ footer {
 .input-box {
   display: flex; gap: 8px;
   max-width: 900px; width: 100%;
+  /* v8.4.12: 发送/停止按钮复用同一位置（绝对定位右侧，运行中切换） */
+  position: relative;
 }
 .input-box input {
   flex: 1; padding: 9px 15px;
+  padding-right: 104px;   /* 为右侧按钮（88px + gap）留位 */
   background: var(--bg-elevated);
   border: 1px solid var(--border-hairline);
   border-radius: 8px;
@@ -349,30 +352,106 @@ footer {
 }
 .input-box input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
 .input-box input::placeholder { color: var(--text-muted); }
-.send-btn {
-  padding: 0 20px; height: 40px;
-  background: var(--accent); color: #FFF;
-  border: none; border-radius: 8px;
+/* v8.4.12: 发送与停止同一位置切换（与主流会话界面一致） */
+.send-btn, .stop-btn {
+  position: absolute;
+  right: 0; top: 50%;
+  transform: translateY(-50%);
+  width: 88px; height: 40px;
+  padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 8px;
   font-weight: 600; font-size: 13px;
   cursor: pointer; font-family: inherit;
   transition: all 0.2s var(--ease-out-quint);
+}
+.send-btn {
+  background: var(--accent); color: #FFF;
+  border: none;
 }
 .send-btn:hover { background: var(--accent-hover); box-shadow: 0 0 16px var(--accent-glow); }
-.send-btn:active { transform: scale(0.97); }
-.send-btn:disabled { opacity: 0.3; cursor: not-allowed; transform: none; box-shadow: none; }
+.send-btn:active { transform: translateY(-50%) scale(0.97); }
+.send-btn:disabled { opacity: 0.3; cursor: not-allowed; transform: translateY(-50%) scale(1); box-shadow: none; }
 
-/* v8.4.11 停止按钮：运行中显示，点击中断当前任务（可修改问题后重新发送） */
+/* v8.4.11/8.4.12 停止按钮：与发送按钮同一位置，描边警示样式区分 */
 .stop-btn {
-  padding: 0 16px; height: 40px;
-  background: var(--error, #e5484d); color: #FFF;
-  border: none; border-radius: 8px;
-  font-weight: 600; font-size: 13px;
-  cursor: pointer; font-family: inherit;
-  margin-left: 6px;
-  transition: all 0.2s var(--ease-out-quint);
+  background: transparent;
+  border: 1.5px solid var(--error);
+  color: var(--error);
+  letter-spacing: .5px;
 }
-.stop-btn:hover { filter: brightness(1.15); box-shadow: 0 0 14px rgba(229,72,77,.45); }
-.stop-btn:active { transform: scale(0.97); }
+.stop-btn:hover { background: var(--error-glow); box-shadow: 0 0 12px var(--error-glow); }
+.stop-btn:active { transform: translateY(-50%) scale(0.97); }
+
+/* v8.4.12 权限审批卡片：主题变量驱动（浅/深色一致），会话窗口上方居中弹出 */
+.perm-card {
+  position: fixed;
+  top: 64px; left: 50%;
+  transform: translateX(-50%);
+  z-index: 9999;
+  width: min(430px, calc(100vw - 40px));
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-hover);
+  border-top: 3px solid var(--warning);
+  border-radius: 12px;
+  padding: 14px 16px 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+  font-size: 13px;
+  color: var(--text-primary);
+  animation: permCardIn 0.18s var(--ease-out-quint);
+}
+@keyframes permCardIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(-6px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+.perm-card .perm-title {
+  font-weight: 600; font-size: 13.5px;
+  color: var(--warning);
+  margin-bottom: 6px;
+}
+.perm-card .perm-tool {
+  margin-bottom: 4px;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+.perm-card .perm-tool code {
+  background: var(--bg-hover);
+  border: 1px solid var(--border-hairline);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+.perm-card .perm-args {
+  color: var(--text-muted);
+  font-size: 12px;
+  margin-bottom: 10px;
+  word-break: break-all;
+  line-height: 1.5;
+}
+.perm-card .perm-actions {
+  display: flex; gap: 8px; flex-wrap: wrap;
+}
+.perm-card .perm-actions button {
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-hover);
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  cursor: pointer; font-family: inherit;
+  transition: all 0.15s var(--ease-out-quint);
+}
+.perm-card .perm-actions button:hover { border-color: var(--accent); color: var(--accent); }
+.perm-card .perm-actions button.primary {
+  background: var(--accent); color: #FFF; border-color: transparent;
+}
+.perm-card .perm-actions button.primary:hover { background: var(--accent-hover); }
+.perm-card .perm-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
 
 /* ── Sidebar ── */
 .sidebar {
@@ -807,7 +886,7 @@ footer {
 <header>
   <div class="logo-mark">C</div>
   <h1>Citrus QA Agent</h1>
-  <span class="version-badge" id="versionBadge">v8.4.11</span>
+  <span class="version-badge" id="versionBadge">v8.4.12</span>
   <!-- v8.4.8 HITL 服务端化：权限模式徽标 + 切换菜单 -->
   <span class="perm-badge" id="permBadge" onclick="togglePermMenu(event)" title="权限模式（HITL）：点击切换">权限: --</span>
   <div class="perm-menu" id="permMenu" style="display:none">
@@ -836,7 +915,7 @@ footer {
       <div class="message bot">
         <div class="avatar">◆</div>
         <div class="content">
-          您好，我是 <span id="welcomeVersion">Citrus QA Agent v8.4.11</span>。<br>
+          您好，我是 <span id="welcomeVersion">Citrus QA Agent v8.4.12</span>。<br>
           <span style="color:var(--text-muted);font-size:13px">本地 RAG 检索 · CrossRef 学术搜索 · 文献综述写作 · 实验设计 · 文件读写</span>
         </div>
       </div>
@@ -953,14 +1032,19 @@ function _ctxMaxTokens() {
   }
   return 1000000;
 }
+var _permWaitSec = 90;   /* v8.4.12: 审批卡片超时提示（config 下发，缺省 90s） */
 function loadRuntimeConfig() {
   fetch('/api/v2/config').then(function(r) { return r.json(); })
-    .then(function(cfg) { _runtimeConfig = cfg; applyAppVersion(); })
+    .then(function(cfg) {
+      _runtimeConfig = cfg;
+      if (cfg.permission_wait_sec) _permWaitSec = cfg.permission_wait_sec;
+      applyAppVersion();
+    })
     .catch(function() { applyAppVersion(); });
 }
 /* v8.4.5: 版本单源——后端 /api/v2/config.version 下发，静态文案仅为离线回退 */
 function _appVersion() {
-  return (_runtimeConfig && _runtimeConfig.version) || '8.4.11';
+  return (_runtimeConfig && _runtimeConfig.version) || '8.4.12';
 }
 function applyAppVersion() {
   var v = _appVersion();
@@ -1006,28 +1090,28 @@ function setPermMode(mode) {
 }
 loadRuntimeConfig();
 
-/* ─── v8.4.3: 权限审批卡片（授权动作不写入对话历史）─── */
+/* ─── v8.4.3/8.4.12: 权限审批卡片（授权动作不写入对话历史）───
+   v8.4.12: 全 CSS 变量驱动（浅/深色模式一致），会话窗口上方居中弹出 */
 function showPermissionCard(data) {
   _pendingPermission = data;
   var existing = document.getElementById('permission-card');
   if (existing) existing.remove();
   var card = document.createElement('div');
   card.id = 'permission-card';
-  card.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:9999;max-width:360px;' +
-    'background:var(--bg-card,#1e2430);border:1px solid rgba(255,180,0,.5);border-radius:10px;' +
-    'padding:14px 16px;box-shadow:0 8px 30px rgba(0,0,0,.45);font-size:13px';
+  card.className = 'perm-card';
   var tool = data.tool_name || '工具';
   var args = data.args || {};
   var argText = Object.keys(args).map(function(k) { return k + ': ' + String(args[k]).substring(0, 120); }).join('<br>');
   card.innerHTML =
-    '<div style="font-weight:600;color:#ffb347;margin-bottom:6px">⚠ 权限确认</div>' +
-    '<div style="margin-bottom:4px">工具: <code>' + escapeHtml(tool) + '</code></div>' +
-    (argText ? '<div style="color:var(--text-muted);margin-bottom:10px;word-break:break-all">' + argText + '</div>' : '') +
-    '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
-    '<button class="need-complex-btn" data-scope="once">允许本次</button>' +
-    '<button class="need-complex-btn" data-scope="session">本会话允许</button>' +
-    '<button class="need-complex-btn" data-scope="workspace">始终允许工作区</button>' +
-    '</div>';
+    '<div class="perm-title">⚠ 权限确认</div>' +
+    '<div class="perm-tool">工具: <code>' + escapeHtml(tool) + '</code></div>' +
+    (argText ? '<div class="perm-args">' + argText + '</div>' : '') +
+    '<div class="perm-actions">' +
+    '<button class="primary" data-scope="once">允许本次</button>' +
+    '<button data-scope="session">本会话允许</button>' +
+    '<button data-scope="workspace">始终允许工作区</button>' +
+    '</div>' +
+    '<div class="perm-hint">未响应将按拒绝处理（' + (_permWaitSec || 90) + 's 超时）</div>';
   card.querySelectorAll('button').forEach(function(btn) {
     btn.onclick = function() {
       grantPermission(tool, btn.getAttribute('data-scope'));
@@ -1089,9 +1173,9 @@ function setSendDisabled(val) {
   var exec = document.getElementById('buildExecBtn');
   if (btn) btn.disabled = val;
   if (exec) exec.disabled = val;
-  // v8.4.11: 停止按钮与发送按钮显隐联动（运行中显示，结束/出错/停止后隐藏）
+  // v8.4.11/8.4.12: 停止按钮与发送按钮同一位置切换（运行中显示，结束/出错/停止后隐藏）
   var stopBtn = document.getElementById('stop-btn');
-  if (stopBtn) stopBtn.style.display = val ? 'inline-block' : 'none';
+  if (stopBtn) stopBtn.style.display = val ? 'flex' : 'none';
 }
 
 /* v8.4.11 用户中断（书中 §4.7.6 取消式处理）：

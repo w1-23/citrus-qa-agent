@@ -140,7 +140,7 @@ class Settings(BaseSettings):
     PERMISSION_WAIT_SEC: int = Field(default_factory=lambda: _yaml_val("permission", "wait_sec", default=90))
 
     # ── Version (v8.4.5: 版本单源——UI/健康检查/文档以此为准) ──
-    VERSION: str = "8.4.11"
+    VERSION: str = "8.4.12"
 
     # ── Context Engineering (阶段1: 静态前缀灰度开关) ──
     # true = SystemMessage 字节级稳定（format 指南/策略卡片/skills 移出前缀，

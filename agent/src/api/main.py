@@ -567,6 +567,8 @@ async def runtime_config():
             "hard_threshold": settings.CONTEXT_BUDGET_HARD_THRESHOLD,
         },
         "permission_mode": settings.PERMISSION_MODE,
+        # v8.4.12: 审批卡片超时提示单一来源（config.yaml permission.wait_sec）
+        "permission_wait_sec": settings.PERMISSION_WAIT_SEC,
         "model": {
             "main": settings.MAIN_MODEL,
             "fast": settings.FAST_MODEL,
