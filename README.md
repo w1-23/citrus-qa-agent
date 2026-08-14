@@ -23,12 +23,19 @@
 
 ### 方式一：一键运行（推荐，零配置）
 
-从 [Releases](https://github.com/w1-23/citrus-qa-agent/releases) 下载发布包
-`citrus-qa-agent-v8.5.0.zip`，解压后**双击运行 `run.ps1`**（或右键 → 使用 PowerShell 运行）：
+从 [Releases](https://github.com/w1-23/citrus-qa-agent/releases) 下载发布包，解压后**双击运行 `run.ps1`**（或右键 → 使用 PowerShell 运行）：
 
 ```
 解压 → 运行 run.ps1 → 自动完成 → 浏览器自动打开 http://localhost:8000 → 页面填 API Key
 ```
+
+三种发布包：
+
+| 包 | 大小 | 内容 | 适用 |
+|---|---|---|---|
+| `citrus-qa-agent-v8.5.0.zip` | ~2 MB | 代码 + 一键脚本 | 手动装依赖/下模型（首次 5-15 分钟） |
+| `...-full.zip` | ~2.1 GB | + 模型缓存 | 跳过模型下载，秒级启动 |
+| `...-full-data.zip` | ~3.3 GB | + 模型 + 示例语料 | **开箱即用**：自带公开文献语料，检索/引用/写作全链路可直接测试 |
 
 `run.ps1` 全自动处理：
 
@@ -126,21 +133,33 @@ citrus-qa-agent/
 └── README.md
 ```
 
-## 📚 添加自己的语料库
+## 📚 语料库：自带示例 + 导入自己的文献
 
-检索器启动时自动扫描 `agent/data/` 下的所有批次目录（无需改配置、无需重新打包）。每个批次目录的约定结构：
+### 内置示例语料
+
+`-full-data` 完整包内置**示例语料**（公开下载的科研文献，已编码为向量）——开箱即可测试检索、引用、综述写作全链路。示例语料位于 `agent/data/`，可随时删除或替换。
+
+### 导入自己的文献
+
+使用内置导入工具（在 `agent/` 目录）：
+
+```bash
+# 把 PDF/txt/md 放进 agent/data/import/，然后：
+python ingest.py                        # 自动分块 → 向量化 → 写入批次
+python ingest.py --dir 我的文献目录 --batch mycorpus
+```
+
+导入后**重启服务即生效**。检索器自动扫描 `agent/data/` 下所有批次目录：
 
 ```
 agent/data/
-└── 我的批次名/            # 任意命名，自动被发现
-    ├── chunks/
-    │   └── chunks.jsonl   # 分块文本（每行一条：{text, doi?, title?, ...}）
-    ├── qdrant_data/       # Qdrant 本地向量库（用你习惯的方式写入向量）
-    └── metadata.json      # 批次元数据（可选）
+└── 批次名/                # 任意命名，自动被发现
+    ├── chunks/chunks.jsonl   # 分块文本
+    ├── qdrant_data/          # Qdrant 向量库
+    └── metadata.json
 ```
 
-- `data/` 属于你的私有知识库：**不进 Git 仓库、不进发布包**（`pack_release.ps1` 与 `.gitignore` 均已排除）
-- 新增/更新批次后**重启服务即生效**；检索与写作、引用、证据回执全链路自动适配
+- `data/` 属于你的私有知识库：**不进 Git 仓库、不进主包**（`pack_release.ps1` 与 `.gitignore` 均已排除；仅 `-full-data` 包附带公开示例语料）
 - 检索阈值可在 `agent/config.yaml` 的 `retrieval:` 段调整（相似度下限、动态阈值比例等）
 
 ## 🔒 安全设计

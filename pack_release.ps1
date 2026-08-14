@@ -2,26 +2,29 @@
 #  Citrus QA Agent 发布打包（v8.5.0）
 #  ------------------------------------------------------------
 #  用法:
-#    powershell -File pack_release.ps1               # 主包（不含模型，~几 MB）
-#    powershell -File pack_release.ps1 -IncludeModels # 完整包（含模型缓存，~2.5GB）
-#  输出: dist/citrus-qa-agent-v8.5.0.zip
+#    powershell -File pack_release.ps1                # 主包（代码，~2MB）
+#    powershell -File pack_release.ps1 -IncludeModels # 完整包（+模型缓存，~2.1GB）
+#    powershell -File pack_release.ps1 -IncludeModels -IncludeData  # 完整包+示例语料（~3.3GB，开箱即测）
+#  输出: dist/citrus-qa-agent-v8.5.0[-full[-data]].zip
 #  用户拿到 zip → 解压 → 双击运行 run.ps1 → 浏览器打开即用
 # ============================================================
-param([switch]$IncludeModels)
+param([switch]$IncludeModels, [switch]$IncludeData)
 
 $ErrorActionPreference = 'Stop'
 $Root = $PSScriptRoot
 $Version = '8.5.0'
 $Dist = Join-Path $Root 'dist'
-$ZipName = "citrus-qa-agent-v$Version" + $(if ($IncludeModels) { '-full' } else { '' }) + '.zip'
+$Suffix = $(if ($IncludeModels) { '-full' } else { '' }) + $(if ($IncludeData) { '-data' } else { '' })
+$ZipName = "citrus-qa-agent-v$Version$Suffix.zip"
 $ZipPath = Join-Path $Dist $ZipName
 $Stage = Join-Path $env:TEMP ("citrus-pack-" + [guid]::NewGuid().ToString('N'))
 
-$ExcludeDirs = @('state', 'logs', 'workspace', 'data', '__pycache__',
+$ExcludeDirs = @('state', 'logs', 'workspace', '__pycache__',
                  '.pytest_cache', '.tmp_runner', '.venv', '.git', '.hf_cache')
-$ExcludeFiles = @('.env', '*.pyc', '*.tmp')
+$ExcludeFiles = @('.env', '*.pyc', '*.tmp', '*.lock')
+$DataDir = Join-Path $Root 'agent\data'
 
-Write-Host "打包 Citrus QA Agent v$Version $(if ($IncludeModels) { '(完整版: 含模型)' } else { '(主包)' })" -ForegroundColor Yellow
+Write-Host "打包 Citrus QA Agent v$Version $(if ($IncludeModels) { '(含模型) ' } else { '(主包) ' })$(if ($IncludeData) { '(含示例语料) ' } else { '' })" -ForegroundColor Yellow
 
 # ── 暂存区 ──
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
@@ -57,6 +60,27 @@ if ($IncludeModels) {
         Write-Host "⚠ agent/.hf_cache 不存在，跳过模型缓存" -ForegroundColor Yellow
     }
 }
+
+# ── 完整包: 附带示例语料（用户公开文献，开箱可测检索/引用/写作全链路）──
+if ($IncludeData) {
+    if (Test-Path $DataDir) {
+        Write-Host "附带示例语料 (data/, 用户公开文献批次) ..." -ForegroundColor Cyan
+        Copy-Item -Recurse -Force $DataDir (Join-Path $StageAgent 'data')
+        # 清理 qdrant 锁文件（打包后解压不被锁误判）
+        Get-ChildItem -Path (Join-Path $StageAgent 'data') -Recurse -Filter '*.lock' -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    } else {
+        Write-Host "⚠ agent/data 不存在，跳过语料" -ForegroundColor Yellow
+    }
+}
+
+# ── 清理暂存区嵌套产物（递归复制不过滤，逐层清理 __pycache__/.pyc/.env）──
+Get-ChildItem -Path $Stage -Recurse -Directory -Filter '__pycache__' -ErrorAction SilentlyContinue |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+Get-ChildItem -Path $Stage -Recurse -File -Include '*.pyc', '*.tmp' -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
+Get-ChildItem -Path $Stage -Recurse -File -Filter '.env' -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
 
 # ── 根文件 ──
 foreach ($f in @('README.md', 'LICENSE', 'requirements.txt', 'run.ps1', '.gitignore')) {
