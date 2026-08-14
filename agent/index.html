@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Citrus QA Agent v8.4.12</title>
+<title>Citrus QA Agent v8.4.13</title>
 <script src="https://cdn.jsdelivr.net/npm/marked@4.3.0/marked.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -373,14 +373,14 @@ footer {
 .send-btn:active { transform: translateY(-50%) scale(0.97); }
 .send-btn:disabled { opacity: 0.3; cursor: not-allowed; transform: translateY(-50%) scale(1); box-shadow: none; }
 
-/* v8.4.11/8.4.12 停止按钮：与发送按钮同一位置，描边警示样式区分 */
+/* v8.4.11/8.4.12/8.4.13 停止按钮：与发送按钮同一位置，柔和橙描边区分（与主题一致） */
 .stop-btn {
-  background: transparent;
-  border: 1.5px solid var(--error);
-  color: var(--error);
+  background: var(--accent-muted);
+  border: 1.5px solid var(--accent);
+  color: var(--accent);
   letter-spacing: .5px;
 }
-.stop-btn:hover { background: var(--error-glow); box-shadow: 0 0 12px var(--error-glow); }
+.stop-btn:hover { background: var(--accent-glow); box-shadow: 0 0 12px var(--accent-glow); }
 .stop-btn:active { transform: translateY(-50%) scale(0.97); }
 
 /* v8.4.12 权限审批卡片：主题变量驱动（浅/深色一致），会话窗口上方居中弹出 */
@@ -452,6 +452,45 @@ footer {
   font-size: 11px;
   color: var(--text-muted);
 }
+
+/* v8.4.13 思维链「深度思考」折叠块 + 写作「执行计划」折叠块 */
+.reasoning-block {
+  margin: 8px 0 4px;
+  border-left: 2px solid var(--accent);
+  background: var(--bg-hover);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.reasoning-header, .plan-header {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--accent);
+  display: flex; gap: 8px; align-items: center;
+  user-select: none;
+}
+.reasoning-header .reasoning-toggle { font-weight: 400; font-size: 11px; color: var(--text-muted); }
+.reasoning-body {
+  white-space: pre-wrap;
+  margin-top: 6px;
+  line-height: 1.6;
+  max-height: 320px;
+  overflow-y: auto;
+  word-break: break-word;
+  color: var(--text-secondary);
+}
+.plan-block {
+  margin: 8px 0 4px;
+  border-left: 2px solid var(--success);
+  background: var(--bg-hover);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+.plan-header { color: var(--success); }
+.plan-body { margin-top: 6px; line-height: 1.7; }
+.plan-item { color: var(--text-secondary); word-break: break-word; }
 
 /* ── Sidebar ── */
 .sidebar {
@@ -886,7 +925,7 @@ footer {
 <header>
   <div class="logo-mark">C</div>
   <h1>Citrus QA Agent</h1>
-  <span class="version-badge" id="versionBadge">v8.4.12</span>
+  <span class="version-badge" id="versionBadge">v8.4.13</span>
   <!-- v8.4.8 HITL 服务端化：权限模式徽标 + 切换菜单 -->
   <span class="perm-badge" id="permBadge" onclick="togglePermMenu(event)" title="权限模式（HITL）：点击切换">权限: --</span>
   <div class="perm-menu" id="permMenu" style="display:none">
@@ -915,7 +954,7 @@ footer {
       <div class="message bot">
         <div class="avatar">◆</div>
         <div class="content">
-          您好，我是 <span id="welcomeVersion">Citrus QA Agent v8.4.12</span>。<br>
+          您好，我是 <span id="welcomeVersion">Citrus QA Agent v8.4.13</span>。<br>
           <span style="color:var(--text-muted);font-size:13px">本地 RAG 检索 · CrossRef 学术搜索 · 文献综述写作 · 实验设计 · 文件读写</span>
         </div>
       </div>
@@ -1044,7 +1083,7 @@ function loadRuntimeConfig() {
 }
 /* v8.4.5: 版本单源——后端 /api/v2/config.version 下发，静态文案仅为离线回退 */
 function _appVersion() {
-  return (_runtimeConfig && _runtimeConfig.version) || '8.4.12';
+  return (_runtimeConfig && _runtimeConfig.version) || '8.4.13';
 }
 function applyAppVersion() {
   var v = _appVersion();
@@ -1470,6 +1509,10 @@ async function sendMsg(isFollowUp) {
   var stopMsg = document.getElementById('stop-msg');
   if (stopMsg) stopMsg.style.display = 'none';
   userInput.placeholder = '有什么想做的？';
+  // v8.4.13: 新轮清空思维链块（保留在历史中的旧块不动——它们属于上一轮）
+  _reasoningText = '';
+  var rb = document.getElementById('reasoning-block');
+  if (rb) rb.remove();
 
   addMessage('user', query);
   userInput.value = '';
@@ -1580,8 +1623,56 @@ async function sendMsg(isFollowUp) {
     showBanner._t = setTimeout(function () { b.style.display = 'none'; }, 8000);
   }
 
+  /* v8.4.13 思维链「深度思考」折叠块：reasoning 事件逐 chunk 累积；
+     text 首 token（回答开始）自动折叠——与主流会话界面一致 */
+  var _reasoningText = '';
+  function handleReasoning(content) {
+    if (!content) return;
+    _reasoningText += content;
+    var block = document.getElementById('reasoning-block');
+    if (!block) {
+      block = document.createElement('div');
+      block.id = 'reasoning-block';
+      block.className = 'reasoning-block';
+      block.innerHTML = '<div class="reasoning-header" onclick="toggleReasoning()">🧠 深度思考 <span class="reasoning-toggle" id="reasoning-toggle">收起</span></div><div class="reasoning-body" id="reasoning-body"></div>';
+      chatContainer.appendChild(block);
+    }
+    var body = document.getElementById('reasoning-body');
+    if (body) { body.textContent = _reasoningText; chatContainer.scrollTop = chatContainer.scrollHeight; }
+  }
+  function toggleReasoning() {
+    var body = document.getElementById('reasoning-body');
+    var tg = document.getElementById('reasoning-toggle');
+    if (!body) return;
+    var open = body.style.display !== 'none';
+    body.style.display = open ? 'none' : '';
+    if (tg) tg.textContent = open ? '展开' : '收起';
+  }
+  function collapseReasoning() {
+    var body = document.getElementById('reasoning-body');
+    var tg = document.getElementById('reasoning-toggle');
+    if (body && body.style.display !== 'none') body.style.display = 'none';
+    if (tg) tg.textContent = '展开';
+  }
+  /* v8.4.13 写作「执行计划」折叠块：plan 事件（大纲步骤列表） */
+  function handlePlan(data) {
+    var block = document.createElement('div');
+    block.className = 'plan-block';
+    var items = (data.sections || []).map(function(s) {
+      return '<div class="plan-item">· ' + escapeHtml(s) + '</div>';
+    }).join('');
+    block.innerHTML =
+      '<div class="plan-header" onclick="var b=this.parentNode.querySelector(\'.plan-body\');b.style.display=b.style.display===\'none\'?\'\':\'none\'">📋 执行计划：' + escapeHtml(data.title || '') +
+      ' <span style="color:var(--text-muted);font-size:11px">(' + (data.chapters || 0) + ' 章)</span></div>' +
+      '<div class="plan-body">' + items + '</div>';
+    chatContainer.appendChild(block);
+    chatContainer.scrollTop = chatContainer.scrollHeight;
+  }
+
   function handleEvent(type, data) {
     switch (type) {
+      case 'reasoning': handleReasoning(data.content || ''); break;
+      case 'plan': handlePlan(data); break;
       case 'thinking': updateStatus('thinking', (data.content||'').substring(0,80)); updateContextTokens(((data.content||'').length)*0.7); break;
       case 'tool_call_start': updateStatus('tool', (data.tool_name||'工具')+' 执行中...'); updateContextTokens(30); break;
       case 'tool_executing': updateStatus('tool', data.message||'执行中...'); break;
@@ -1596,10 +1687,10 @@ async function sendMsg(isFollowUp) {
         appendTerminal('── 子Agent「' + (data.agent_name||'') + '」启动 ── ' + (data.task||''));
         break;
       case 'text':
-        if (!isAnswerStarted) { isAnswerStarted=true; clearTimeout(spinnerTimeout); updateStatus('answer','生成回答中...'); answerDiv.style.display=''; }
+        if (!isAnswerStarted) { isAnswerStarted=true; clearTimeout(spinnerTimeout); updateStatus('answer','生成回答中...'); answerDiv.style.display=''; collapseReasoning(); }
         fullText+=data.content; updateContextTokens((data.content||'').length * 0.7); renderAnswer(); break;
       case 'token':
-        if (!isAnswerStarted) { isAnswerStarted=true; clearTimeout(spinnerTimeout); updateStatus('answer','生成回答中...'); answerDiv.style.display=''; }
+        if (!isAnswerStarted) { isAnswerStarted=true; clearTimeout(spinnerTimeout); updateStatus('answer','生成回答中...'); answerDiv.style.display=''; collapseReasoning(); }
         fullText+=data.content; updateContextTokens((data.content||'').length * 0.7); renderAnswer(); break;
       case 'context_status': renderContextPanel(data); break;
       case 'status': handleStatusEvent(data); break;

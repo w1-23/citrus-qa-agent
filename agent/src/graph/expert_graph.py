@@ -23,10 +23,11 @@ from src.prompts.loader import assemble_system_prompt
 logger = logging.getLogger(__name__)
 
 from src.core.progress_bus import (
-    emit_encoded, emit_thinking, emit_text,
+    emit_encoded, emit_text, emit_reasoning,
     emit_tool_call_start, emit_tool_executing, emit_tool_result,
     emit_status, mark_tool_start,
 )
+from src.core.stream_llm import stream_llm_response
 
 # v8.3.3: 轮次上限接线 config.yaml supervisor.max_turns（此前硬编码 4）
 SUPERVISOR_MAX_TURNS = settings.SUPERVISOR_MAX_TURNS
@@ -478,10 +479,15 @@ def _last_aimessage_content(messages: list) -> str:
 
 
 async def _force_final_answer(llm, messages: list, reason: str) -> str:
-    """统一收尾入口（熔断/预算/跑满轮次三处调用）。调用方 break 后不得再改写 answer。"""
+    """统一收尾入口（熔断/预算/跑满轮次三处调用）。调用方 break 后不得再改写 answer。
+
+    v8.4.13: 流式生成——回答逐 token 上屏，思维链进「深度思考」折叠块。
+    """
     logger.info(f"[ExpertGraph:supervisor] {reason}, forcing final")
     try:
-        resp = await llm.ainvoke(messages + [HumanMessage(content=_FINAL_PROMPT)])
+        resp = await stream_llm_response(
+            llm, messages + [HumanMessage(content=_FINAL_PROMPT)],
+            on_text=emit_text, on_reasoning=emit_reasoning)
     except Exception as e:
         logger.warning(f"[ExpertGraph:supervisor] {reason} 收尾调用失败: {e}")
         return _last_aimessage_content(messages)
@@ -656,7 +662,12 @@ async def supervisor_node(state: AgentState) -> dict:
                     pass
             for attempt in range(3):
                 try:
-                    response = await llm_with_tools.ainvoke(call_messages)
+                    # v8.4.13: 真流式——回答/过程文本逐 token 上屏（text 事件），
+                    # 思维链进「深度思考」折叠块（reasoning 事件）；聚合消息与
+                    # ainvoke 同构（tool_calls/usage_metadata 完整）
+                    response = await stream_llm_response(
+                        llm_with_tools, call_messages,
+                        on_text=emit_text, on_reasoning=emit_reasoning)
                     break
                 except Exception as e:
                     if attempt < 2:
@@ -682,12 +693,8 @@ async def supervisor_node(state: AgentState) -> dict:
                 )
                 break
 
-            # Emit thinking (LLM's internal reasoning before calling tools)
-            if response.content:
-                try:
-                    emit_thinking(response.content[:800])
-                except Exception:
-                    pass
+            # v8.4.13: 工具轮的中间文本已由流式 on_text 实时上屏（过程可见），
+            # 不再聚合后 emit_thinking 状态行截断
 
             # v8.3.4: 每轮工具预算强制（config supervisor.max_tools_per_turn）——
             # 防止一轮内串行执行 3-4 个 retrieve-agent（预算由代码裁决，不依赖 LLM 自觉）
@@ -1010,17 +1017,10 @@ async def supervisor_node(state: AgentState) -> dict:
             emit_status("step_done", step_id="retrieve")
             emit_status("step_done", step_id="supervise")
             emit_status("step_active", step_id="answer")
-            emit_status("final_answer", message="生成最终答案...")
         except Exception:
             pass
-        chunk_size = 8
-        for i in range(0, len(answer), chunk_size):
-            chunk = answer[i:i + chunk_size]
-            try:
-                emit_text(chunk)
-            except Exception:
-                pass
-            await asyncio.sleep(0.012)
+        # v8.4.13: 回答已由流式逐 token 上屏（text 事件），
+        # 此处不再模拟打字机推送（原 8 字符/12ms 循环移除）
         try:
             emit_status("step_done", step_id="answer")
         except Exception:

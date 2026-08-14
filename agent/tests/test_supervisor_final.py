@@ -48,6 +48,23 @@ class FakeChat:
     async def ainvoke(self, messages):
         return await self.fake.ainvoke(messages)
 
+    async def astream(self, messages):
+        # v8.4.13: 真流式——测试假模型也走 astream（supervisor 主循环已流式化）。
+        # 把 ainvoke 结果转为 AIMessageChunk 单 chunk 流（含 tool_call_chunks）；
+        # args 必须是 JSON 字符串（str(dict) 是 Python 字面量，转换会失败）。
+        import json as _json
+        from langchain_core.messages import AIMessageChunk
+        from langchain_core.messages.tool import tool_call_chunk
+        resp = await self.fake.ainvoke(messages)
+        tcs = getattr(resp, "tool_calls", None) or []
+        tcc = []
+        for i, tc in enumerate(tcs):
+            tcc.append(tool_call_chunk(
+                name=tc.get("name"),
+                args=_json.dumps(tc.get("args") or {}, ensure_ascii=False),
+                id=tc.get("id", f"t{i}"), index=i))
+        yield AIMessageChunk(content=str(resp.content or ""), tool_call_chunks=tcc)
+
 
 _current_fake_holder = {}
 
@@ -634,6 +651,77 @@ def test_chat_cancel_endpoint():
     _asyncio.run(_run())
 
 
+def test_stream_llm_aggregation():
+    """v8.4.13 真流式：stream_llm_response 聚合与回调。
+
+    断言：content/reasoning 逐 chunk 回调收到全部分片；聚合消息与 ainvoke
+    同构（content 拼接、tool_calls 合并、usage_metadata 保留）；CitrusChatOpenAI
+    的 delta 钩子把 reasoning_content 透传到 additional_kwargs。
+    """
+    print("[SF-18] 真流式：stream_llm_response 聚合与 reasoning 透传")
+    import asyncio as _asyncio
+    from langchain_core.messages import AIMessageChunk
+    from langchain_core.outputs import ChatGenerationChunk
+    from langchain_core.messages.ai import UsageMetadata
+    from src.core.stream_llm import stream_llm_response
+    from src.core.llm_pool import _install_reasoning_passthrough
+    _install_reasoning_passthrough()
+
+    chunks = [
+        AIMessageChunk(content="你", additional_kwargs={"reasoning_content": "先"},
+                       usage_metadata=UsageMetadata(
+                           input_tokens=10, output_tokens=1, total_tokens=11)),
+        AIMessageChunk(content="好", additional_kwargs={"reasoning_content": "思考"}),
+        AIMessageChunk(content="，我来回答", additional_kwargs={"reasoning_content": "再回答"}),
+    ]
+    class FakeStreamLLM:
+        async def astream(self, messages):
+            for c in chunks:
+                yield c
+
+    got_text, got_rc = [], []
+    resp = _asyncio.run(stream_llm_response(
+        FakeStreamLLM(), [SystemMessage(content="x")],
+        on_text=got_text.append, on_reasoning=got_rc.append))
+    check("content 逐 chunk 回调", got_text == ["你", "好", "，我来回答"], str(got_text))
+    check("reasoning 逐 chunk 回调", got_rc == ["先", "思考", "再回答"], str(got_rc))
+    check("聚合 content 完整", resp.content == "你好，我来回答", resp.content)
+    check("聚合消息与 ainvoke 同构", hasattr(resp, "tool_calls"), type(resp).__name__)
+
+    # 带 tool_calls 的 chunk 聚合（工具轮）
+    from langchain_core.messages.tool import tool_call_chunk
+    tc_chunks = [
+        AIMessageChunk(content="", tool_call_chunks=[
+            tool_call_chunk(name="citrus_rag_search", args='{"query": "', id="t1", index=0)]),
+        # 真实流式：name 仅首 chunk 携带，后续为 None（args 分片继续）
+        AIMessageChunk(content="", tool_call_chunks=[
+            tool_call_chunk(name=None, args='HITL"}', id="t1", index=0)]),
+    ]
+    class FakeStreamLLM2:
+        async def astream(self, messages):
+            for c in tc_chunks:
+                yield c
+    resp2 = _asyncio.run(stream_llm_response(FakeStreamLLM2(), []))
+    tcs = resp2.tool_calls
+    check("tool_calls 聚合", len(tcs) == 1 and tcs[0]["name"] == "citrus_rag_search"
+          and tcs[0]["args"] == {"query": "HITL"}, str(tcs))
+
+    # reasoning 透传：llm_pool 加载时 monkeypatch 的模块级转换函数
+    import langchain_openai.chat_models.base as _lcb
+    check("delta 转换透传 reasoning",
+          _lcb._convert_delta_to_message_chunk(
+              {"role": "assistant", "content": "hi",
+               "reasoning_content": "think..."}, AIMessageChunk)
+          .additional_kwargs.get("reasoning_content") == "think...",
+          "delta passthrough")
+    check("非流式转换透传 reasoning",
+          _lcb._convert_dict_to_message(
+              {"role": "assistant", "content": "hi",
+               "reasoning_content": "think2"})
+          .additional_kwargs.get("reasoning_content") == "think2",
+          "dict passthrough")
+
+
 def _restore_llm_pool(orig):
     import src.core.llm_pool as pool
     pool.get_llm = orig
@@ -726,6 +814,7 @@ if __name__ == "__main__":
     test_retrieve_budget_and_convergence()
     test_session_history_restore()
     test_chat_cancel_endpoint()
+    test_stream_llm_aggregation()
     test_pii_mask()
     test_hard_trim_identifiers()
     test_tool_meta_envelope()

@@ -191,6 +191,12 @@ def emit_thinking(content: str) -> None:
     emit_encoded("thinking", {"content": content})
 
 
+def emit_reasoning(content: str) -> None:
+    """v8.4.13 Emit REASONING 增量（DeepSeek reasoning_content 思维链）——
+    前端「深度思考」折叠块逐 chunk 累积。"""
+    emit_encoded("reasoning", {"content": content})
+
+
 def emit_tool_call_start(tool_name: str, args: dict, tool_call_id: str = "") -> None:
     """Emit a TOOL_CALL_START event with fully assembled arguments."""
     emit_encoded("tool_call_start", {

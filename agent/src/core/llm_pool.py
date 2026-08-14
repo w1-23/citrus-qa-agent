@@ -10,9 +10,59 @@ bind_tools 仍由调用方按需包装（轻量本地操作，不属于客户端
 """
 from __future__ import annotations
 
+import logging
 import threading
 
 from langchain_openai import ChatOpenAI
+
+logger = logging.getLogger(__name__)
+
+
+def _install_reasoning_passthrough() -> None:
+    """v8.4.13 透传 DeepSeek reasoning_content（思维链流式展示）。
+
+    langchain-openai 的 delta/消息转换是模块级函数，明确不保留第三方厂商的
+    非标准响应字段（reasoning_content）。monkeypatch 两个转换函数一次
+    （幂等）：把 reasoning_content 追加进 additional_kwargs——仅多存一个
+    字段，无副作用；流式聚合后即可取思维链。
+    """
+    try:
+        import langchain_openai.chat_models.base as _lcb
+        if getattr(_lcb, "_citrus_reasoning_patched", False):
+            return
+        _orig_delta = _lcb._convert_delta_to_message_chunk
+        _orig_dict = _lcb._convert_dict_to_message
+
+        def _delta(_dict, default_class):
+            chunk = _orig_delta(_dict, default_class)
+            try:
+                rc = _dict.get("reasoning_content") if isinstance(_dict, dict) else None
+                if rc:
+                    chunk.additional_kwargs["reasoning_content"] = rc
+            except Exception:
+                pass
+            return chunk
+
+        def _dict_conv(_dict):
+            msg = _orig_dict(_dict)
+            try:
+                rc = _dict.get("reasoning_content") if isinstance(_dict, dict) else None
+                if rc:
+                    msg.additional_kwargs["reasoning_content"] = rc
+            except Exception:
+                pass
+            return msg
+
+        _lcb._convert_delta_to_message_chunk = _delta
+        _lcb._convert_dict_to_message = _dict_conv
+        _lcb._citrus_reasoning_patched = True
+        logger.debug("[LLMPool] reasoning_content passthrough installed")
+    except Exception as e:
+        logger.warning(f"[LLMPool] reasoning passthrough unavailable: {e}")
+
+
+_install_reasoning_passthrough()
+
 
 _cache: dict = {}
 _lock = threading.Lock()

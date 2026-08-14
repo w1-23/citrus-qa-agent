@@ -1011,6 +1011,20 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
         return await _react_fallback_write(llm, goal, plan_text, material_pack,
                                            output_path, gap, skill_prompt=skill_prompt)
 
+    # v8.4.13 第三步: 写作计划事件（前端「📋 执行计划」折叠块）——大纲就绪即展示
+    try:
+        from src.core.progress_bus import emit_encoded
+        sections = [str(s.get("title", "")) for s in (plan.get("sections") or []) if s][:20]
+        emit_encoded("plan", {
+            "title": str(plan.get("title") or "")[:80],
+            "sections": sections,
+            "chapters": len(sections),
+            "target_chars": int(target_chars or 0),
+            "mode": "plan_execute",
+        })
+    except Exception:
+        pass
+
     # v8.3.7: output_path 缺失兜底——supervisor 可能不传路径（LLM 漏参），
     # 此时路径解析会落到 workspace/output 目录本身 → os.replace 覆盖目录失败。
     # 用大纲标题生成默认文件名。
