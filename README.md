@@ -21,6 +21,30 @@
 
 ## 🚀 快速开始
 
+### 方式一：一键运行（推荐，零配置）
+
+从 [Releases](https://github.com/w1-23/citrus-qa-agent/releases) 下载发布包
+`citrus-qa-agent-v8.5.0.zip`，解压后**双击运行 `run.ps1`**（或右键 → 使用 PowerShell 运行）：
+
+```
+解压 → 运行 run.ps1 → 自动完成 → 浏览器自动打开 http://localhost:8000 → 页面填 API Key
+```
+
+`run.ps1` 全自动处理：
+
+| 步骤 | 行为 |
+|---|---|
+| 1. Python | 未安装则自动 `winget install Python 3.11` |
+| 2. 虚拟环境 | 自动创建 `agent/.venv`（仅首次） |
+| 3. 依赖 | 自动 `pip install -r requirements.txt`（仅首次，5-10 分钟） |
+| 4. 模型 | 自动下载向量编码模型 + 导出重排模型到本地缓存（仅首次，5-15 分钟；之后秒级启动） |
+| 5. 启动 | 启动服务并自动打开浏览器 |
+
+> 首次等待较长是因为安装依赖和下载模型（向量编码/重排约 2GB）；一次完成后下次启动秒级。
+> 也可选择 `-full` 完整包（含模型缓存，约 2.5GB），下载后跳过第 4 步直接运行。
+
+### 方式二：手动安装（开发/自定义）
+
 ### 环境要求
 
 - Python 3.11+
@@ -29,11 +53,13 @@
 ### 安装
 
 ```bash
-git clone https://github.com/<your-name>/citrus-qa-agent.git
+git clone https://github.com/w1-23/citrus-qa-agent.git
 cd citrus-qa-agent
 python -m venv .venv
 # Windows: .venv\Scripts\activate    macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
+cd agent
+python prepare_models.py        # 预下载模型（向量编码 + 重排，首次）
 ```
 
 ### 启动
