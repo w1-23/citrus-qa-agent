@@ -75,7 +75,10 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # ── [4/5] 模型 ──
-Write-Host "[4/5] 检查模型（首次自动下载向量编码/重排模型，约 5-15 分钟；之后秒级启动）..." -ForegroundColor Cyan
+# v8.5.0: 模型走 HuggingFace 国内镜像（hf-mirror.com）自动下载，无需手动配置；
+# 如需官方源，注释下一行即可
+$env:HF_ENDPOINT = 'https://hf-mirror.com'
+Write-Host "[4/5] 检查模型（首次自动从镜像下载向量编码/重排模型，约 5-15 分钟；之后秒级启动）..." -ForegroundColor Cyan
 Push-Location $AgentDir
 try {
     & $VenvPy prepare_models.py

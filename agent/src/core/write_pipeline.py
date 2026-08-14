@@ -133,7 +133,8 @@ def classify_write_task(goal: str, context: str, file_exists: bool,
 # 2. Stage 1: Plan（结构化大纲）
 # ─────────────────────────────────────────────
 
-def _build_plan_prompt(material_pack: list[dict], target_chars: int, retry_info: str = "") -> str:
+def _build_plan_prompt(material_pack: list[dict], target_chars: int, retry_info: str = "",
+                       skill_catalog: str = "") -> str:
     prompt_file = _read_prompt("write-plan.md")
     material_text = _format_material_pack(material_pack, max_entries=25)
     if target_chars and target_chars > 0:
@@ -146,8 +147,10 @@ def _build_plan_prompt(material_pack: list[dict], target_chars: int, retry_info:
     extra = ""
     if retry_info:
         extra = f"\n\n【上次大纲未通过校验，失败项: {retry_info}】请修正后重新输出完整 JSON。"
+    # v8.6 (书 §2.5/4.8.2): 渐进式披露目录——Plan 阶段只见技能目录，全文按需加载
+    catalog = f"\n\n{skill_catalog}" if skill_catalog else ""
     return (f"{prompt_file}\n\n---\n{size_line}\n"
-            f"检索材料:\n{material_text}{extra}")
+            f"检索材料:\n{material_text}{catalog}{extra}")
 
 
 # v8.3.8: 证据保真——chunk 最大 1992 字符，3000 为安全阀（当前语料零截断）；
@@ -226,9 +229,10 @@ def validate_plan(plan: dict, target_chars: int) -> tuple[bool, dict]:
     return (not failed), failed
 
 
-async def run_stage1_plan(llm, material_pack: list[dict], target_chars: int) -> tuple[Optional[dict], str]:
+async def run_stage1_plan(llm, material_pack: list[dict], target_chars: int,
+                          skill_catalog: str = "") -> tuple[Optional[dict], str]:
     """Stage 1: 生成并校验大纲。返回 (plan_dict, plan_text)；失败返回 (None, plan_text) 供 ReAct 回退。"""
-    prompt = _build_plan_prompt(material_pack, target_chars)
+    prompt = _build_plan_prompt(material_pack, target_chars, skill_catalog=skill_catalog)
     retries = settings.PIPELINE_MAX_PLAN_RETRIES
     plan_text = ""
     for attempt in range(retries + 1):
@@ -253,7 +257,8 @@ async def run_stage1_plan(llm, material_pack: list[dict], target_chars: int) -> 
         logger.warning(f"[WritePipeline] plan validation failed: {failed}")
         if attempt < retries:
             prompt = _build_plan_prompt(material_pack, target_chars,
-                                        retry_info=json.dumps(failed, ensure_ascii=False))
+                                        retry_info=json.dumps(failed, ensure_ascii=False),
+                                        skill_catalog=skill_catalog)
     return None, plan_text
 
 
@@ -639,6 +644,72 @@ def _format_skill_block(skill_prompt: str) -> str:
     return f"\n\n## 写作技能参考\n{picked}"
 
 
+# ── v8.6 渐进式披露（书 §2.5/4.8.2，O6 落地）──
+# 第一层：目录常驻（Plan 阶段只给技能名+一句话用途，≤800 字符）；
+# 第二层：模型在大纲 JSON 中声明 skills_used → 按需注入全文到单章 prompt。
+# 质量兜底：模型未声明时自动注入匹配度最高的第 1 个技能全文（不劣于旧行为）。
+
+def _build_skill_catalog(skill_map: dict) -> str:
+    """渐进式披露目录：技能 id + 名称 + 首行用途（≤800 字符）。"""
+    if not skill_map:
+        return ""
+    lines: list[str] = []
+    total = 0
+    for sid, meta in list(skill_map.items())[:6]:
+        name = str(meta.get("name") or sid)[:60]
+        content = str(meta.get("content") or "")
+        first_line = next(
+            (l.strip() for l in content.splitlines()
+             if l.strip() and len(l.strip()) > 8), "")[:120]
+        line = f"- [{sid}] {name}" + (f": {first_line}" if first_line else "")
+        if total + len(line) > 800:
+            break
+        lines.append(line)
+        total += len(line)
+    if not lines:
+        return ""
+    return ("## 可用写作技能（渐进式披露：仅目录，按需加载全文）\n"
+            + "\n".join(lines)
+            + '\n如写作需要某项技能的完整指导，请在返回的大纲 JSON 中附加 '
+              '"skills_used": ["<技能id>", ...]（可空数组；不附加则使用默认技能）。')
+
+
+def _resolve_skills_used(plan: dict, plan_text: str, skill_map: dict) -> list[str]:
+    """从大纲解析模型声明要使用的技能 id（JSON 字段优先，文本标记兜底）。"""
+    if not skill_map:
+        return []
+    ids: list[str] = []
+    raw = plan.get("skills_used") if isinstance(plan, dict) else None
+    if isinstance(raw, list):
+        ids = [str(x) for x in raw if str(x) in skill_map]
+    if not ids and plan_text:
+        ids = re.findall(r'use_skill\("([^"]+)"\)', plan_text)
+        ids = [x for x in ids if x in skill_map]
+    return ids
+
+
+def _build_selected_skill_prompt(skill_map: dict, skills_used: list[str]) -> str:
+    """按声明顺序拼装选中技能的全文；未声明 → 默认取匹配度第 1 个（质量兜底）。
+
+    输出格式与旧 skill_prompt 一致（"## Skill: name\ncontent" 块，\n---\n 连接），
+    供 _format_skill_block 统一做前 3 块 ≤4000 字符截断。
+    """
+    if not skill_map:
+        return ""
+    ordered: list[str] = []
+    for sid in skills_used:
+        if sid in skill_map and sid not in ordered:
+            ordered.append(sid)
+    for sid in skill_map:      # 保持匹配顺序补足
+        if sid not in ordered:
+            ordered.append(sid)
+    parts = []
+    for sid in ordered[:5]:
+        meta = skill_map[sid]
+        parts.append(f"## Skill: {meta.get('name', sid)}\n\n{meta.get('content', '')}")
+    return "\n---\n".join(parts)
+
+
 def _build_section_prompt(plan: dict, idx: int, section: dict, running_context: str,
                           material_pack: list[dict], skill_prompt: str = "") -> str:
     prompt_file = _read_prompt("write-section.md")
@@ -662,8 +733,15 @@ def _build_section_prompt(plan: dict, idx: int, section: dict, running_context: 
 async def run_stage2_execute(llm, plan: dict, material_pack: list[dict],
                              output_path: str, task_id: str = "",
                              resume_completed: Optional[list] = None,
-                             skill_prompt: str = "") -> dict:
-    """Stage 2: 逐章生成并写盘。返回 {chapters, total_chars, missing_sections, truncated_sections}。"""
+                             skill_prompt: str = "",
+                             skill_map: Optional[dict] = None,
+                             skills_used: Optional[list] = None) -> dict:
+    """Stage 2: 逐章生成并写盘。返回 {chapters, total_chars, missing_sections, truncated_sections}。
+
+    v8.6 (书 §2.5/4.8.2 渐进式披露): 传 skill_map + skills_used 时按模型声明
+    注入选中技能全文（未声明 → 默认第 1 个匹配技能，质量兜底）；不传 skill_map
+    时保持旧行为（skill_prompt 原样注入）。
+    """
     sections = plan.get("sections", [])
     if not sections:
         return {"chapters": 0, "total_chars": 0, "missing_sections": [],
@@ -673,6 +751,14 @@ async def run_stage2_execute(llm, plan: dict, material_pack: list[dict],
     from src.tools.file_ops import write_local_file
     from src.core.write_pipeline_state import mark_section_done
 
+    # v8.6: 渐进式披露——模型声明的技能全文（兜底=匹配度第 1 个）
+    if skill_map:
+        selected = _build_selected_skill_prompt(skill_map, skills_used or [])
+        if selected:
+            skill_prompt = selected
+            logger.info(f"[WritePipeline] progressive disclosure: "
+                        f"skills_used={skills_used or ['<fallback top-1>']} "
+                        f"({len(skill_prompt)} chars)")
     resume_completed = resume_completed or []
     running_context = ""
     missing = []
@@ -918,7 +1004,8 @@ async def modify_document(llm, output_path: str, target_section: str, user_goal:
 
 async def run_write_pipeline(task: dict, material_pack: list[dict],
                              llm_factory=None, session_id: str = "",
-                             skill_prompt: str = "") -> dict:
+                             skill_prompt: str = "",
+                             skill_map: Optional[dict] = None) -> dict:
     """Plan-Execute 流水线总入口。
 
     Args:
@@ -926,6 +1013,8 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
         material_pack: 检索材料包（结构化 list[dict]）
         llm_factory: 可注入（测试用），默认构造 main 模型 ChatOpenAI
         skill_prompt: v8.4.3 写作 skill 内容（追加到单章 prompt，不影响静态缓存）
+        skill_map: v8.6 渐进式披露 {skill_id: {name, content}}——Plan 阶段只注入
+            目录，模型在 skills_used 中声明后再注入全文（未声明兜底 top-1）
     Returns:
         {"result": str, "mode": str, "chapters": int, "total_chars": int,
          "missing_sections": list, "truncated_sections": list,
@@ -1003,13 +1092,16 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
         logger.warning(f"[WritePipeline] resume check failed: {e}")
 
     if plan is None:
-        plan, plan_text = await run_stage1_plan(llm, material_pack, target_chars)
+        # v8.6: 渐进式披露——Plan 阶段只注入技能目录（≤800 字符）
+        catalog = _build_skill_catalog(skill_map) if skill_map else ""
+        plan, plan_text = await run_stage1_plan(
+            llm, material_pack, target_chars, skill_catalog=catalog)
     else:
         plan_text = ""
     if plan is None:
         # ReAct 回退: 带大纲一次性生成全文并落盘（材料已在 pack，单次调用成本可控）
         return await _react_fallback_write(llm, goal, plan_text, material_pack,
-                                           output_path, gap, skill_prompt=skill_prompt)
+                                            output_path, gap, skill_prompt=skill_prompt)
 
     # v8.4.13 第三步: 写作计划事件（前端「📋 执行计划」折叠块）——大纲就绪即展示
     try:
@@ -1052,9 +1144,16 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
     _update_job(f"plan_ready {len(plan.get('sections', []))}sections",
                 plan.get("title", ""))
 
+    # v8.6 (书 §2.5/4.8.2): 解析模型声明使用的技能（JSON skills_used / use_skill 标记）
+    skills_used: list = []
+    if skill_map:
+        skills_used = _resolve_skills_used(plan, plan_text, skill_map)
+        logger.info(f"[WritePipeline] skills_used={skills_used or ['<fallback top-1>']}")
+
     exec_result = await run_stage2_execute(llm, plan, material_pack, output_path,
                                            task_id=task_id, resume_completed=resume_completed,
-                                           skill_prompt=skill_prompt)
+                                           skill_prompt=skill_prompt,
+                                           skill_map=skill_map, skills_used=skills_used)
     # v8.4.1: 分章写作后统一引用——各章"本章参考文献"提取合并为文末全局引用
     # v8.4.6 F7: 统一引用与完整性校验作用于草稿，通过后原子发布正式文件
     draft = _draft_path(output_path)

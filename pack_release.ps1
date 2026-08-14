@@ -3,8 +3,10 @@
 #  ------------------------------------------------------------
 #  用法:
 #    powershell -File pack_release.ps1                # 主包（代码，~2MB）
-#    powershell -File pack_release.ps1 -IncludeModels # 完整包（+模型缓存，~2.1GB）
-#    powershell -File pack_release.ps1 -IncludeModels -IncludeData  # 完整包+示例语料（~3.3GB，开箱即测）
+#    powershell -File pack_release.ps1 -IncludeData   # 语料包（~1.2GB，GitHub 可上传）
+#    powershell -File pack_release.ps1 -IncludeModels -IncludeData  # 本地完整包（~3.3GB，仅本地/其他渠道分发）
+#  说明: GitHub Releases 单文件上限 2GB——大模型（reranker 2.2GB）不走发布包，
+#        首次运行经 HF 镜像自动下载（run.ps1 / prepare_models.py 已内置）。
 #  输出: dist/citrus-qa-agent-v8.5.0[-full[-data]].zip
 #  用户拿到 zip → 解压 → 双击运行 run.ps1 → 浏览器打开即用
 # ============================================================
@@ -19,7 +21,7 @@ $ZipName = "citrus-qa-agent-v$Version$Suffix.zip"
 $ZipPath = Join-Path $Dist $ZipName
 $Stage = Join-Path $env:TEMP ("citrus-pack-" + [guid]::NewGuid().ToString('N'))
 
-$ExcludeDirs = @('state', 'logs', 'workspace', '__pycache__',
+$ExcludeDirs = @('state', 'logs', 'workspace', 'data', '__pycache__',
                  '.pytest_cache', '.tmp_runner', '.venv', '.git', '.hf_cache')
 $ExcludeFiles = @('.env', '*.pyc', '*.tmp', '*.lock')
 $DataDir = Join-Path $Root 'agent\data'
@@ -55,7 +57,10 @@ if ($IncludeModels) {
     $HfCache = Join-Path $Root 'agent\.hf_cache'
     if (Test-Path $HfCache) {
         Write-Host "附带模型缓存 (.hf_cache) ..." -ForegroundColor Cyan
-        Copy-Item -Recurse -Force $HfCache (Join-Path $StageAgent '.hf_cache')
+        $HfStage = Join-Path $StageAgent '.hf_cache'
+        if (Test-Path $HfStage) { Remove-Item -Recurse -Force $HfStage }
+        # robocopy: 跳过被占用文件（模型被运行中服务加载）+ 排除锁文件
+        robocopy $HfCache $HfStage /E /XF *.lock /R:0 /W:0 /NFL /NDL /NJH /NJS | Out-Null
     } else {
         Write-Host "⚠ agent/.hf_cache 不存在，跳过模型缓存" -ForegroundColor Yellow
     }
@@ -66,15 +71,12 @@ if ($IncludeData) {
     if (Test-Path $DataDir) {
         Write-Host "附带示例语料 (data/, 用户公开文献批次) ..." -ForegroundColor Cyan
         $DataStage = Join-Path $StageAgent 'data'
-        # PS 5.1 Copy-Item 目录语义：目标已存在会再套一层（data\data 嵌套 bug）
         if (Test-Path $DataStage) { Remove-Item -Recurse -Force $DataStage }
-        Copy-Item -Recurse -Force $DataDir $DataStage
-        Get-ChildItem -Path $DataStage -Recurse -Filter '*.lock' -ErrorAction SilentlyContinue |
-            Remove-Item -Force -ErrorAction SilentlyContinue
+        # robocopy: 排除 .lock（qdrant 运行中锁）+ 跳过被占用文件
+        robocopy $DataDir $DataStage /E /XF *.lock /R:0 /W:0 /NFL /NDL /NJH /NJS | Out-Null
         if (Test-Path (Join-Path $DataStage 'data')) {
             Write-Host "⚠ 检测到 data\data 嵌套，修正..." -ForegroundColor Yellow
-            Get-ChildItem -Path (Join-Path $DataStage 'data') | Copy-Item -Destination $DataStage -Recurse -Force
-            Remove-Item -Recurse -Force (Join-Path $DataStage 'data')
+            robocopy (Join-Path $DataStage 'data') $DataStage /E /MOVE /XF *.lock /R:0 /W:0 /NFL /NDL /NJH /NJS | Out-Null
         }
     } else {
         Write-Host "⚠ agent/data 不存在，跳过语料" -ForegroundColor Yellow

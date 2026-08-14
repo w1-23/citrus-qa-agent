@@ -93,6 +93,33 @@ class MemoryStore:
             store[key] = {"value": value, "updated_at": datetime.now().isoformat()}
             self._save_store(session_id, "preference_memory", store)
 
+    def get_preferences(self, session_id: str, max_chars: int = 300) -> str:
+        """用户显式偏好（书 §3.1 偏好追踪）→ 上下文块（≤max_chars，空则 ""）。
+
+        v8.6 消费点接线：LTM 提取出 type=preference 的事实写入本表，
+        这里在 build_human_message 中作为 <user_preferences> 块注入——
+        偏好是用户明确表达的长期约定（如"综述一律中文、要含局限与边界"），
+        注入后模型在写作/回答中自动遵循，无需用户每次重申。
+        """
+        store = self._load_store(session_id, "preference_memory")
+        if not store:
+            return ""
+        parts: list[str] = []
+        total = 0
+        for key, item in list(store.items())[:10]:
+            value = item.get("value", "") if isinstance(item, dict) else str(item)
+            if not value:
+                continue
+            line = f"- {str(key)[:60]}: {str(value)[:120]}"
+            if total + len(line) > max_chars:
+                break
+            parts.append(line)
+            total += len(line)
+        if not parts:
+            return ""
+        return ("## 用户偏好（历史交互中用户明确表达的偏好；如与用户最新要求冲突，"
+                "以用户最新要求为准）\n" + "\n".join(parts))
+
     # ─── Long-term Memory (Cross-session) ───
 
     def _ensure_ltm_schema(self, conn) -> None:
@@ -411,7 +438,12 @@ class MemoryStore:
             return ""
 
     def extract_key_facts(self, query: str, answer: str) -> list[dict]:
-        """提取 3-5 条核心事实（异步调用，用最便宜模型）"""
+        """提取 3-5 条核心事实 + 用户偏好（异步调用，用最便宜模型）。
+
+        v8.6 (书 §3.1 偏好追踪): 输出项可带 "type": "preference"——用户明确表达的
+        长期偏好（语言/风格/格式约定等），由调用方路由到 preference_memory；
+        其余默认事实走 ADD-only LTM。
+        """
         if not answer or len(answer) < 50:
             return []
         try:
@@ -422,6 +454,9 @@ class MemoryStore:
                 "从以下问答对中提取最多5条不可推导的核心事实，每条用一句话描述。\n"
                 "只保留那些如果不记录就会丢失的信息（如：具体数值、疾病-基因关联、实验条件）。\n"
                 "不要保留可以重新检索的常识性信息。\n"
+                "如果回答中包含用户明确表达的长期偏好（如写作语言、篇幅、格式、风格、"
+                "是否要求局限与边界等），单独提取为偏好项："
+                "{\"type\": \"preference\", \"key\": \"偏好名\", \"value\": \"偏好内容\", \"confidence\": 0.9}。\n"
                 "输出JSON数组，格式：[{\"key\": \"柑橘黄龙病病原为Candidatus Liberibacter\", \"value\": \"CLas 为黄龙病病原\", \"confidence\": 0.9}]\n\n"
                 f"问题: {query[:500]}\n回答: {answer[:2000]}"
             )

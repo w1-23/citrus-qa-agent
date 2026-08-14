@@ -244,6 +244,11 @@ class Settings(BaseSettings):
         return self.FAST_BASE_URL or self.MAIN_BASE_URL
 
 settings = Settings()
+
+# v8.5.0 模型镜像兜底：任何启动方式（run.ps1 / 手动 uvicorn）下，
+# HuggingFace 模型（reranker/embedding）首次下载统一走国内镜像，
+# 已有 HF_ENDPOINT 环境变量则尊重用户自定义
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 settings._load_runtime_api_key()
 
 # ── 启动配置校验（v8.3.3 fail-fast）──

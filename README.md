@@ -26,16 +26,17 @@
 从 [Releases](https://github.com/w1-23/citrus-qa-agent/releases) 下载发布包，解压后**双击运行 `run.ps1`**（或右键 → 使用 PowerShell 运行）：
 
 ```
-解压 → 运行 run.ps1 → 自动完成 → 浏览器自动打开 http://localhost:8000 → 页面填 API Key
+下载主包（+ 可选语料包）→ 解压 → 运行 run.ps1 → 浏览器自动打开 http://localhost:8000 → 页面填 API Key
 ```
 
-三种发布包：
+发布包：
 
-| 包 | 大小 | 内容 | 适用 |
-|---|---|---|---|
-| `citrus-qa-agent-v8.5.0.zip` | ~2 MB | 代码 + 一键脚本 | 手动装依赖/下模型（首次 5-15 分钟） |
-| `...-full.zip` | ~2.1 GB | + 模型缓存 | 跳过模型下载，秒级启动 |
-| `...-full-data.zip` | ~3.3 GB | + 模型 + 示例语料 | **开箱即用**：自带公开文献语料，检索/引用/写作全链路可直接测试 |
+| 包 | 大小 | 说明 |
+|---|---|---|
+| `citrus-qa-agent-v8.5.0.zip` | ~5 MB | **必下**：代码 + 一键脚本 |
+| `citrus-qa-agent-v8.5.0-data.zip` | ~1.2 GB | **可选**：内置示例语料（公开文献 5 批次），开箱即可测检索/引用/写作全链路 |
+
+**模型自动安装**：向量编码（multilingual-e5-large）与重排（bge-reranker-v2-m3）模型不打包（重排模型单文件超 GitHub 2GB 上限）——首次运行 `run.ps1` 自动经 **HuggingFace 国内镜像（hf-mirror.com）** 下载，约 5-15 分钟，一次完成后秒级启动；也可手动运行 `python prepare_models.py`（`--skip-reranker` 可跳过重排模型）。
 
 `run.ps1` 全自动处理：
 

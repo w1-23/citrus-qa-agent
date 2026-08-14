@@ -42,6 +42,7 @@ class LoadedContext:
     history_summary: str | None = None
     long_term_memory: str | None = None
     resident_cards: str | None = None    # v8.4: 常驻卡片（双层记忆"概览"层，≤500 字符）
+    user_preferences: str | None = None  # v8.6: 用户显式偏好（书 §3.1 偏好追踪，≤300 字符）
     search_suggestions: list[str] = field(default_factory=list)
     format_hint: str | None = None
     compacted: bool = False    # v8.4: 本轮是否触发过压缩（UI 展示用，摘要已在视图内）
@@ -148,6 +149,16 @@ class ContextManager:
                     ctx.resident_cards = cards
             except Exception as e:
                 logger.debug(f"[ContextManager] resident cards skipped: {e}")
+            try:
+                # v8.6 (书 §3.1 偏好追踪): 用户显式偏好 → <user_preferences> 块
+                # （纯 DB 读取，无 LLM 开销；空则零注入）
+                prefs = await asyncio.to_thread(
+                    self._memory.get_preferences, session_id)
+                if prefs:
+                    ctx.user_preferences = prefs
+                    logger.info(f"[ContextManager] preferences injected: {len(prefs)} chars")
+            except Exception as e:
+                logger.debug(f"[ContextManager] preferences skipped: {e}")
 
         suggestions, format_hint = await self._generate_hints(query)
 
@@ -307,6 +318,12 @@ def build_human_message(
             f"</resident_cards>"
         )
 
+    if ctx.user_preferences:
+        blocks.append(
+            f"<user_preferences>\n{ctx.user_preferences}\n"
+            f"</user_preferences>"
+        )
+
     if ctx.search_suggestions:
         items = "\n".join(f"- {s}" for s in ctx.search_suggestions[:3])
         blocks.append(
@@ -403,6 +420,7 @@ def finalize_load_result(
             "ltm_recalled": bool(ctx.long_term_memory),
             "ltm_chars": len(ctx.long_term_memory or ""),
             "resident_cards": bool(ctx.resident_cards),
+            "user_preferences": bool(ctx.user_preferences),
             "suggestions": ctx.search_suggestions[:3] if ctx.search_suggestions else [],
             "format_hint": ctx.format_hint or "",
             "estimated_tokens": est_tokens,

@@ -465,6 +465,11 @@ async def save_context_node(state: AgentState) -> dict:
                 from src.guardrails.memory import memory_store
                 facts = memory_store.extract_key_facts(q, a)
                 for f in facts:
+                    # v8.6 (书 §3.1 偏好追踪): type=preference 走 preference_memory
+                    if f.get("type") == "preference":
+                        memory_store.set_preference(
+                            sid, f.get("key", ""), f.get("value", ""))
+                        continue
                     memory_store.save_long_term_fact(
                         f.get("key", ""),
                         f.get("value", ""),

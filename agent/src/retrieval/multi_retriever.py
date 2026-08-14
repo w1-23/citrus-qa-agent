@@ -1,5 +1,8 @@
+import hashlib
 import json
 import logging
+import os
+import pickle
 import re
 import time
 import threading
@@ -11,9 +14,67 @@ from qdrant_client.http import models
 from src.config import settings
 from src.engine.embedder import Embedder
 from src.engine.reranker import Reranker
-from src.retrieval.bm25 import BM25Plus, rrf_fuse
+from src.retrieval.bm25 import (
+    BM25Plus, rrf_fuse,
+    bm25_to_cache_dict, bm25_from_cache_dict, BM25_CACHE_FORMAT,
+)
 
 logger = logging.getLogger(__name__)
+
+# v8.6 (书 §3.2 离线建索引): BM25 倒排索引持久化——语料不变则启动直接加载，
+# 跳过 fit（实测 119k chunk 语料 fit+倒排 ~15s → 加载 ~2s）；查询走倒排加速。
+_BM25_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / ".hf_cache" / "bm25"
+_BM25_CACHE_KEEP = 3   # 只保留最近 3 份缓存（不同语料指纹各自成文件）
+
+
+def _bm25_cache_path(fp: str) -> Path:
+    return _BM25_CACHE_DIR / f"bm25_v{BM25_CACHE_FORMAT}_{fp}.pkl"
+
+
+def _bm25_fingerprint(texts: List[str], k1: float, b: float, delta: float) -> str:
+    """语料指纹 = 全部检索文本的 md5 + BM25 参数（内容变化即失效）。"""
+    h = hashlib.md5()
+    h.update(f"v{BM25_CACHE_FORMAT}|{k1}|{b}|{delta}".encode("utf-8"))
+    for t in texts:
+        h.update(t.encode("utf-8", "ignore"))
+    return h.hexdigest()
+
+
+def _load_bm25_cache(fp: str) -> Optional[BM25Plus]:
+    p = _bm25_cache_path(fp)
+    if not p.exists():
+        return None
+    try:
+        with open(p, "rb") as f:
+            data = pickle.load(f)
+        if not isinstance(data, dict) or data.get("format") != BM25_CACHE_FORMAT:
+            logger.warning(f"[Retriever] BM25 cache format mismatch, rebuilding: {p.name}")
+            return None
+        return bm25_from_cache_dict(data)
+    except Exception as e:
+        logger.warning(f"[Retriever] BM25 cache load failed, rebuilding: {e}")
+        return None
+
+
+def _save_bm25_cache(bm: BM25Plus, fp: str) -> None:
+    try:
+        _BM25_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = _bm25_cache_path(fp).with_suffix(".pkl.tmp")
+        with open(tmp, "wb") as f:
+            pickle.dump(bm25_to_cache_dict(bm), f, protocol=4)
+        os.replace(tmp, _bm25_cache_path(fp))
+        # 清理旧指纹缓存（保留最新 _BM25_CACHE_KEEP 份）
+        try:
+            files = sorted(_BM25_CACHE_DIR.glob("bm25_v*.pkl"),
+                           key=lambda p: p.stat().st_mtime, reverse=True)
+            for old in files[_BM25_CACHE_KEEP:]:
+                old.unlink(missing_ok=True)
+        except Exception:
+            pass
+        logger.info(f"[Retriever] BM25 cache saved: {_bm25_cache_path(fp).name} "
+                    f"({_bm25_cache_path(fp).stat().st_size // (1024*1024)}MB)")
+    except Exception as e:
+        logger.warning(f"[Retriever] BM25 cache save failed: {e}")
 
 class MultiBatchRetriever:
     # ========== 单例核心 ==========
@@ -182,7 +243,19 @@ class MultiBatchRetriever:
             self._enrich_all_metadata()
             logger.info("Building Global BM25 Index...")
             texts = [f"{c.get('section_name','')} {c.get('text','')}" for c in self.global_chunks]
-            self.bm25.fit(texts)
+            # v8.6: 缓存优先（语料指纹不变 → 直接加载倒排索引，省 ~13s 启动重建）
+            fp = _bm25_fingerprint(texts, self.bm25.k1, self.bm25.b, self.bm25.delta)
+            cached = _load_bm25_cache(fp)
+            if cached is not None:
+                self.bm25 = cached
+                logger.info(f"[Retriever] BM25 index loaded from cache "
+                            f"({_bm25_cache_path(fp).name})")
+            else:
+                t0 = time.time()
+                self.bm25.fit(texts)
+                logger.info(f"[Retriever] BM25 fit done: {time.time()-t0:.1f}s "
+                            f"({len(self.global_chunks)} chunks, {len(self.bm25.idf)} terms)")
+                _save_bm25_cache(self.bm25, fp)
             # AG-11 修正: chunk_index 为论文内编号, 全局唯一键 = (paper_id, chunk_index)
             self._idx_map = {
                 (c.get("paper_id", ""), c.get("chunk_index")): c["_global_idx"]

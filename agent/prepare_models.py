@@ -20,6 +20,9 @@ CACHE.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("FASTEMBED_CACHE_PATH", str(CACHE / "fastembed"))
 os.environ.setdefault("HF_HOME", str(CACHE / "hf"))
 os.environ.setdefault("TRANSFORMERS_CACHE", str(CACHE / "hf"))
+# v8.5.0 镜像：模型统一走 HuggingFace 国内镜像（hf-mirror.com），
+# 加速首次下载；取消该环境变量即回官方源
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 SKIP_RERANKER = "--skip-reranker" in sys.argv
 
