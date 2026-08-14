@@ -553,3 +553,35 @@ async def new_session_endpoint():
     await session_manager.get_or_create_session(new_id)
     logger.info(f"[API] new session: {new_id}")
     return {"status": "ok", "session_id": new_id}
+
+
+# ── v8.4.9 会话持久化：历史对话读取（前端刷新/关闭重开后恢复渲染）──
+# 数据本就持久化在 sessions.db（save_messages 全量入库），此前只缺读取通道；
+# 本端点只回用户可见的 Human/AI 轮次，工具/系统消息留在库内不进聊天区。
+
+@app.get("/api/v2/session/{session_id}/messages")
+async def session_messages(session_id: str, limit: int = 200):
+    """读取会话历史对话轮，供前端刷新/重开恢复渲染。
+
+    返回顺序与库内一致（id 升序）；limit 为对话消息条数上限（默认 200 → 100 轮）。
+    """
+    try:
+        msgs, _ = await session_manager.get_messages_with_ids(session_id)
+    except Exception as e:
+        logger.warning(f"[API] session_messages read failed: {e}")
+        return {"session_id": session_id, "messages": [], "count": 0}
+    out: list[dict] = []
+    from langchain_core.messages import HumanMessage, AIMessage
+    for m in msgs:
+        if isinstance(m, HumanMessage):
+            content = str(getattr(m, "content", "") or "").strip()
+            if content:
+                out.append({"role": "user", "content": content})
+        elif isinstance(m, AIMessage):
+            content = str(getattr(m, "content", "") or "").strip()
+            # 纯工具轮（只有 tool_calls 无文本）不渲染；合成收尾指令已由读路径过滤
+            if content:
+                out.append({"role": "assistant", "content": content})
+        if len(out) >= max(int(limit), 1):
+            break
+    return {"session_id": session_id, "messages": out, "count": len(out)}

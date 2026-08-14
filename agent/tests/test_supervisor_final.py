@@ -588,6 +588,63 @@ def _restore_llm_pool(orig):
     pool.get_llm = orig
 
 
+def test_session_history_restore():
+    """v8.4.9 会话持久化：历史对话读取端点（前端刷新/关闭重开后恢复渲染）。
+
+    数据在 sessions.db 本就持久化（save_messages 全量入库），本测试验证读取
+    端点只回用户可见的 Human/AI 轮次、过滤工具/系统消息、limit 生效。
+    DB 放工作区内路径（沙箱可写；TEMP 下的 sqlite 在本环境被拒）。
+    """
+    print("[SF-16] 会话持久化：历史对话读取端点")
+    import asyncio as _asyncio
+    from pathlib import Path
+    from src.session.manager import SessionManager
+    import src.api.main as api_main
+    from langchain_core.messages import ToolMessage, SystemMessage
+
+    db_file = Path(__file__).resolve().parent / ".tmp_session_hist.db"
+    if db_file.exists():
+        db_file.unlink()
+    sm = SessionManager()
+    sm.db_path = str(db_file)
+    sm._init_db_sync()
+    sm._create_session_sync("hist-test")
+
+    msgs = [
+        HumanMessage(content="什么是 HITL？"),
+        AIMessage(content="HITL 即人在环中。"),
+        ToolMessage(content="ok", tool_call_id="t1", name="citrus_rag_search"),
+        SystemMessage(content="system noise"),
+        HumanMessage(content="怎么验证？"),
+        AIMessage(content="通过审批卡片闭环验证。"),
+    ]
+    _asyncio.run(sm.save_messages("hist-test", msgs, "idem-hist-1"))
+
+    orig_sm = api_main.session_manager
+    api_main.session_manager = sm
+    try:
+        r = _asyncio.run(api_main.session_messages("hist-test"))
+        roles = [m["role"] for m in r["messages"]]
+        check("端点返回 4 条对话轮", r["count"] == 4, f"count={r['count']}")
+        check("工具消息被过滤", "tool" not in roles, str(roles))
+        check("系统消息被过滤", "system" not in roles, str(roles))
+        check("顺序保持", roles == ["user", "assistant", "user", "assistant"], str(roles))
+        check("内容完整", r["messages"][1]["content"] == "HITL 即人在环中。",
+              r["messages"][1]["content"][:30] if r["messages"] else "none")
+
+        r2 = _asyncio.run(api_main.session_messages("hist-test", limit=2))
+        check("limit=2 生效", r2["count"] == 2, f"count={r2['count']}")
+
+        r3 = _asyncio.run(api_main.session_messages("no-such-session"))
+        check("不存在的会话返回空", r3["count"] == 0, f"count={r3['count']}")
+    finally:
+        api_main.session_manager = orig_sm
+        try:
+            db_file.unlink()
+        except Exception:
+            pass
+
+
 print()
 if __name__ == "__main__":
     test_natural_completion_not_overridden()
@@ -603,6 +660,7 @@ if __name__ == "__main__":
     test_draft_publish()
     test_output_profile()
     test_retrieve_budget_and_convergence()
+    test_session_history_restore()
     test_pii_mask()
     test_hard_trim_identifiers()
     test_tool_meta_envelope()

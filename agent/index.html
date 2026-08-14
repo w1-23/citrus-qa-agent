@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Citrus QA Agent v8.4.8</title>
+<title>Citrus QA Agent v8.4.9</title>
 <script src="https://cdn.jsdelivr.net/npm/marked@4.3.0/marked.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -794,7 +794,7 @@ footer {
 <header>
   <div class="logo-mark">C</div>
   <h1>Citrus QA Agent</h1>
-  <span class="version-badge" id="versionBadge">v8.4.8</span>
+  <span class="version-badge" id="versionBadge">v8.4.9</span>
   <!-- v8.4.8 HITL 服务端化：权限模式徽标 + 切换菜单 -->
   <span class="perm-badge" id="permBadge" onclick="togglePermMenu(event)" title="权限模式（HITL）：点击切换">权限: --</span>
   <div class="perm-menu" id="permMenu" style="display:none">
@@ -823,7 +823,7 @@ footer {
       <div class="message bot">
         <div class="avatar">◆</div>
         <div class="content">
-          您好，我是 <span id="welcomeVersion">Citrus QA Agent v8.4.8</span>。<br>
+          您好，我是 <span id="welcomeVersion">Citrus QA Agent v8.4.9</span>。<br>
           <span style="color:var(--text-muted);font-size:13px">本地 RAG 检索 · CrossRef 学术搜索 · 文献综述写作 · 实验设计 · 文件读写</span>
         </div>
       </div>
@@ -945,7 +945,7 @@ function loadRuntimeConfig() {
 }
 /* v8.4.5: 版本单源——后端 /api/v2/config.version 下发，静态文案仅为离线回退 */
 function _appVersion() {
-  return (_runtimeConfig && _runtimeConfig.version) || '8.4.8';
+  return (_runtimeConfig && _runtimeConfig.version) || '8.4.9';
 }
 function applyAppVersion() {
   var v = _appVersion();
@@ -1555,7 +1555,31 @@ async function sendMsg(isFollowUp) {
   function renderRoundSidebar(){if(roundHistory.length===0){sidebarContent.innerHTML='<div class="empty-sidebar">提交问题后文献将在此展示</div>';citationCount.textContent='0';return}var tC=0,tU=0;for(var i=0;i<roundHistory.length;i++){tC+=roundHistory[i].cited.length;tU+=roundHistory[i].uncited.length}citationCount.textContent=(tC+tU);var html='';for(var i=roundHistory.length-1;i>=0;i--){var round=roundHistory[i];var all=[];for(var k=0;k<round.cited.length;k++){if(round.cited[k].type!=='web')all.push(round.cited[k])}for(var k=0;k<round.uncited.length;k++){if(round.uncited[k].type!=='web')all.push(round.uncited[k])}for(var k=0;k<(round.historical||[]).length;k++){all.push(round.historical[k])}if(all.length===0)continue;var qp=round.query.length>25?round.query.substring(0,25)+'...':round.query;var open=i===roundHistory.length-1;html+='<div class="round-group">';html+='<div class="round-header" onclick="toggleRound(\'round-'+round.roundId+'\')">';html+='<span class="toggle-icon" id="round-'+round.roundId+'-icon">▶</span>';html+='<span class="round-title">Round '+round.roundId+': '+qp+'</span>';html+='<span class="round-count">'+all.length+'</span></div>';html+='<div class="round-body" id="round-'+round.roundId+'"'+(open?'':' style="display:none"')+'>';for(var m=0;m<all.length;m++){html+=renderCitationItem(all[m])}html+='</div></div>'}sidebarContent.innerHTML=html||'<div class="empty-sidebar">本轮未检索到相关文献</div>'}
   }
 
+/* v8.4.9 会话持久化：刷新/关闭重开后恢复历史对话渲染（数据在 sessions.db，只缺读取通道） */
+async function restoreSessionHistory() {
+  if (!sessionId) return;
+  try {
+    var resp = await fetch('/api/v2/session/' + encodeURIComponent(sessionId) + '/messages');
+    if (!resp.ok) return;
+    var data = await resp.json();
+    var msgs = (data && data.messages) || [];
+    if (msgs.length === 0) return;
+    chatContainer.innerHTML = '';
+    for (var i = 0; i < msgs.length; i++) {
+      var m = msgs[i];
+      if (m.role === 'user') {
+        addMessage('user', escapeHtml(m.content));
+      } else if (m.role === 'assistant') {
+        var contentEl = addMessage('bot', '');
+        contentEl.innerHTML = renderMarkdownSafe(m.content);
+      }
+    }
+    updateStatus('ok', '已恢复历史会话（' + msgs.length + ' 条消息）');
+  } catch (e) { /* 无历史或读取失败：保持欢迎语，不打扰用户 */ }
+}
+
 if (sessionId) { userInput.focus(); }
+restoreSessionHistory();
 </script>
 </body>
 </html>
