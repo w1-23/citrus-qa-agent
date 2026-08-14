@@ -205,9 +205,4 @@ def build_agent_extra_block(
     return _join_parts(blocks)
 
 
-def available_formats() -> list[str]:
-    return sorted(VALID_FORMATS)
 
-
-def available_agents() -> list[str]:
-    return sorted(VALID_AGENTS)

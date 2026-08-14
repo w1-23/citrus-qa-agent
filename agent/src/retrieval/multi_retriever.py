@@ -463,18 +463,3 @@ class MultiBatchRetriever:
         logger.info(f"[Retriever] HyDE done: {len(passed)}/{len(reranked)} passed | {total_ms:.0f}ms")
         from src.logger import log_search; log_search(original_query, passed, elapsed=time.time() - _t0)
         return passed
-
-    def count_points(self) -> int:
-        total = 0
-        for client, coll_name in self.batches.values():
-            try: total += client.count(collection_name=coll_name, exact=True).count
-            except Exception as e: logger.warning(f"Count failed for {coll_name}: {e}")
-        return total
-
-    @classmethod
-    def _reset_singleton_for_testing(cls):
-        """仅限单元测试隔离使用，生产环境严禁调用"""
-        with cls._lock:
-            cls._initialized = False
-            cls._instance = None
-            logger.warning("[MultiBatchRetriever] 测试专用：单例已重置")

@@ -129,10 +129,6 @@ def emit_usage_delta(session_id: str, source: str, input_tokens: int = 0,
 _sse_debug_enabled: bool = True
 
 
-def enable_sse_debug(enabled: bool = True) -> None:
-    global _sse_debug_enabled
-    _sse_debug_enabled = enabled
-
 
 def log_sse_frame(event_dict: dict) -> None:
     """Print an outgoing SSE frame for debugging purposes."""
@@ -165,10 +161,6 @@ def get_tool_elapsed(tool_call_id: str) -> float:
         return 0.0
     return time.perf_counter() - entry[0]
 
-
-def get_tool_name(tool_call_id: str) -> str:
-    entry = _tool_start_times.get(tool_call_id)
-    return entry[1] if entry else ""
 
 
 def get_running_tools() -> list[tuple[str, str, float]]:

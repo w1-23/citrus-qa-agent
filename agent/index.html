@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Citrus QA Agent v8.4.13</title>
+<title>Citrus QA Agent v8.4.14</title>
 <script src="https://cdn.jsdelivr.net/npm/marked@4.3.0/marked.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -843,20 +843,6 @@ footer {
 .build-mode-btn.expert .mode-indicator { background: var(--accent); }
 .build-mode-btn.light .mode-indicator { background: var(--text-muted); }
 .build-mode-btn:hover { border-color: var(--accent); color: var(--text-primary); }
-.build-exec-btn {
-  padding: 6px 14px;
-  border: none;
-  border-radius: 6px;
-  background: var(--accent);
-  color: var(--bg-surface);
-  font-size: 11px;
-  font-weight: 600;
-  cursor: pointer;
-  font-family: inherit;
-  transition: opacity 0.15s var(--ease-out-quint);
-}
-.build-exec-btn:hover { opacity: 0.85; }
-.build-exec-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
 /* ── Context Drawer (overlay, v8.2) ── */
 .ctx-drawer-backdrop {
@@ -925,7 +911,7 @@ footer {
 <header>
   <div class="logo-mark">C</div>
   <h1>Citrus QA Agent</h1>
-  <span class="version-badge" id="versionBadge">v8.4.13</span>
+  <span class="version-badge" id="versionBadge">v8.4.14</span>
   <!-- v8.4.8 HITL 服务端化：权限模式徽标 + 切换菜单 -->
   <span class="perm-badge" id="permBadge" onclick="togglePermMenu(event)" title="权限模式（HITL）：点击切换">权限: --</span>
   <div class="perm-menu" id="permMenu" style="display:none">
@@ -954,7 +940,7 @@ footer {
       <div class="message bot">
         <div class="avatar">◆</div>
         <div class="content">
-          您好，我是 <span id="welcomeVersion">Citrus QA Agent v8.4.13</span>。<br>
+          您好，我是 <span id="welcomeVersion">Citrus QA Agent v8.4.14</span>。<br>
           <span style="color:var(--text-muted);font-size:13px">本地 RAG 检索 · CrossRef 学术搜索 · 文献综述写作 · 实验设计 · 文件读写</span>
         </div>
       </div>
@@ -1083,7 +1069,7 @@ function loadRuntimeConfig() {
 }
 /* v8.4.5: 版本单源——后端 /api/v2/config.version 下发，静态文案仅为离线回退 */
 function _appVersion() {
-  return (_runtimeConfig && _runtimeConfig.version) || '8.4.13';
+  return (_runtimeConfig && _runtimeConfig.version) || '8.4.14';
 }
 function applyAppVersion() {
   var v = _appVersion();
@@ -1203,15 +1189,9 @@ function updateModeUI() {
   if (buildLabel) { buildLabel.textContent = isLight ? '轻量模式' : '专家模式'; }
 }
 
-function executeBuild() {
-  var input = document.getElementById('user-input');
-  if (input && input.value.trim()) { sendMsg(); }
-}
 function setSendDisabled(val) {
   var btn = document.getElementById('send-btn');
-  var exec = document.getElementById('buildExecBtn');
   if (btn) btn.disabled = val;
-  if (exec) exec.disabled = val;
   // v8.4.11/8.4.12: 停止按钮与发送按钮同一位置切换（运行中显示，结束/出错/停止后隐藏）
   var stopBtn = document.getElementById('stop-btn');
   if (stopBtn) stopBtn.style.display = val ? 'flex' : 'none';
@@ -1687,9 +1667,6 @@ async function sendMsg(isFollowUp) {
         appendTerminal('── 子Agent「' + (data.agent_name||'') + '」启动 ── ' + (data.task||''));
         break;
       case 'text':
-        if (!isAnswerStarted) { isAnswerStarted=true; clearTimeout(spinnerTimeout); updateStatus('answer','生成回答中...'); answerDiv.style.display=''; collapseReasoning(); }
-        fullText+=data.content; updateContextTokens((data.content||'').length * 0.7); renderAnswer(); break;
-      case 'token':
         if (!isAnswerStarted) { isAnswerStarted=true; clearTimeout(spinnerTimeout); updateStatus('answer','生成回答中...'); answerDiv.style.display=''; collapseReasoning(); }
         fullText+=data.content; updateContextTokens((data.content||'').length * 0.7); renderAnswer(); break;
       case 'context_status': renderContextPanel(data); break;

@@ -30,3 +30,7 @@ venv/
 
 # 部署构建产物
 citrus_agent_deploy.zip
+
+# 测试临时文件（v8.4.14）
+agent/tests/.tmp_runner/
+agent/tests/.tmp_session_hist.db

@@ -1,6 +1,7 @@
 """记忆改造 v8.4（ADD-only + 混合信号召回 + 常驻卡片）回归测试."""
 import sys
 import os
+from _tmpenv import tmp_path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -25,7 +26,7 @@ def test_ltm_add_only():
     from src.config import PROJECT_ROOT
 
     ms = MemoryStore()
-    tmp = Path(tempfile.mkdtemp()) / "sessions.db"
+    tmp = tmp_path("db")
     # 定向到临时库
     orig = ms.db_path if hasattr(ms, "db_path") else None
     ms.db_path = str(tmp)
@@ -58,7 +59,7 @@ def test_ltm_resident_cards():
     from pathlib import Path
 
     ms = MemoryStore()
-    tmp = Path(tempfile.mkdtemp()) / "sessions.db"
+    tmp = tmp_path("db")
     ms.db_path = str(tmp)
     with sqlite3.connect(str(tmp)) as conn:
         ms._ensure_ltm_schema(conn)
@@ -87,7 +88,7 @@ def test_ltm_combined_ranking():
     from datetime import datetime, timedelta
 
     ms = MemoryStore()
-    tmp = Path(tempfile.mkdtemp()) / "sessions.db"
+    tmp = tmp_path("db")
     ms.db_path = str(tmp)
     with sqlite3.connect(str(tmp)) as conn:
         ms._ensure_ltm_schema(conn)

@@ -162,21 +162,6 @@ class SkillTree:
                     return file_path.read_text(encoding="utf-8")
         return ""
 
-    def get_search_prompt(self, query: str, top_k: int = 5) -> str:
-        """Generate a prompt block showing matching skills for the planner."""
-        results = self.search(query, top_k)
-        if not results:
-            return ""
-
-        lines = [f"## 匹配的写作技能 ({len(results)} 个)"]
-        for skill_id, score, meta in results:
-            lines.append(
-                f"- [{score:.2f}] {meta['name']} | {meta['section']} | "
-                f"{', '.join(meta.get('domain', [])[:2])} | {meta['rhetorical_move']} "
-                f"(id: {skill_id})"
-            )
-        return "\n".join(lines)
-
     def search_strategy_cards(self, query: str, card_type: str = None, top_k: int = 5) -> str:
         """Search strategy cards and return formatted prompt block."""
         from src.core.strategy_cards import get_all_cards, get_card_texts, build_card_map, load_card_prompt
@@ -222,17 +207,3 @@ class SkillTree:
                 parts.append(p)
         return "\n".join(parts) if parts else ""
 
-    def get_stats(self) -> str:
-        """Category stats for planner display."""
-        sections = {}
-        for s in self._skills:
-            sec = s.get("section", "unknown")
-            move = s.get("rhetorical_move", "unknown")
-            sections.setdefault(sec, {}).setdefault(move, 0)
-            sections[sec][move] += 1
-        lines = ["## Skill 系统 (384 个)"]
-        for sec, moves in sorted(sections.items()):
-            total = sum(moves.values())
-            move_strs = [f"{m}:{c}" for m, c in sorted(moves.items())]
-            lines.append(f"  {sec}({total}): {', '.join(move_strs)}")
-        return "\n".join(lines)

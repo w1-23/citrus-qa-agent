@@ -65,16 +65,6 @@ class MemoryStore:
     def get_entities(self, session_id: str) -> Dict:
         return self._load_store(session_id, "entity_memory")
 
-    def get_recent_entities(self, session_id: str, top_k: int = 20) -> List[Dict]:
-        """按 last_mentioned 排序的最近实体"""
-        store = self._load_store(session_id, "entity_memory")
-        sorted_ents = sorted(
-            store.items(),
-            key=lambda x: x[1].get("last_mentioned", ""),
-            reverse=True,
-        )
-        return [{"name": k, **v} for k, v in sorted_ents[:top_k]]
-
     # ─── Concept Memory ───
 
     def update_concept(self, session_id: str, concept_key: str, summary: str, confidence: float = 0.5) -> None:
@@ -95,9 +85,6 @@ class MemoryStore:
                 }
             self._save_store(session_id, "concept_memory", store)
 
-    def get_concepts(self, session_id: str) -> Dict:
-        return self._load_store(session_id, "concept_memory")
-
     # ─── Preference Memory ───
 
     def set_preference(self, session_id: str, key: str, value: str) -> None:
@@ -105,14 +92,6 @@ class MemoryStore:
             store = self._load_store(session_id, "preference_memory")
             store[key] = {"value": value, "updated_at": datetime.now().isoformat()}
             self._save_store(session_id, "preference_memory", store)
-
-    def get_preference(self, session_id: str, key: str, default: Optional[str] = None) -> Optional[str]:
-        store = self._load_store(session_id, "preference_memory")
-        entry = store.get(key)
-        return entry["value"] if entry else default
-
-    def get_all_preferences(self, session_id: str) -> Dict:
-        return self._load_store(session_id, "preference_memory")
 
     # ─── Long-term Memory (Cross-session) ───
 
@@ -547,31 +526,6 @@ _ENTITY_PATTERNS = {
 }
 
 
-def extract_entities(text: str) -> List[Dict]:
-    """从文本中提取科研实体"""
-    entities = []
-    seen: Set[str] = set()
-    for etype, pattern in _ENTITY_PATTERNS.items():
-        for match in pattern.finditer(text):
-            name = match.group(0).strip()
-            if name and name not in seen:
-                seen.add(name)
-                entities.append({"name": name, "type": etype})
-    return entities
-
-
-def extract_entity_relations(text: str, entities: List[Dict]) -> List[Tuple[str, str, str]]:
-    """简单启发式关系提取：同一句中出现的实体互为关联"""
-    relations = []
-    sentences = re.split(r'[。；\n]', text)
-    ent_names = {e["name"] for e in entities}
-    for sent in sentences:
-        present = [e for e in ent_names if e in sent]
-        if len(present) >= 2:
-            for i in range(len(present)):
-                for j in range(i + 1, len(present)):
-                    relations.append((present[i], "related_to", present[j]))
-    return relations
 
 
 memory_store = MemoryStore()

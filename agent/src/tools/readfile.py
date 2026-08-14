@@ -19,16 +19,20 @@ PDF_DEFAULT_MAX_CHARS = 30000
 
 
 def _is_path_allowed(full: Path) -> bool:
-    """v8.3.3 路径白名单: 项目根目录 + 配置的额外读取根目录。"""
+    """v8.3.3/v8.4.14 路径白名单: 项目根目录 + 配置的额外读取根目录。
+
+    v8.4.14: 修复 commonpath 同盘前缀漏洞（E:\anywhere 与 E:\agent 同盘前缀
+    会被误放行）→ is_relative_to 严格判定。
+    """
     try:
-        os.path.commonpath([str(full), str(PROJECT_ROOT.resolve())])
-        return True
+        if full.is_relative_to(PROJECT_ROOT.resolve()):
+            return True
     except ValueError:
         pass
     for root in getattr(settings, "FILE_READ_EXTRA_ROOTS", None) or []:
         try:
-            os.path.commonpath([str(full), str(Path(root).resolve())])
-            return True
+            if full.is_relative_to(Path(root).resolve()):
+                return True
         except ValueError:
             continue
     return False

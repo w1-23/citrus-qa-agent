@@ -93,7 +93,3 @@ def get_llm(
         return inst
 
 
-def clear_llm_pool() -> None:
-    """清空缓存（测试/热更新场景）。"""
-    with _lock:
-        _cache.clear()

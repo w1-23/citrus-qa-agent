@@ -138,11 +138,19 @@ def test_ag10_limits():
     huge.unlink()
 
     # v8.3.3: 项目目录外的绝对路径 → 拒绝
-    import tempfile
-    outside = Path(tempfile.mkdtemp()) / "out.csv"
-    outside.write_text("a,b\n1,2\n", encoding="utf-8")
-    r3 = statistical_analysis.func(str(outside), "descriptive", '{"value_column": "a"}')
-    check("项目外绝对路径 → [ERR_PERMISSION]", "[ERR_PERMISSION]" in r3, r3[:60])
+    # v8.4.14: 用工作区内、项目根外路径（沙箱下 TEMP 不可写，语义不变）
+    from src.config import PROJECT_ROOT
+    outside = PROJECT_ROOT.parent / f"outside_ag10_{uuid.uuid4().hex[:8]}.csv"
+    try:
+        outside.write_text("a,b\n1,2\n", encoding="utf-8")
+        r3 = statistical_analysis.func(str(outside), "descriptive", '{"value_column": "a"}')
+        check("项目外绝对路径 → [ERR_PERMISSION]", "[ERR_PERMISSION]" in r3, r3[:60])
+    finally:
+        # v8.4.14: 无论断言成败都清理残留文件（曾混入 git 提交）
+        try:
+            outside.unlink()
+        except Exception:
+            pass
 
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'tools', 'search.py'),
                encoding='utf-8').read()
@@ -209,11 +217,11 @@ def test_ag14_degraded_event():
 def test_ag5_ltm():
     print("[AG-5] LTM 来源标注/衰减/迁移")
     from src.guardrails.memory import MemoryStore
-    import tempfile, sqlite3
-    from pathlib import Path
+    import sqlite3
+    from _tmpenv import tmp_path
     from src.config import PROJECT_ROOT
 
-    tmp_db = Path(tempfile.mkdtemp()) / "sessions.db"
+    tmp_db = tmp_path("db")
     ms = MemoryStore()
     orig_path = str(PROJECT_ROOT / "state" / "sessions.db")
     import src.guardrails.memory as mem_mod

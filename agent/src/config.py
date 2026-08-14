@@ -39,31 +39,6 @@ def _yaml_val(*keys: str, default=None):
     return val if val is not None else default
 
 
-class FeatureFlags:
-    """特征标志系统 — 运行时动态开关实验性功能"""
-    _flags: Dict[str, bool] = {}
-
-    @classmethod
-    def load(cls, yaml_cfg: Dict[str, Any]):
-        raw = yaml_cfg.get("feature_flags", {}) if isinstance(yaml_cfg, dict) else {}
-        cls._flags = {k: bool(v) for k, v in raw.items()}
-
-    @classmethod
-    def is_enabled(cls, flag: str, default: bool = False) -> bool:
-        return cls._flags.get(flag, default)
-
-    @classmethod
-    def set_flag(cls, flag: str, value: bool):
-        cls._flags[flag] = value
-
-    @classmethod
-    def all_flags(cls) -> Dict[str, bool]:
-        return dict(cls._flags)
-
-# 加载特征标志（必须在 FeatureFlags 定义之后）
-FeatureFlags.load(_yaml_config)
-
-
 class Settings(BaseSettings):
     # v8.4.5: case_sensitive=False——兼容 Windows 上历史遗留的小写环境变量
     # （deepseek_api_key 等）。case_sensitive=True 在 pydantic-settings>=2.12
@@ -140,7 +115,7 @@ class Settings(BaseSettings):
     PERMISSION_WAIT_SEC: int = Field(default_factory=lambda: _yaml_val("permission", "wait_sec", default=90))
 
     # ── Version (v8.4.5: 版本单源——UI/健康检查/文档以此为准) ──
-    VERSION: str = "8.4.13"
+    VERSION: str = "8.4.14"
 
     # ── Context Engineering (阶段1: 静态前缀灰度开关) ──
     # true = SystemMessage 字节级稳定（format 指南/策略卡片/skills 移出前缀，
@@ -271,14 +246,8 @@ _available_models: Dict[str, str] = {
 }
 _current_model = settings.MAIN_MODEL
 
-def get_deepseek_client() -> OpenAI:
-    return OpenAI(api_key=settings.RESOLVED_MAIN_API_KEY, base_url=settings.MAIN_BASE_URL)
-
 def get_deepseek_model() -> str:
     return _current_model
-
-def get_available_models() -> dict:
-    return dict(_available_models)
 
 def switch_model(model_id: str) -> bool:
     global _current_model

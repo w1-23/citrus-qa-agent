@@ -25,7 +25,7 @@ from fastapi.responses import FileResponse
 from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel, Field
 
-from src.config import PROJECT_ROOT, settings, FeatureFlags
+from src.config import PROJECT_ROOT, settings
 from src.guardrails.memory import memory_store
 from src.session.manager import session_manager
 from src.logger import setup_logging
@@ -483,26 +483,9 @@ async def cancel_chat(req: CancelRequest):
     return {"status": "ok", "cancelled": cancelled, "count": len(cancelled)}
 
 
-@app.get("/api/v1/flags")
-async def get_flags():
-    return {"flags": FeatureFlags.all_flags()}
-
-
-@app.post("/api/v1/flags/toggle")
-async def toggle_flag(flag_name: str, value: bool):
-    if flag_name not in FeatureFlags.all_flags():
-        raise HTTPException(status_code=404, detail=f"Flag '{flag_name}' not found")
-    FeatureFlags.set_flag(flag_name, value)
-    return {"status": "ok", "flag": flag_name, "value": value}
-
-
-@app.get("/api/v1/memory/{session_id}")
-async def get_memory(session_id: str):
-    return {"status": "ok", "session_id": session_id[:8]}
-
-
-# v8.4.4: HITL 旧 stub 端点已删（/api/v1/hitl/pending|resolve 恒空）——
-# 权限确认由 /api/v2/permission/grant + 前端审批卡片承担
+# v8.4.14: 死端点已删——/api/v1/flags + /api/v1/flags/toggle（FeatureFlags 0 个开关）、
+# /api/v1/memory/{id}（恒返回固定值 stub）、/api/v1/hitl/*（v8.4.4 已删 stub）。
+# 权限确认由 /api/v2/permission/grant + 前端审批卡片承担。
 
 
 # ── v8.4.3 结构化权限确认（前端审批卡片闭环）──

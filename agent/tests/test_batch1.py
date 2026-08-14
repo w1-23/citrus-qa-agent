@@ -88,13 +88,13 @@ def test_ag3_early_compaction():
 def test_ag6_persistence_schema():
     print("[AG-6] replace_history 持久化接口")
     from src.session.manager import SessionManager
-    import tempfile, sqlite3, uuid
-    from pathlib import Path
+    import sqlite3, uuid
+    from _tmpenv import tmp_path
 
     sid = "test_" + uuid.uuid4().hex[:8]
-    tmp = Path(tempfile.mkdtemp()) / "sessions.db"
+    tmp = tmp_path("db")
     sm = SessionManager()
-    sm.db_path = str(tmp)  # 指向临时库
+    sm.db_path = str(tmp)  # 指向临时库（工作区内，沙箱可写）
     sm._init_db_sync()
 
     loop = asyncio.new_event_loop()

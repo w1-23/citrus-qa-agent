@@ -9,6 +9,7 @@
 import asyncio
 import os
 import sys
+from _tmpenv import tmp_path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -184,7 +185,7 @@ def test_history_filter_synth_instruction():
     from pathlib import Path
 
     sm = SessionManager()
-    tmp = Path(tempfile.mkdtemp()) / "sessions.db"
+    tmp = tmp_path("db")
     sm.db_path = str(tmp)
     sm._init_db_sync()
     sm._create_session_sync("sf4")
@@ -254,7 +255,7 @@ def test_permission_grant_flow():
     import sqlite3, tempfile
     from pathlib import Path
     sm = SessionManager()
-    tmp = Path(tempfile.mkdtemp()) / "sessions.db"
+    tmp = tmp_path("db")
     sm.db_path = str(tmp)
     sm._init_db_sync()
     sm._create_session_sync("perm-test")
@@ -306,7 +307,7 @@ def test_permission_wait_resume():
         import tempfile
         from pathlib import Path
         sm = SessionManager()
-        tmp = Path(tempfile.mkdtemp()) / "sessions.db"
+        tmp = tmp_path("db")
         sm.db_path = str(tmp)
         sm._init_db_sync()
         sm._create_session_sync("perm-wait-test")

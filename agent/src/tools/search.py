@@ -113,18 +113,6 @@ def _is_valid_web_result(r: dict) -> tuple[bool, str]:
 
     return True, "supplementary"
 
-def _filter_web_results(results: list[dict]) -> tuple[list[dict], list[dict]]:
-    primary, supplementary = [], []
-    for r in results:
-        valid, reason = _is_valid_web_result(r)
-        if not valid:
-            continue
-        if reason == "primary":
-            primary.append(r)
-        else:
-            supplementary.append(r)
-    return primary, supplementary
-
 def format_rag_context(results: list, source: str = "main") -> str:
 
     """Format RAG search results into readable context text.
@@ -563,7 +551,8 @@ def pdf_read(file_path: str, cross_reference: bool = True) -> tuple[str, dict]:
     else:
         workspace_root = (PROJECT_ROOT / "workspace").resolve()
         abs_path = str(Path(file_path).resolve())
-        if not abs_path.startswith(str(workspace_root)):
+        # v8.4.14: startswith 前缀无路径边界（workspace_evil 可绕过）→ is_relative_to
+        if not Path(abs_path).is_relative_to(workspace_root):
             return f"Access denied: 路径不在 workspace/ 内: {file_path}", {"pdf_data": None}
         resolved_path = abs_path
 

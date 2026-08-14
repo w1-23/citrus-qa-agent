@@ -44,23 +44,19 @@ def statistical_analysis(file_path: str, method: str, data_json: str, alpha: Opt
 
     p = Path(file_path)
     abs_path = p if p.is_absolute() else _WORKSPACE_ROOT / p
-    # v8.3.3 安全: 与 read_local_file 对称，绝对路径仅限项目根目录内（或配置的额外根）
+    # v8.3.3/v8.4.14 安全: 与 read_local_file 对称，绝对路径仅限项目根目录内（或配置的额外根）
+    # v8.4.14: 修复 commonpath 同盘前缀漏洞——E:\anywhere 与 E:\agent 同盘前缀
+    # 会被放行；改用 is_relative_to 严格判定
     try:
         abs_path = abs_path.resolve()
         if p.is_absolute():
-            try:
-                os.path.commonpath([str(abs_path), str(PROJECT_ROOT.resolve())])
-            except ValueError:
-                allowed = False
-                for root in getattr(settings, "FILE_READ_EXTRA_ROOTS", None) or []:
-                    try:
-                        os.path.commonpath([str(abs_path), str(Path(root).resolve())])
-                        allowed = True
-                        break
-                    except ValueError:
-                        continue
-                if not allowed:
-                    return f"[ERR_PERMISSION] 拒绝读取项目目录外的文件: {file_path}"
+            proj = PROJECT_ROOT.resolve()
+            in_project = abs_path.is_relative_to(proj)
+            in_extra = any(
+                abs_path.is_relative_to(Path(r).resolve())
+                for r in getattr(settings, "FILE_READ_EXTRA_ROOTS", None) or [])
+            if not in_project and not in_extra:
+                return f"[ERR_PERMISSION] 拒绝读取项目目录外的文件: {file_path}"
     except ValueError:
         return f"[ERR_PERMISSION] 拒绝读取项目目录外的文件: {file_path}"
     if not abs_path.exists():

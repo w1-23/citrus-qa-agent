@@ -12,10 +12,6 @@ import threading
 _GPU_LOCK = threading.Lock()
 
 
-def acquire_gpu():
-    """Acquire the global GPU lock. Call before any ONNX DML inference."""
-    _GPU_LOCK.acquire()
-
 
 def release_gpu():
     """Release the global GPU lock. Call after ONNX DML inference completes."""

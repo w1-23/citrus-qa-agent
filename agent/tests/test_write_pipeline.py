@@ -418,10 +418,6 @@ def test_evidence_fidelity():
 def test_unify_references():
     import re
     print("[引用统一] v8.4.1 分章引用 → 文末全局合并")
-    import tempfile
-    from pathlib import Path
-
-    tmp_dir = Path(tempfile.mkdtemp())
     out_path = f"unify_test_{uuid.uuid4().hex[:6]}.md"
     target = wp._WORKSPACE_ROOT / out_path
     sample = (

@@ -295,12 +295,6 @@ def build_human_message(
     """Standalone function to build a standard HumanMessage from a LoadedContext."""
     blocks: list[str] = []
 
-    if ctx.history_summary:
-        blocks.append(
-            f"<conversation_summary>\n{ctx.history_summary}\n"
-            f"</conversation_summary>"
-        )
-
     if ctx.long_term_memory:
         blocks.append(
             f"<long_term_memory>\n{ctx.long_term_memory}\n"

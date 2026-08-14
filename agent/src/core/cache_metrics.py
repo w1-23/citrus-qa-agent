@@ -96,23 +96,6 @@ def _record(source: str, cache_hit: int, cache_miss: int) -> None:
             )
 
 
-def cache_stats() -> dict:
-    """累计统计快照（测试/诊断用）。"""
-    with _lock:
-        snapshot = {
-            k: dict(v) for k, v in _agg.items()
-        }
-    total_hit = sum(e["hit"] for e in snapshot.values())
-    total_miss = sum(e["miss"] for e in snapshot.values())
-    denom = total_hit + total_miss
-    snapshot["__total__"] = {
-        "hit": total_hit,
-        "miss": total_miss,
-        "calls": _global_calls,
-        "hit_ratio": (total_hit / denom) if denom else 0.0,
-    }
-    return snapshot
-
 
 def reset_cache_stats() -> None:
     global _agg, _global_calls

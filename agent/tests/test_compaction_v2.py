@@ -2,6 +2,7 @@
 import asyncio
 import sys
 import os
+from _tmpenv import tmp_path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -36,7 +37,7 @@ def test_checkpoint_persistence_append_only():
     from pathlib import Path
 
     sid = "cp_" + uuid.uuid4().hex[:8]
-    tmp = Path(tempfile.mkdtemp()) / "sessions.db"
+    tmp = tmp_path("db")
     sm = SessionManager()
     sm.db_path = str(tmp)
     sm._init_db_sync()
