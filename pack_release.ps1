@@ -64,10 +64,15 @@ foreach ($f in @('README.md', 'LICENSE', 'requirements.txt', 'run.ps1', '.gitign
     if (Test-Path $src) { Copy-Item -Force $src (Join-Path $Stage $f) }
 }
 
-# ── 打 zip ──
+# ── 打 zip（v8.5.0: 改用 .NET ZipFile——PS5.1 的 Compress-Archive 对 2GB+
+#    模型文件 Optimal 压缩极慢/失败；模型权重高熵压缩率低，整体 NoCompression
+#    秒级完成，体积差别可忽略）──
 New-Item -ItemType Directory -Force -Path $Dist | Out-Null
 if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
-Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $ZipPath -CompressionLevel Optimal
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+[System.IO.Compression.ZipFile]::CreateFromDirectory(
+    $Stage, $ZipPath,
+    [System.IO.Compression.CompressionLevel]::NoCompression, $false)
 $sizeMB = [Math]::Round((Get-Item $ZipPath).Length / 1MB, 1)
 Remove-Item -Recurse -Force $Stage
 
