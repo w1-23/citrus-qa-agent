@@ -65,10 +65,17 @@ if ($IncludeModels) {
 if ($IncludeData) {
     if (Test-Path $DataDir) {
         Write-Host "附带示例语料 (data/, 用户公开文献批次) ..." -ForegroundColor Cyan
-        Copy-Item -Recurse -Force $DataDir (Join-Path $StageAgent 'data')
-        # 清理 qdrant 锁文件（打包后解压不被锁误判）
-        Get-ChildItem -Path (Join-Path $StageAgent 'data') -Recurse -Filter '*.lock' -ErrorAction SilentlyContinue |
+        $DataStage = Join-Path $StageAgent 'data'
+        # PS 5.1 Copy-Item 目录语义：目标已存在会再套一层（data\data 嵌套 bug）
+        if (Test-Path $DataStage) { Remove-Item -Recurse -Force $DataStage }
+        Copy-Item -Recurse -Force $DataDir $DataStage
+        Get-ChildItem -Path $DataStage -Recurse -Filter '*.lock' -ErrorAction SilentlyContinue |
             Remove-Item -Force -ErrorAction SilentlyContinue
+        if (Test-Path (Join-Path $DataStage 'data')) {
+            Write-Host "⚠ 检测到 data\data 嵌套，修正..." -ForegroundColor Yellow
+            Get-ChildItem -Path (Join-Path $DataStage 'data') | Copy-Item -Destination $DataStage -Recurse -Force
+            Remove-Item -Recurse -Force (Join-Path $DataStage 'data')
+        }
     } else {
         Write-Host "⚠ agent/data 不存在，跳过语料" -ForegroundColor Yellow
     }
