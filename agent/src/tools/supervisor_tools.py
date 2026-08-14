@@ -99,8 +99,8 @@ _SUPERVISOR_TOOL_SCHEMAS = [
                            "PDFs default to first 30000 chars (~8-12 pages). "
                            "For full PDF text, set max_chars=0. "
                            "Use FIRST when user asks to read/open/view a local file. "
-                           "Absolute paths (e.g. E:/data/paper.pdf) work for files anywhere. "
-                           "Relative paths resolve from workspace/. "
+                           "Absolute paths resolve under the project directory; "
+                           "relative paths resolve from workspace/. "
                            "For academic paper content extraction, prefer pdf_read.",
             "parameters": {
                 "type": "object",

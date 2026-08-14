@@ -228,8 +228,12 @@ async def _execute_tool_call(tc: dict, tc_id: str = "", material_pack: list | No
                 if content:
                     skill_parts.append(f"## Skill: {meta.get('name', skill_id)}\n\n{content}")
             if skill_parts:
-                skill_prompt = "\n\n---\n\n".join(skill_parts)
-                logger.info(f"[ExpertGraph] matched {len(skill_parts)} skills for write-agent")
+                # v8.4.5: 与 plan_execute 的 _format_skill_block 一致——前 3 块 ≤4000 字符
+                skill_blocks = [b.strip() for b in
+                                "\n\n---\n\n".join(skill_parts).split("\n---\n") if b.strip()]
+                skill_prompt = "\n---\n".join(skill_blocks[:3])[:4000]
+                logger.info(f"[ExpertGraph] matched {len(skill_parts)} skills for write-agent "
+                            f"(injected {len(skill_blocks[:3])} blocks, {len(skill_prompt)} chars)")
         except Exception as e:
             logger.warning(f"[ExpertGraph] skill match failed: {e}")
 
@@ -249,6 +253,12 @@ async def _execute_tool_call(tc: dict, tc_id: str = "", material_pack: list | No
             logger.info(f"[ExpertGraph] direct write: context_head={context[:120]!r} ...")
             from src.tools.file_ops import write_local_file
             save_path = task["output_path"]
+            # v8.4.5: 直写快捷路径同样经过沙箱/权限判定（deny/ask 语义一致）
+            from src.tools.registry import _check_tool_sandbox
+            reject = await _check_tool_sandbox("write_local_file", {"path": save_path})
+            if reject:
+                return {"agent": "write-agent", "result": reject, "artifacts": {},
+                        "tools_called": 0}
             save_msg = write_local_file.func(save_path, context, "write")
             logger.info(f"[ExpertGraph] direct write (context={len(context)}chars): {save_msg}")
             result = {"agent": "write-agent", "result": f"已保存到 {save_path}", "artifacts": {},
@@ -260,7 +270,9 @@ async def _execute_tool_call(tc: dict, tc_id: str = "", material_pack: list | No
             target = (PROJECT_ROOT / "workspace" / "output" / task["output_path"]).resolve() \
                 if task["output_path"] else None
             file_exists = bool(target and target.exists())
-            cls = classify_write_task(task.get("goal", ""), context, file_exists)
+            # v8.4.5: LLM 分类走线程池，避免同步 invoke 阻塞事件循环
+            cls = await asyncio.to_thread(
+                classify_write_task, task.get("goal", ""), context, file_exists)
             if cls["mode"] == "plan_execute" and len(pack) >= 1:
                 # v8.4.3: 写作 skill 注入流水线（此前只进 ReAct 回退路径——
                 # plan_execute 主路径"匹配了但没用上"）
@@ -756,12 +768,21 @@ async def supervisor_node(state: AgentState) -> dict:
                     path = str(args.get("path", "")).strip()
                     content = str(args.get("content", ""))
                     mode = str(args.get("mode", "write") or "write")
-                    save_msg = await asyncio.to_thread(
-                        write_local_file.func, path, content, mode,
-                    )
-                    sub_result = {"agent": "write_local_file", "result": save_msg, "artifacts": {}}
+                    # v8.4.5: 直写路径同样经过沙箱/权限判定（deny/ask 语义与子代理一致）
+                    from src.tools.registry import _check_tool_sandbox
+                    reject = await _check_tool_sandbox("write_local_file", args)
+                    if reject:
+                        sub_result = {"agent": "write_local_file", "result": reject,
+                                      "artifacts": {}}
+                    else:
+                        save_msg = await asyncio.to_thread(
+                            write_local_file.func, path, content, mode,
+                        )
+                        sub_result = {"agent": "write_local_file", "result": save_msg,
+                                      "artifacts": {}}
                     try:
-                        emit_tool_result("write_local_file", save_msg[:100000], tc_id,
+                        emit_tool_result("write_local_file", str(sub_result.get("result", ""))[:100000],
+                                         tc_id,
                                          summary=f"保存完成 ({len(content)} 字符)")
                     except Exception:
                         pass
@@ -838,10 +859,11 @@ async def supervisor_node(state: AgentState) -> dict:
                     if q:
                         used_queries.append(q[:80])
                 # v8.3.5 轻量熔断 (规范 1.2.2 Correct): 连续工具失败 ≥3 → 强制收尾
+                # v8.4.5: [ERR_HITL_REJECT] 是权限待授权而非工具失败，不计入熔断计数
                 rtext = sub_result.get("result", "") or ""
                 is_fail = (rtext.startswith("[Error")
                            or "[ERR_TIMEOUT]" in rtext or "[ERR_NETWORK]" in rtext
-                           or "[ERR_HITL_REJECT]" in rtext or "[AgentError]" in rtext)
+                           or "[AgentError]" in rtext)
                 consecutive_failures = consecutive_failures + 1 if is_fail else 0
                 if consecutive_failures >= 3:
                     logger.error(f"[ExpertGraph:supervisor] 连续 {consecutive_failures} 次工具失败，"

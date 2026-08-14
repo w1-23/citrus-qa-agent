@@ -160,6 +160,7 @@ context:
 permission:
   mode: auto_workspace          # ask=危险操作弹卡片审批 | auto_workspace=workspace/output 下写文件免询问 |
                                 # deny=一律拒绝危险操作
+  wait_sec: 90                  # v8.4.5: ask 模式授权等待秒数（卡片未回应则超时按拒绝处理）
 
 # ── Fast Guard v8.1.1 ──
 guard:

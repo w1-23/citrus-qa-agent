@@ -34,7 +34,8 @@ class FakeLLM:
         self._responses = list(responses)
         self.calls = 0
 
-    async def ainvoke(self, messages):
+    async def ainvoke(self, messages, **kwargs):
+        # v8.4.5: 接受 max_tokens 等调用参数（react_fallback 传 max_tokens=8000）
         self.calls += 1
         if self._responses:
             return FakeResp(self._responses.pop(0))

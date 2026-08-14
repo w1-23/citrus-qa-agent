@@ -25,9 +25,14 @@ def _get_logger() -> logging.Logger:
     global _logger
     if _logger is not None:
         return _logger
+    import os
+    from pathlib import Path
     from src.config import PROJECT_ROOT
 
-    log_dir = PROJECT_ROOT / "logs"
+    # v8.4.5: 与 agent.log 一致——CITRUS_LOG_DIR 覆盖日志目录（测试独立 sink，
+    # 防测试帧污染生产 business.log）
+    override = os.environ.get("CITRUS_LOG_DIR", "").strip()
+    log_dir = Path(override) if override else PROJECT_ROOT / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
     biz = logging.getLogger("business")

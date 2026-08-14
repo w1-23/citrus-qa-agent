@@ -471,14 +471,6 @@ class MultiBatchRetriever:
             except Exception as e: logger.warning(f"Count failed for {coll_name}: {e}")
         return total
 
-    def close(self):
-        """常驻服务不重置单例状态，仅释放文件句柄防死锁"""
-        logger.info("[MultiBatchRetriever] 释放 Qdrant 客户端句柄...")
-        for batch_name, (client, _) in self.batches.items():
-            try: client.close()
-            except Exception as e: logger.warning(f"Close failed for {batch_name}: {e}")
-        logger.info("[MultiBatchRetriever] 句柄已释放（单例保持活跃）")
-
     @classmethod
     def _reset_singleton_for_testing(cls):
         """仅限单元测试隔离使用，生产环境严禁调用"""

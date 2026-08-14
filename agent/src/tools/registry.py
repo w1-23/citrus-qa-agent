@@ -21,6 +21,21 @@ OFFLOAD_DIR = Path(settings.WORKSPACE_DIR) / "tmp"
 
 _offload_created_files: list[Path] = []
 
+# v8.4.5: ask 模式授权等待——权限拒绝时工具执行挂起等待前端卡片授权，
+# 授权到达后在同一执行内继续（不再要求用户整轮重跑）。
+_pending_permission_events: dict = {}
+
+
+def signal_permission_granted(session_id: str, tool_name: str) -> None:
+    """授权到达后唤醒对应挂起事件（由 /api/v2/permission/grant 端点调用）。"""
+    for key in (f"{session_id}|{tool_name}", f"{session_id}|*"):
+        ev = _pending_permission_events.pop(key, None)
+        if ev is not None:
+            try:
+                ev.set()
+            except Exception:
+                pass
+
 
 @dataclass
 class ToolSpec:
@@ -53,7 +68,8 @@ def _classify_error(e: Exception) -> str:
     if isinstance(e, FileNotFoundError):
         return f"[ERR_FILE_NOT_FOUND] 文件不存在: {e.filename}。建议: 检查路径拼写与文件位置"
     if isinstance(e, PermissionError):
-        return f"[ERR_HITL_REJECT] 权限不足: {e}。建议: 检查文件权限或改用工作区内路径"
+        # v8.4.5: 操作系统权限错误与 HITL 拒绝区分（[ERR_PERMISSION] vs [ERR_HITL_REJECT]）
+        return f"[ERR_PERMISSION] 权限不足: {e}。建议: 检查文件权限或改用工作区内路径"
     if isinstance(e, (asyncio.TimeoutError, TimeoutError)):
         return f"[ERR_NETWORK] 请求超时: {e}。建议: 稍后重试或改用本地源"
     msg = str(e)
@@ -184,6 +200,27 @@ async def _check_tool_sandbox(tool_name: str, args: dict) -> Optional[str]:
                     "tool_name": tool_name,
                     "args": {k: str(v)[:200] for k, v in (args or {}).items()},
                 })
+            except Exception:
+                pass
+            # v8.4.5: 挂起等待授权（授权后同一执行内继续；超时按拒绝处理）
+            try:
+                from src.core.tracing import get_session_id as _get_sid
+                sid = _get_sid()
+                wait_key = f"{sid}|{tool_name}"
+                ev = asyncio.Event()
+                _pending_permission_events[wait_key] = ev
+                try:
+                    await asyncio.wait_for(ev.wait(), timeout=settings.PERMISSION_WAIT_SEC)
+                    granted = await asyncio.to_thread(
+                        session_manager.consume_grant, sid, tool_name, path)
+                    if granted:
+                        logger.info(f"[Sandbox] 权限已授权，同执行内继续: tool={tool_name}")
+                        return None
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"[Sandbox] 权限等待超时({settings.PERMISSION_WAIT_SEC}s): {tool_name}")
+                finally:
+                    _pending_permission_events.pop(wait_key, None)
             except Exception:
                 pass
             return (f"[ERR_HITL_REJECT] 权限未授权: 工具 {tool_name} "

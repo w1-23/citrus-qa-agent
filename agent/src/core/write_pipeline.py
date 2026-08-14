@@ -47,12 +47,15 @@ _WRITE_SYSTEM_PROMPT = (
 )
 
 
-def _call_llm(llm, prompt: str):
+def _call_llm(llm, prompt: str, max_tokens=None):
     """[System(固定) + Human(动态)] 消息结构统一入口。"""
+    kw = {}
+    if max_tokens:
+        kw["max_tokens"] = max_tokens
     return llm.ainvoke([
         SystemMessage(content=_WRITE_SYSTEM_PROMPT),
         HumanMessage(content=prompt),
-    ])
+    ], **kw)
 
 # ─────────────────────────────────────────────
 # 1. 写任务分类（四路路由）
@@ -271,11 +274,13 @@ async def _react_fallback_write(llm, goal: str, plan_text: str, material_pack: l
               f"参考大纲（用于结构参考）:\n{plan_text[:2000]}\n\n"
               f"检索材料:\n{_format_material_pack(material_pack, max_entries=25)}\n"
               f"{_format_skill_block(skill_prompt)}"
-              f"要求: 一次输出完整 Markdown 文档（# 标题 + 摘要 + 分章节），"
-              f"控制在 3000 字以内，宁精勿滥。")
+              f"要求: 一次输出完整 Markdown 文档（# 标题 + 摘要 + 分章节）。"
+              f"长度不限、不要省略章节与证据细节——系统会自动分块写盘，"
+              f"无需自行压缩篇幅。")
     try:
-        resp = await asyncio.wait_for(_call_llm(llm, prompt),
-                                      timeout=settings.PIPELINE_SECTION_TIMEOUT * 3)
+        resp = await asyncio.wait_for(
+            _call_llm(llm, prompt, max_tokens=8000),
+            timeout=settings.PIPELINE_SECTION_TIMEOUT * 3)
         content, _ = extract_summary((resp.content or "").strip())
     except Exception as e:
         logger.warning(f"[WritePipeline] react_fallback LLM failed: {e}")

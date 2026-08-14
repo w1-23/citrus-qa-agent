@@ -229,6 +229,9 @@ def test_permission_grant_flow():
 
     # ask: 无授权拒绝；workspace 授权后放行；once 授权消费
     settings.PERMISSION_MODE = "ask"
+    # v8.4.5: ask 模式默认等待授权 90s——测试缩短等待窗口，避免用例挂起
+    _orig_wait = settings.PERMISSION_WAIT_SEC
+    settings.PERMISSION_WAIT_SEC = 0.2
     from src.session.manager import session_manager
     import sqlite3, tempfile
     from pathlib import Path
@@ -263,7 +266,58 @@ def test_permission_grant_flow():
         "write_local_file", {"path": "E:/outside/x.md"}))
     check("session 范围不跨会话", r8 is not None, repr(r8))
     sm._clear_session_sync("perm-test")
+    settings.PERMISSION_MODE = "auto_workspace"
+    settings.PERMISSION_WAIT_SEC = _orig_wait
     loop.close()
+
+
+def test_permission_wait_resume():
+    """v8.4.5: ask 模式授权等待——授权到达后同一执行内恢复（无需整轮重跑）。"""
+    print("[SF-6b] ask 授权等待/唤醒（同执行内恢复）")
+    import asyncio as _asyncio
+    from src.tools.registry import _check_tool_sandbox, signal_permission_granted
+    from src.config import settings
+    from src.session.manager import SessionManager
+    from src.core import tracing
+
+    _orig_mode = settings.PERMISSION_MODE
+    _orig_wait = settings.PERMISSION_WAIT_SEC
+    try:
+        settings.PERMISSION_MODE = "ask"
+        settings.PERMISSION_WAIT_SEC = 5
+        import tempfile
+        from pathlib import Path
+        sm = SessionManager()
+        tmp = Path(tempfile.mkdtemp()) / "sessions.db"
+        sm.db_path = str(tmp)
+        sm._init_db_sync()
+        sm._create_session_sync("perm-wait-test")
+
+        loop = _asyncio.new_event_loop()
+        try:
+            async def _grant_later():
+                await _asyncio.sleep(0.3)
+                sm.grant_permission("perm-wait-test", "write_local_file", "once")
+                signal_permission_granted("perm-wait-test", "write_local_file")
+
+            async def _main():
+                tracing.set_session_id("perm-wait-test")
+                waiter = _asyncio.create_task(
+                    _check_tool_sandbox("write_local_file", {"path": "a.md"}))
+                granter = _asyncio.create_task(_grant_later())
+                result = await waiter
+                await granter
+                return result
+
+            r = loop.run_until_complete(_main())
+        finally:
+            loop.close()
+        check("授权到达后同执行内放行", r is None, repr(r))
+        sm._clear_session_sync("perm-wait-test")
+    finally:
+        settings.PERMISSION_MODE = _orig_mode
+        settings.PERMISSION_WAIT_SEC = _orig_wait
+        tracing.set_session_id("")
 
 
 def test_offload_cleanup():

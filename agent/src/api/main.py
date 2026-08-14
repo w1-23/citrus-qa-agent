@@ -105,7 +105,8 @@ async def lifespan(app: FastAPI):
     logger.info("[Lifespan] shutdown complete")
 
 
-app = FastAPI(title="Citrus QA Agent v8.3", version="8.3.3", lifespan=lifespan)
+# v8.4.5: 版本单源（settings.VERSION）——UI/健康检查/API 元数据共用
+app = FastAPI(title=f"Citrus QA Agent v{settings.VERSION}", version=settings.VERSION, lifespan=lifespan)
 # v8.3.3: 无 Cookie 鉴权场景下不允许 "*" + credentials 组合（浏览器规范拒绝），仅开 Origin
 app.add_middleware(
     CORSMiddleware,
@@ -462,7 +463,10 @@ class GrantRequest(BaseModel):
 
 @app.post("/api/v2/permission/grant")
 async def permission_grant(req: GrantRequest):
-    """授权工具调用（once/session/workspace 范围）。授权不写入对话历史。"""
+    """授权工具调用（once/session/workspace 范围）。授权不写入对话历史。
+
+    v8.4.5: 授权后唤醒 ask 模式下挂起的工具执行（同一执行内继续，无需整轮重跑）。
+    """
     if req.scope not in ("once", "session", "workspace"):
         raise HTTPException(status_code=400, detail=f"scope 必须为 once/session/workspace，got {req.scope}")
     ok = await asyncio.to_thread(
@@ -470,6 +474,11 @@ async def permission_grant(req: GrantRequest):
         req.session_id, req.tool_name, req.scope)
     if not ok:
         raise HTTPException(status_code=500, detail="授权记录失败")
+    try:
+        from src.tools.registry import signal_permission_granted
+        signal_permission_granted(req.session_id or "", req.tool_name)
+    except Exception:
+        pass
     return {"status": "ok", "tool_name": req.tool_name, "scope": req.scope}
 
 
@@ -478,6 +487,7 @@ async def permission_grant(req: GrantRequest):
 @app.get("/api/v2/config")
 async def runtime_config():
     return {
+        "version": settings.VERSION,
         "context": {
             "max_tokens": settings.CONTEXT_BUDGET_MAX_TOKENS,
             "soft_threshold": settings.CONTEXT_BUDGET_SOFT_THRESHOLD,
@@ -501,7 +511,7 @@ async def serve_frontend():
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "version": "8.3.3"}
+    return {"status": "ok", "version": settings.VERSION}
 
 
 @app.post("/api/v1/session/{session_id}/clear")

@@ -76,6 +76,17 @@ def _tc_id(tc) -> str:
     return getattr(tc, "id", "") or str(uuid.uuid4())
 
 
+def _last_content_fallback(messages: list) -> str:
+    """收尾空答兜底（v8.4.5）：优先最后 AIMessage.content，其次任意非系统消息内容。"""
+    for m in reversed(messages):
+        if isinstance(m, AIMessage) and getattr(m, "content", None):
+            return m.content
+    for m in reversed(messages):
+        if not isinstance(m, SystemMessage) and getattr(m, "content", None):
+            return str(m.content)
+    return ""
+
+
 async def run_agent(
     agent_name: str,
     task: dict,
@@ -351,16 +362,17 @@ async def run_agent(
                     "If information is insufficient, state what is missing."
                 )
             # v8.4.3: 收尾消息不写入 messages（临时列表），避免进 turn_trace/历史
+            # v8.4.5: 收尾用未绑工具客户端 llm_base（与 expert/light 一致，杜绝
+            # 收尾再发 tool_calls 导致空回执）；空答兜底取最后 AIMessage.content
             try:
-                final_resp = await llm_with_tools.ainvoke(
+                final_resp = await llm_base.ainvoke(
                     messages + [HumanMessage(content=final_prompt)])
-                if final_resp.content:
+                if final_resp is not None and getattr(final_resp, "content", None):
                     result_content = final_resp.content
+                if not result_content:
+                    result_content = _last_content_fallback(messages)
             except Exception:
-                for m in reversed(messages):
-                    if hasattr(m, "content") and m.content and not isinstance(m, SystemMessage):
-                        result_content = m.content
-                        break
+                result_content = _last_content_fallback(messages)
 
     total_time = (time.perf_counter() - t_start) * 1000
 

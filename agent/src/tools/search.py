@@ -127,21 +127,43 @@ def _filter_web_results(results: list[dict]) -> tuple[list[dict], list[dict]]:
 
 def format_rag_context(results: list, source: str = "main") -> str:
 
-    """Format RAG search results into readable context text."""
+    """Format RAG search results into readable context text.
+
+    v8.4.5 证据保真: 每条附带 chunk 正文（text 优先、摘要次之）——
+    回答生成直接依赖这里的事实细节（机制/基因/数值）。单条 1000 字符、
+    总量 11000 字符预算（严格低于 15000 卸载阈值: retrieve-agent 无
+    read 工具，一旦卸载即丢证据），截断透明标记。
+    """
 
     if not results:
 
         return "未检索到相关文献。"
 
-    return (f"检索到 {len(results)} 条{'文献' if source == 'main' else '互联网资讯'}。\n"
-
-            + "\n".join(
-
-                f"- {r.get('title', '?')} (DOI: {r.get('doi', '?')}, 信心度: {r.get('score', 0):.2f})"
-
-                for r in results[:10]
-
-            ))
+    lines = [f"检索到 {len(results)} 条{'文献' if source == 'main' else '互联网资讯'}。"]
+    total = 0
+    shown = 0
+    for r in results[:10]:
+        text = str(r.get("text") or "").strip()
+        if not text:
+            text = str(r.get("abstract") or r.get("snippet") or "")
+        if text:
+            if len(text) > 1000:
+                text = text[:1000] + f" [已截断: 原文 {len(text)} 字符]"
+        item = (
+            f"- 标题: {r.get('title', '?')}\n"
+            f"  作者: {r.get('authors', 'N/A')}  年份: {r.get('year', 'N/A')}\n"
+            f"  DOI: {r.get('doi', 'N/A')}  信心度: {(r.get('score') or r.get('rerank_score') or 0):.2f}"
+        )
+        if text:
+            item += f"\n  证据: {text}"
+        if total + len(item) > 11000:
+            break
+        lines.append(item)
+        total += len(item)
+        shown += 1
+    if shown < len(results[:10]):
+        lines.append(f"[总量预算 11000 字符，剩余 {len(results[:10]) - shown} 条未展示]")
+    return "\n".join(lines)
 
 # ── Shared helpers ────────────────────────────
 

@@ -65,11 +65,14 @@ FeatureFlags.load(_yaml_config)
 
 
 class Settings(BaseSettings):
+    # v8.4.5: case_sensitive=False——兼容 Windows 上历史遗留的小写环境变量
+    # （deepseek_api_key 等）。case_sensitive=True 在 pydantic-settings>=2.12
+    # 下会把大小写不匹配的 env 键判为 extra 并拒绝启动（跨版本兼容性修复）。
     model_config = SettingsConfigDict(
         env_file=str(PROJECT_ROOT / ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
-        case_sensitive=True
+        case_sensitive=False
     )
 
     # 1. API Keys
@@ -133,6 +136,11 @@ class Settings(BaseSettings):
 
     # ── Permission (v8.4.3 结构化权限确认) ──
     PERMISSION_MODE: str = Field(default_factory=lambda: _yaml_val("permission", "mode", default="auto_workspace"))
+    # v8.4.5: ask 模式授权等待秒数（前端卡片未回应时超时按拒绝处理）
+    PERMISSION_WAIT_SEC: int = Field(default_factory=lambda: _yaml_val("permission", "wait_sec", default=90))
+
+    # ── Version (v8.4.5: 版本单源——UI/健康检查/文档以此为准) ──
+    VERSION: str = "8.4.5"
 
     # ── Context Engineering (阶段1: 静态前缀灰度开关) ──
     # true = SystemMessage 字节级稳定（format 指南/策略卡片/skills 移出前缀，
