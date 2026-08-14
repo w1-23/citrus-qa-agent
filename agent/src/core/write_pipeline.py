@@ -255,11 +255,12 @@ async def run_stage1_plan(llm, material_pack: list[dict], target_chars: int) -> 
 
 
 async def _react_fallback_write(llm, goal: str, plan_text: str, material_pack: list[dict],
-                                output_path: str, gap: bool) -> dict:
+                                output_path: str, gap: bool, skill_prompt: str = "") -> dict:
     """Plan 失败回退: 带大纲一次性生成全文并落盘（v8.3.3）。
 
     单次 LLM 调用；内容超单章容量时按 ## 章节切块 write+append 分批写盘。
     LLM 也失败 → 返回提示文本（兜底告知 supervisor）。
+    v8.4.4: 注入写作 skill（追加语义，不影响静态缓存）。
     """
     if not output_path:
         return {"result": f"[plan_failed] 大纲生成失败，已回退常规写作。\n{plan_text[:500]}",
@@ -269,6 +270,7 @@ async def _react_fallback_write(llm, goal: str, plan_text: str, material_pack: l
     prompt = (f"{prompt_file}\n\n---\n任务: 撰写完整文档 — {goal[:300]}\n"
               f"参考大纲（用于结构参考）:\n{plan_text[:2000]}\n\n"
               f"检索材料:\n{_format_material_pack(material_pack, max_entries=25)}\n"
+              f"{_format_skill_block(skill_prompt)}"
               f"要求: 一次输出完整 Markdown 文档（# 标题 + 摘要 + 分章节），"
               f"控制在 3000 字以内，宁精勿滥。")
     try:
@@ -595,6 +597,15 @@ def _extract_material_subsets(plan_section: dict, material_pack: list[dict]) -> 
     return out
 
 
+def _format_skill_block(skill_prompt: str) -> str:
+    """写作 skill 注入块（v8.4.3/8.4.4）: 前 3 块、≤4000 字符（控制单章 prompt 成本）。"""
+    if not skill_prompt:
+        return ""
+    blocks = [b.strip() for b in skill_prompt.split("\n---\n") if b.strip()]
+    picked = "\n---\n".join(blocks[:3])[:4000]
+    return f"\n\n## 写作技能参考\n{picked}"
+
+
 def _build_section_prompt(plan: dict, idx: int, section: dict, running_context: str,
                           material_pack: list[dict], skill_prompt: str = "") -> str:
     prompt_file = _read_prompt("write-section.md")
@@ -604,13 +615,7 @@ def _build_section_prompt(plan: dict, idx: int, section: dict, running_context: 
         "all_headings": [s.get("heading", "") for s in plan.get("sections", [])],
     }
     material = _extract_material_subsets(section, material_pack)
-    # v8.4.3: 写作 skill 注入（段落骨架/风格参考，追加语义不影响静态缓存）
-    skill_block = ""
-    if skill_prompt:
-        # 取前 3 个 skill 块、≤4000 字符（控制单章 prompt 成本）
-        blocks = [b.strip() for b in skill_prompt.split("\n---\n") if b.strip()]
-        picked = "\n---\n".join(blocks[:3])[:4000]
-        skill_block = f"\n\n## 写作技能参考\n{picked}"
+    skill_block = _format_skill_block(skill_prompt)
     return (f"{prompt_file}\n\n---\n"
             f"全文大纲: {json.dumps(outline_summary, ensure_ascii=False)[:400]}\n"
             f"已完成章节概要: {running_context[:500] or '(本文第一章)'}\n"
@@ -942,7 +947,7 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
     if plan is None:
         # ReAct 回退: 带大纲一次性生成全文并落盘（材料已在 pack，单次调用成本可控）
         return await _react_fallback_write(llm, goal, plan_text, material_pack,
-                                           output_path, gap)
+                                           output_path, gap, skill_prompt=skill_prompt)
 
     # v8.3.7: output_path 缺失兜底——supervisor 可能不传路径（LLM 漏参），
     # 此时路径解析会落到 workspace/output 目录本身 → os.replace 覆盖目录失败。

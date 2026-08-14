@@ -116,19 +116,10 @@ agent:
   tool_exec_timeout_sec: 60   # 单工具执行超时（修复 AG-7）
   tool_result_caps:           # 子Agent→supervisor 分档截断（字符）
     write-agent: 1000
-    retrieve-agent: 15000
+    retrieve-agent: 40000
     analyze-agent: 10000
     default: 100000
 
-route:                        # 服务端路由兜底（修复 AG-12）
-  enabled: true
-  simple_max_len: 25
-  complex_keywords: [综述, 设计, 对比, 分析, 验证, 比较, 写的实验方案, 的论文]
-```
-
-完整参数清单见 `TUNE_PARAMS.md`；模型分工见 `MODEL_ROUTING.md`。
-
----
 
 ## 测试与回归（脚本归档于 `agent/tests/`）
 

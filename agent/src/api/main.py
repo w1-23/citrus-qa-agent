@@ -44,10 +44,21 @@ FAST_GUARD_PATTERNS: set[str] = {
 
 
 def _is_fast_guard_hit(query: str) -> bool:
-    cleaned = query.strip().lower()
-    if len(cleaned) > 12:
-        return False
-    return cleaned in FAST_GUARD_PATTERNS
+    """v8.4.4: 去掉 12 字符长度门槛（"what can you do" 15 字符曾永不命中）——
+    问候语归一化后精确/前缀匹配；带问候+科研问句的复合输入仍走完整链路。"""
+    cleaned = " ".join(query.strip().lower().split())
+    if cleaned in FAST_GUARD_PATTERNS:
+        return True
+    _CHITCHAT_TAIL = {"", "啊", "呀", "哈", "呢", "嘛", "!", "！", "~", "～", "！", "，", ","}
+    for pat in ("你好", "您好", "hello", "hi", "hey", "在吗", "谢谢",
+                "thanks", "再见", "拜拜", "晚安", "早安"):
+        if cleaned == pat:
+            return True
+        if cleaned.startswith(pat):
+            rest = cleaned[len(pat):].lstrip(" ，,。.")
+            if rest in _CHITCHAT_TAIL:
+                return True
+    return False
 
 
 def _fast_guard_reply(query: str) -> str:
@@ -77,6 +88,14 @@ async def lifespan(app: FastAPI):
         MultiBatchRetriever().close()
     except Exception as e:
         logger.debug(f"[Lifespan] Qdrant close: {e}")
+    # v8.4.4: 清理工具大结果 offload 临时文件（workspace/tmp/，避免累积）
+    try:
+        from src.tools.registry import cleanup_offload_files
+        n = cleanup_offload_files()
+        if n:
+            logger.info(f"[Lifespan] 清理 offload 临时文件 {n} 个")
+    except Exception as e:
+        logger.debug(f"[Lifespan] offload cleanup: {e}")
     # v8.3.7: 等待在途后台历史写入落库（防关服务丢历史）
     try:
         from src.core.background import drain
@@ -429,16 +448,8 @@ async def get_memory(session_id: str):
     return {"status": "ok", "session_id": session_id[:8]}
 
 
-@app.get("/api/v1/hitl/pending")
-async def hitl_pending():
-    """Stub: HITL disabled in v8.1.1. Always returns empty."""
-    return {"pending": []}
-
-
-@app.post("/api/v1/hitl/resolve")
-async def hitl_resolve():
-    """Stub: HITL disabled in v8.1.1."""
-    return {"status": "ok"}
+# v8.4.4: HITL 旧 stub 端点已删（/api/v1/hitl/pending|resolve 恒空）——
+# 权限确认由 /api/v2/permission/grant + 前端审批卡片承担
 
 
 # ── v8.4.3 结构化权限确认（前端审批卡片闭环）──

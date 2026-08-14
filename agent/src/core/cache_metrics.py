@@ -24,15 +24,29 @@ _agg: dict = {}          # source -> {"hit": int, "miss": int, "calls": int}
 _global_calls = 0
 
 
+# 首次 N 次调用输出原始 usage 键集合（命中率恒 0 时一眼定位 provider 字段位置）
+_USAGE_SAMPLE_LIMIT = 5
+_usage_samples_logged = 0
+
+
 def extract_usage(response) -> dict | None:
-    """归一化 usage，含 prompt cache 字段。取不到 total 时返回 None。"""
+    """归一化 usage，含 prompt cache 字段。取不到 total 时返回 None。
+
+    v8.4.4: 首次 5 次调用打印原始 usage 键集合（DeepSeek 的 prompt_cache
+    字段可能不在 usage_metadata 而在 response_metadata 的 token_usage/usage，
+    命中率恒 0 时据此定位适配点）。
+    """
     try:
         um = getattr(response, "usage_metadata", None) or {}
         rm = getattr(response, "response_metadata", {}) or {}
         raw = rm.get("token_usage") or rm.get("usage") or {}
         merged: dict = {}
-        for key in ("input_tokens", "output_tokens", "total_tokens"):
-            val = um.get(key) or raw.get(key) or 0
+        # v8.4.4: DeepSeek raw usage 用 prompt_tokens/completion_tokens 命名，
+        # usage_metadata 用 input/output_tokens——两者都要读
+        for key, alt in (("input_tokens", "prompt_tokens"),
+                         ("output_tokens", "completion_tokens"),
+                         ("total_tokens", "total_tokens")):
+            val = um.get(key) or raw.get(key) or raw.get(alt) or 0
             merged[key] = int(val or 0)
         merged["cache_hit"] = int(
             raw.get("prompt_cache_hit_tokens")
@@ -42,6 +56,16 @@ def extract_usage(response) -> dict | None:
             or um.get("prompt_cache_miss_tokens") or 0)
         if not merged["total_tokens"]:
             return None
+        # v8.4.4: 首次样本输出 usage 键集合（诊断用，不改变正常路径）
+        global _usage_samples_logged
+        if _usage_samples_logged < _USAGE_SAMPLE_LIMIT:
+            _usage_samples_logged += 1
+            logger.info(
+                f"[CacheMetrics] usage 样本#{_usage_samples_logged}: "
+                f"usage_metadata_keys={sorted(um.keys())} "
+                f"raw_keys={sorted(raw.keys())} "
+                f"cache_hit={merged['cache_hit']} cache_miss={merged['cache_miss']}"
+            )
         return merged
     except Exception as e:
         logger.debug(f"[CacheMetrics] extract_usage failed: {e}")

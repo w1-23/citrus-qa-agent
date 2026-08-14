@@ -74,11 +74,13 @@
 
 | 参数 | 当前值 | 位置 | 说明 |
 |------|--------|------|------|
-| `context_max_tokens` | 1,000,000 | `config.yaml` | DeepSeek V4 Flash 1M 窗口 |
-| `context_soft_threshold` | 0.60 | `config.yaml` | 触发 LLM 压缩（v8.3.1 调优） |
-| `context_hard_threshold` | 0.93 | `config.yaml` | 硬截断（v8.3.1 调优） |
+| `context_max_tokens` | 1,000,000 | `config.yaml` | v8.4.4 发送视图预算=模型窗口（DeepSeek V4 Flash 1M） |
+| `context_soft_threshold` | 0.75 | `config.yaml` | 触发批量压缩（一次压到 ~50%，用户轮边界） |
+| `context_hard_threshold` | 0.93 | `config.yaml` | 硬截断兜底 |
+| `target_ratio` | 0.50 | `config.yaml` | 批量压缩目标（缓存只破坏一次） |
+| `protect_recent_turns` | 3 | `config.yaml` | 保护名单：最近 N 轮 Q/A 不压缩 |
 | `keep_recent_turns` | 2 | `config.yaml` | 截断时保留 N 轮 |
-| `compact_max_tokens` | 800 | `config.yaml` | 压缩输出上限 |
+| `compact_max_tokens` | 800 | `config.yaml` | 压缩输出上限（已真正传入 LLM） |
 
 ---
 

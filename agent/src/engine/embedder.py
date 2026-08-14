@@ -1,4 +1,5 @@
 import os
+import hashlib
 import logging
 import re
 import threading
@@ -10,6 +11,9 @@ from src.config import settings
 
 # 默认离线模式：不连 HuggingFace，直接用本地缓存。设 HF_HUB_OFFLINE=0 可联网检查模型更新。
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
+# v8.4.4: query embedding LRU（进程内 512 条，与 HyDE 缓存同款模式）
+_QUERY_CACHE_MAX = 512
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +63,8 @@ class Embedder:
             self._needs_lock = False
             self._shared_model = None
             self._shared_lock = threading.Lock()
+            self._query_cache: dict = {}          # v8.4.4
+            self._cache_lock = threading.Lock()   # v8.4.4
             self._load_config()
             self._loaded = True
 
@@ -130,8 +136,22 @@ class Embedder:
 
     def embed_query(self, text: str) -> List[float]:
         prefixed = f"query: {_validate_utf8(text)}"
+        # v8.4.4: query embedding LRU 缓存（进程内，512 条）——检索场景同一
+        # 关键词跨请求/跨轮复用，避免重复推理（TUNE_PARAMS §9 补全）
+        key = hashlib.md5(prefixed.encode("utf-8")).hexdigest()
+        with self._cache_lock:
+            cached = self._query_cache.get(key)
+            if cached is not None:
+                return cached
         result = self.embed_docs([prefixed])
-        return result[0] if result else []
+        vec = result[0] if result else []
+        if vec:
+            with self._cache_lock:
+                if key not in self._query_cache:
+                    if len(self._query_cache) >= _QUERY_CACHE_MAX:
+                        self._query_cache.pop(next(iter(self._query_cache)))
+                    self._query_cache[key] = vec
+        return vec
 
     def embed_docs(self, texts: List[str]) -> List[List[float]]:
         if not texts:

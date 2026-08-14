@@ -266,6 +266,36 @@ def test_permission_grant_flow():
     loop.close()
 
 
+def test_offload_cleanup():
+    print("[SF-7] offload 临时文件清理（v8.4.4 接线）")
+    from src.tools.registry import (
+        _offload_large_result, get_offload_file_list, cleanup_offload_files)
+    p1 = _offload_large_result("x" * 20000, "test_tool")
+    p2 = _offload_large_result("y" * 20000, "test_tool")
+    check("offload 产生引用文本", "已自动卸载" in p1 and "test_tool" in p1, p1[:60])
+    files = get_offload_file_list()
+    check("列表记录 2 个文件", len(files) == 2, str(len(files)))
+    check("文件真实存在", all(f.exists() for f in files))
+    n = cleanup_offload_files()
+    check("清理计数正确", n == 2, f"n={n}")
+    check("清理后列表清空", len(get_offload_file_list()) == 0)
+    check("清理后文件不存在", all(not f.exists() for f in files))
+
+
+def test_fast_guard():
+    print("[SF-8] Fast Guard 问候语命中（v8.4.4 去长度门槛）")
+    from src.api.main import _is_fast_guard_hit
+    check("纯问候命中", _is_fast_guard_hit("你好"))
+    check("英文问候命中", _is_fast_guard_hit("hello"))
+    check("超 12 字符问候命中（旧 bug: what can you do）",
+          _is_fast_guard_hit("what can you do"))
+    check("问候+语气词命中", _is_fast_guard_hit("你好呀"))
+    check("科研问题不命中", not _is_fast_guard_hit("柑橘黄龙病的致病机制是什么"))
+    check("问候+科研不命中", not _is_fast_guard_hit("你好，帮我查一下黄龙病"))
+    check("身份询问命中", _is_fast_guard_hit("你是谁"))
+    check("空白不命中", not _is_fast_guard_hit(""))
+
+
 def _restore_llm_pool(orig):
     import src.core.llm_pool as pool
     pool.get_llm = orig
@@ -279,6 +309,8 @@ if __name__ == "__main__":
     test_history_filter_synth_instruction()
     test_hyde_english_validation()
     test_permission_grant_flow()
+    test_offload_cleanup()
+    test_fast_guard()
     print(f"supervisor final tests: {len(passed)} passed, {len(failed)} failed")
     if failed:
         print("FAILED:", failed)

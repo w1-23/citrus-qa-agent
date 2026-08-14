@@ -68,16 +68,9 @@ chat:
 graph:
   recursion_limit: 25            # main.py
 
-feature_flags:
-  plan_mode: true
-  web_search: true
-  advanced_compression: true
-  concurrent_tools: true
-  hook_system: true
-  memory_enhanced: true
-  skill_hot_reload: false
-  light_mode: false
-  auto_write_report: false
+# v8.4.4: 无消费点的 feature_flags 键已清理（框架与 /api/v1/flags 端点保留，
+# 具体开关接入业务时再添加）
+feature_flags: {}
 
 # ── Mixed Route ──
 # v8.3.1: 已彻底删除服务端路由自动升级（用户手动切换 light/expert，前端 light_mode 决定模式）。
@@ -118,19 +111,14 @@ statistics:
 
 # ── Bio Databases ──
 bio_db:
-  cache_ttl: 3600                # 数据库查询缓存 TTL（秒）
   entrez_email: "citrus-agent@localhost"  # NCBI Entrez 必填邮箱
   entrez_tool: "CitrusQAAgent"           # NCBI Entrez 工具名
   kegg_api_url: "https://rest.kegg.jp"           # KEGG API
   uniprot_api_url: "https://rest.uniprot.org"    # UniProt API
   string_api_url: "https://string-db.org/api"    # STRING API
 
-# ── HITL ──
-hitl:
-  enabled: true
-  auto_approve: true        # true = 测试模式自动通过（生产环境请改为 false）
-  skip_sandbox: false       # false = 工具调用先过沙箱
-  timeout_sec: 30           # 等待人工确认超时（30 秒后自动拒绝）
+# v8.4.4: HITL 旧体系已删除（stub 端点/配置无消费点）——权限确认由
+# permission 体系承担（permission_mode + /api/v2/permission/grant + 前端审批卡片）
 
 # ── Sandbox ──
 sandbox:
@@ -162,9 +150,9 @@ context_budget:
 
 # ── Context Engineering v8.4 ──
 context:
-  static_prefix: false          # 阶段1灰度: true = SystemMessage 字节级稳定(格式指南/策略卡片/
-                                #   skills 移出前缀，追加到当前轮 HumanMessage 尾部)，利于
-                                #   DeepSeek 上下文缓存命中；验证后切默认 true
+  static_prefix: true           # v8.4.4 转正: SystemMessage 字节级稳定(格式指南/策略卡片/
+                                #   skills 移出前缀，追加到当前轮 HumanMessage 尾部)，
+                                #   利于 DeepSeek 上下文缓存命中（灰度验证通过后转默认）
 
 # ── Permission v8.4.3（结构化权限确认）──
 # 权限拒绝不再靠用户打字"确认权限"（被当普通 query 白烧一轮），

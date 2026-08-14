@@ -190,7 +190,7 @@ class Settings(BaseSettings):
     def DATABASES(self) -> dict:
         return _yaml_val("databases", default={})
 
-    BIO_DB_CACHE_TTL: int = Field(default_factory=lambda: _yaml_val("bio_db", "cache_ttl", default=3600))
+    # v8.4.4: BIO_DB_CACHE_TTL 死配置已删（无消费点）
     NCBI_ENTREZ_EMAIL: str = Field(default_factory=lambda: _yaml_val("bio_db", "entrez_email", default="citrus-agent@localhost"))
     NCBI_ENTREZ_TOOL: str = Field(default_factory=lambda: _yaml_val("bio_db", "entrez_tool", default="CitrusQAAgent"))
     KEGG_API_URL: str = Field(default_factory=lambda: _yaml_val("bio_db", "kegg_api_url", default="https://rest.kegg.jp"))
@@ -208,11 +208,7 @@ class Settings(BaseSettings):
     # ── LaTeX ──
     LATEX_OUTPUT_DIR: str = Field(default_factory=lambda: _yaml_val("latex", "output_dir", default="workspace/output"))
 
-    # ── HITL ──
-    HITL_ENABLED: bool = Field(default_factory=lambda: _yaml_val("hitl", "enabled", default=True))
-    HITL_AUTO_APPROVE: bool = Field(default_factory=lambda: _yaml_val("hitl", "auto_approve", default=False))
-    HITL_SKIP_SANDBOX: bool = Field(default_factory=lambda: _yaml_val("hitl", "skip_sandbox", default=False))
-    HITL_TIMEOUT_SEC: int = Field(default_factory=lambda: _yaml_val("hitl", "timeout_sec", default=120))
+    # v8.4.4: HITL_* 死配置已删（stub 端点无消费点）；权限由 permission 体系承担
 
     # ── Sandbox ──
     SANDBOX_ENABLED: bool = Field(default_factory=lambda: _yaml_val("sandbox", "enabled", default=True))
