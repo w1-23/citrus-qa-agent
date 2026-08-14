@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Citrus QA Agent v8.4.9</title>
+<title>Citrus QA Agent v8.4.10</title>
 <script src="https://cdn.jsdelivr.net/npm/marked@4.3.0/marked.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -794,7 +794,7 @@ footer {
 <header>
   <div class="logo-mark">C</div>
   <h1>Citrus QA Agent</h1>
-  <span class="version-badge" id="versionBadge">v8.4.9</span>
+  <span class="version-badge" id="versionBadge">v8.4.10</span>
   <!-- v8.4.8 HITL 服务端化：权限模式徽标 + 切换菜单 -->
   <span class="perm-badge" id="permBadge" onclick="togglePermMenu(event)" title="权限模式（HITL）：点击切换">权限: --</span>
   <div class="perm-menu" id="permMenu" style="display:none">
@@ -823,7 +823,7 @@ footer {
       <div class="message bot">
         <div class="avatar">◆</div>
         <div class="content">
-          您好，我是 <span id="welcomeVersion">Citrus QA Agent v8.4.9</span>。<br>
+          您好，我是 <span id="welcomeVersion">Citrus QA Agent v8.4.10</span>。<br>
           <span style="color:var(--text-muted);font-size:13px">本地 RAG 检索 · CrossRef 学术搜索 · 文献综述写作 · 实验设计 · 文件读写</span>
         </div>
       </div>
@@ -945,7 +945,7 @@ function loadRuntimeConfig() {
 }
 /* v8.4.5: 版本单源——后端 /api/v2/config.version 下发，静态文案仅为离线回退 */
 function _appVersion() {
-  return (_runtimeConfig && _runtimeConfig.version) || '8.4.9';
+  return (_runtimeConfig && _runtimeConfig.version) || '8.4.10';
 }
 function applyAppVersion() {
   var v = _appVersion();
@@ -1563,6 +1563,11 @@ async function restoreSessionHistory() {
     if (!resp.ok) return;
     var data = await resp.json();
     var msgs = (data && data.messages) || [];
+    // v8.4.10: 上下文快照随历史一起返回——刷新后上下文面板/占用环即时恢复，
+    // 无需等下一次提问的 context_status 事件
+    if (data && data.context) {
+      renderContextPanel(data.context);
+    }
     if (msgs.length === 0) return;
     chatContainer.innerHTML = '';
     for (var i = 0; i < msgs.length; i++) {

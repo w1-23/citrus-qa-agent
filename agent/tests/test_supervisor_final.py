@@ -637,6 +637,19 @@ def test_session_history_restore():
 
         r3 = _asyncio.run(api_main.session_messages("no-such-session"))
         check("不存在的会话返回空", r3["count"] == 0, f"count={r3['count']}")
+
+        # v8.4.10: 上下文快照随历史返回（刷新后面板即时恢复，无需等下次提问）
+        c = r.get("context") or {}
+        check("快照含 estimated_tokens>0", (c.get("estimated_tokens") or 0) > 0,
+              f"est={c.get('estimated_tokens')}")
+        check("快照 history_msgs 与全量一致", c.get("history_msgs") == 6,
+              f"history_msgs={c.get('history_msgs')}")
+        check("快照含阈值与预算", c.get("max_tokens") == 1000000
+              and c.get("soft_threshold") == 0.75, str({k: c.get(k) for k in
+                                                        ("max_tokens", "soft_threshold")}))
+        c3 = r3.get("context") or {}
+        check("空会话快照 est=0", (c3.get("estimated_tokens") or 0) == 0,
+              f"est={c3.get('estimated_tokens')}")
     finally:
         api_main.session_manager = orig_sm
         try:

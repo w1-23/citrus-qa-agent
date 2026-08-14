@@ -561,15 +561,18 @@ async def new_session_endpoint():
 
 @app.get("/api/v2/session/{session_id}/messages")
 async def session_messages(session_id: str, limit: int = 200):
-    """读取会话历史对话轮，供前端刷新/重开恢复渲染。
+    """读取会话历史对话轮 + 上下文快照，供前端刷新/重开恢复渲染。
 
     返回顺序与库内一致（id 升序）；limit 为对话消息条数上限（默认 200 → 100 轮）。
+    v8.4.10: 响应附加 context 快照（与请求期 context_status 事件同构）——
+    刷新后上下文概览面板无需等下一次提问即可恢复显示。
     """
     try:
         msgs, _ = await session_manager.get_messages_with_ids(session_id)
     except Exception as e:
         logger.warning(f"[API] session_messages read failed: {e}")
-        return {"session_id": session_id, "messages": [], "count": 0}
+        return {"session_id": session_id, "messages": [], "count": 0,
+                "context": _build_context_snapshot([])}
     out: list[dict] = []
     from langchain_core.messages import HumanMessage, AIMessage
     for m in msgs:
@@ -584,4 +587,43 @@ async def session_messages(session_id: str, limit: int = 200):
                 out.append({"role": "assistant", "content": content})
         if len(out) >= max(int(limit), 1):
             break
-    return {"session_id": session_id, "messages": out, "count": len(out)}
+    return {"session_id": session_id, "messages": out, "count": len(out),
+            "context": _build_context_snapshot(msgs, session_id)}
+
+
+def _build_context_snapshot(msgs: list, session_id: str = "") -> dict:
+    """上下文快照（v8.4.10）：复用请求期 context_status 的估算口径，字段同构。
+
+    刷新后前端直接 renderContextPanel(snapshot)，无需等下一次提问的
+    context_status 事件；压缩状态取会话 checkpoint（msg_id>0 表示已压缩）。
+    """
+    try:
+        from src.core.context_budget import ContextBudget
+        est = ContextBudget().estimate_tokens(msgs)
+    except Exception:
+        est = 0
+    try:
+        hist_chars = sum(len(getattr(m, "content", "") or "") for m in msgs)
+    except Exception:
+        hist_chars = 0
+    compressed, summary = False, ""
+    if session_id:
+        try:
+            ck = session_manager.get_checkpoint(session_id)
+            if ck:
+                compressed = bool(ck.get("msg_id"))
+                summary = str(ck.get("summary") or "")[:200]
+        except Exception:
+            compressed = False
+    return {
+        "history_msgs": len(msgs),
+        "history_chars": hist_chars,
+        "estimated_tokens": est,
+        "max_tokens": settings.CONTEXT_BUDGET_MAX_TOKENS,
+        "soft_threshold": settings.CONTEXT_BUDGET_SOFT_THRESHOLD,
+        "hard_threshold": settings.CONTEXT_BUDGET_HARD_THRESHOLD,
+        "compressed": compressed,
+        "compression_len": 0,
+        "ltm_recalled": False, "ltm_chars": 0,
+        "resident_cards": False, "suggestions": [], "format_hint": "",
+    }
