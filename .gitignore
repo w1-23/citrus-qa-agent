@@ -3,7 +3,7 @@
 *.env
 *.env.*
 
-# è¿è¡Œæ—¶çŠ¶æ€ä¸ç”¨æˆ·æ•°æ®
+# è¿è¡ŒçŠ¶æ€ä¸ç”¨æˆ·æ•°æ®
 agent/state/
 agent/logs/
 agent/workspace/
@@ -28,21 +28,24 @@ venv/
 *.tmp
 .DS_Store
 
-# ²¿Êğ¹¹½¨²úÎï
+# æµ‹è¯•ç¼“å­˜
+.pytest_cache/
+
+# éƒ¨ç½²æ„å»ºäº§ç‰©
 citrus_agent_deploy.zip
 
-# ²âÊÔÁÙÊ±ÎÄ¼ş£¨v8.4.14£©
+# æµ‹è¯•ä¸´æ—¶æ–‡ä»¶ï¼ˆv8.4.14ï¼‰
 agent/tests/.tmp_runner/
 agent/tests/.tmp_session_hist.db
 
-# ÄÚ²¿¿ª·¢ÎÄµµ£¨v8.5.0 ¿ªÔ´»¯£º²»½ø¹«¿ª²Ö¿â£©
+# å†…éƒ¨å¼€å‘æ–‡æ¡£ï¼ˆv8.5.0 å¼€æºåŒ–ï¼šä¸è¿›å…¬å¼€ä»“åº“ï¼‰
 AGENT_CHANGES.md
 AUDIT_*.md
 DEPLOY.md
 TUNE_PARAMS.md
-¿ª·¢ÏÖ×´.md
-Î´À´½¨Òé´ı°ì.md
+å¼€å‘ç°çŠ¶.md
+æœªæ¥å»ºè®®å¾…åŠ.md
 readme2.md
 
-# ·¢²¼²úÎï£¨v8.5.0£©
+# å‘å¸ƒäº§ç‰©ï¼ˆv8.5.0ï¼‰
 dist/
