@@ -1,4 +1,4 @@
-# Core
+﻿# Core
 langchain-core>=0.3.0
 langchain-openai>=0.2.0
 langgraph>=0.2.0
@@ -38,3 +38,6 @@ transformers>=4.36.0
 # Utilities
 rich>=13.7.0
 chardet>=5.0
+
+# v8.5.0: API Key 连通性校验/HTTP 客户端
+httpx>=0.27.0

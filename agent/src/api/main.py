@@ -552,11 +552,53 @@ async def runtime_config():
         "permission_mode": settings.PERMISSION_MODE,
         # v8.4.12: 审批卡片超时提示单一来源（config.yaml permission.wait_sec）
         "permission_wait_sec": settings.PERMISSION_WAIT_SEC,
+        # v8.5.0 开源版: 只暴露"是否已配置"，永不回传 key 本身
+        "has_api_key": bool(settings.RESOLVED_MAIN_API_KEY),
         "model": {
             "main": settings.MAIN_MODEL,
             "fast": settings.FAST_MODEL,
         },
     }
+
+
+# ── v8.5.0 开源版：WebUI 引导填写 API Key ──
+# 用户启动后在前端填写 DeepSeek API Key（唯一指定 deepseek-v4-flash）：
+#  - 不写 .env（用户自己的 key 不混入项目配置）
+#  - 持久化到 state/api_key（gitignore 内，不入仓库），跨重启保留
+#  - 填写即校验（GET /models 连通性），失败提示更换
+
+class ApiKeyRequest(BaseModel):
+    api_key: str
+
+
+@app.post("/api/v2/config/apikey")
+async def set_api_key(req: ApiKeyRequest):
+    key = (req.api_key or "").strip()
+    if len(key) < 16 or not key.startswith("sk-"):
+        raise HTTPException(status_code=400,
+                            detail="Key 格式不正确（应为 DeepSeek 的 sk- 开头密钥）")
+    # 连通性校验：GET {base}/models
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{settings.MAIN_BASE_URL.rstrip('/')}/models",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+        if resp.status_code != 200:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Key 校验失败（HTTP {resp.status_code}）："
+                       f"请检查密钥是否有效或已过期")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"[API] apikey connectivity check failed: {e}")
+        raise HTTPException(status_code=400, detail=f"无法连接 DeepSeek API: {e}")
+    if not settings.save_runtime_api_key(key):
+        raise HTTPException(status_code=500, detail="Key 保存失败")
+    logger.info("[API] runtime api key configured via WebUI")
+    return {"status": "ok", "has_api_key": True}
 
 
 @app.get("/")

@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Citrus QA Agent v8.4.14</title>
+<title>Citrus QA Agent v8.5.0</title>
 <script src="https://cdn.jsdelivr.net/npm/marked@4.3.0/marked.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -492,6 +492,71 @@ footer {
 .plan-body { margin-top: 6px; line-height: 1.7; }
 .plan-item { color: var(--text-secondary); word-break: break-word; }
 
+/* v8.5.0 开源版：首次启动 API Key 引导遮罩 */
+.api-setup-overlay {
+  position: fixed; inset: 0; z-index: 10000;
+  background: var(--bg-deep);
+  display: flex; align-items: center; justify-content: center;
+}
+.api-setup-card {
+  width: min(440px, calc(100vw - 48px));
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-hover);
+  border-radius: 14px;
+  padding: 26px 28px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+}
+.api-setup-card .api-logo {
+  font-size: 22px; font-weight: 700;
+  color: var(--accent);
+  margin-bottom: 6px;
+}
+.api-setup-card .api-sub {
+  font-size: 13px; color: var(--text-muted);
+  margin-bottom: 16px; line-height: 1.6;
+}
+.api-setup-card label {
+  display: block;
+  font-size: 12px; font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+.api-setup-card input {
+  width: 100%; padding: 10px 14px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-hairline);
+  border-radius: 8px;
+  font-size: 14px; font-family: var(--font-mono);
+  color: var(--text-primary);
+  outline: none;
+  transition: all 0.2s var(--ease-out-quint);
+}
+.api-setup-card input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+.api-setup-card .api-error {
+  color: var(--error);
+  font-size: 12px;
+  margin-top: 8px;
+  min-height: 16px;
+}
+.api-setup-card .api-actions {
+  display: flex; gap: 10px; margin-top: 14px;
+}
+.api-setup-card .api-save {
+  flex: 1; padding: 10px 0;
+  background: var(--accent); color: #FFF;
+  border: none; border-radius: 8px;
+  font-weight: 600; font-size: 13px;
+  cursor: pointer; font-family: inherit;
+  transition: all 0.2s var(--ease-out-quint);
+}
+.api-setup-card .api-save:hover { background: var(--accent-hover); }
+.api-setup-card .api-save:disabled { opacity: 0.5; cursor: wait; }
+.api-setup-card .api-note {
+  margin-top: 14px;
+  font-size: 11px; color: var(--text-muted);
+  line-height: 1.6;
+}
+
 /* ── Sidebar ── */
 .sidebar {
   width: 380px;
@@ -911,7 +976,7 @@ footer {
 <header>
   <div class="logo-mark">C</div>
   <h1>Citrus QA Agent</h1>
-  <span class="version-badge" id="versionBadge">v8.4.14</span>
+  <span class="version-badge" id="versionBadge">v8.5.0</span>
   <!-- v8.4.8 HITL 服务端化：权限模式徽标 + 切换菜单 -->
   <span class="perm-badge" id="permBadge" onclick="togglePermMenu(event)" title="权限模式（HITL）：点击切换">权限: --</span>
   <div class="perm-menu" id="permMenu" style="display:none">
@@ -934,13 +999,28 @@ footer {
   </div>
 </header>
 
+<!-- v8.5.0 开源版：首次启动 API Key 引导（未配置时全屏遮罩，配置后隐藏） -->
+<div class="api-setup-overlay" id="apiSetupOverlay" style="display:none">
+  <div class="api-setup-card">
+    <div class="api-logo">🍊 Citrus QA Agent</div>
+    <div class="api-sub">本地运行的科研问答 Agent。首次使用请填写你的 DeepSeek API Key（模型固定为 <b>deepseek-v4-flash</b>），Key 仅保存在本机，不会上传或写入项目配置。</div>
+    <label for="apiKeyInput">DeepSeek API Key（sk- 开头）</label>
+    <input type="password" id="apiKeyInput" placeholder="sk-..." autocomplete="off">
+    <div class="api-error" id="apiKeyError"></div>
+    <div class="api-actions">
+      <button class="api-save" id="apiKeySave" onclick="saveApiKey()">保存并开始使用</button>
+    </div>
+    <div class="api-note">如何获取：platform.deepseek.com → API Keys → 创建。配置后保存于本机（state/api_key），无需重复填写；如需更换，清除该文件后刷新页面即可。</div>
+  </div>
+</div>
+
 <div class="main-container">
   <div class="chat-panel">
     <div id="chat-container">
       <div class="message bot">
         <div class="avatar">◆</div>
         <div class="content">
-          您好，我是 <span id="welcomeVersion">Citrus QA Agent v8.4.14</span>。<br>
+          您好，我是 <span id="welcomeVersion">Citrus QA Agent v8.5.0</span>。<br>
           <span style="color:var(--text-muted);font-size:13px">本地 RAG 检索 · CrossRef 学术搜索 · 文献综述写作 · 实验设计 · 文件读写</span>
         </div>
       </div>
@@ -1058,18 +1138,61 @@ function _ctxMaxTokens() {
   return 1000000;
 }
 var _permWaitSec = 90;   /* v8.4.12: 审批卡片超时提示（config 下发，缺省 90s） */
+/* v8.5.0 开源版：未配置 API Key 时显示引导遮罩 */
+function maybeShowApiSetup(cfg) {
+  var overlay = document.getElementById('apiSetupOverlay');
+  if (!overlay) return;
+  if (cfg && cfg.has_api_key) {
+    overlay.style.display = 'none';
+  } else {
+    overlay.style.display = 'flex';
+    var input = document.getElementById('apiKeyInput');
+    if (input) input.focus();
+  }
+}
+function saveApiKey() {
+  var input = document.getElementById('apiKeyInput');
+  var err = document.getElementById('apiKeyError');
+  var btn = document.getElementById('apiKeySave');
+  var key = (input && input.value || '').trim();
+  if (!key) { if (err) err.textContent = '请输入 API Key'; return; }
+  if (btn) btn.disabled = true;
+  if (err) err.textContent = '校验中...';
+  fetch('/api/v2/config/apikey', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ api_key: key }),
+  }).then(function(r) {
+    return r.json().then(function(d) { return { ok: r.ok, d: d }; });
+  }).then(function(res) {
+    if (res.ok && res.d.has_api_key) {
+      if (err) err.textContent = '';
+      var overlay = document.getElementById('apiSetupOverlay');
+      if (overlay) overlay.style.display = 'none';
+      updateStatus('ok', 'API Key 已配置，可以开始使用');
+      if (input) input.value = '';
+    } else {
+      if (err) err.textContent = (res.d && res.d.detail) || '保存失败';
+      if (btn) btn.disabled = false;
+    }
+  }).catch(function(e) {
+    if (err) err.textContent = '请求失败: ' + e.message;
+    if (btn) btn.disabled = false;
+  });
+}
 function loadRuntimeConfig() {
   fetch('/api/v2/config').then(function(r) { return r.json(); })
     .then(function(cfg) {
       _runtimeConfig = cfg;
       if (cfg.permission_wait_sec) _permWaitSec = cfg.permission_wait_sec;
       applyAppVersion();
+      maybeShowApiSetup(cfg);
     })
     .catch(function() { applyAppVersion(); });
 }
 /* v8.4.5: 版本单源——后端 /api/v2/config.version 下发，静态文案仅为离线回退 */
 function _appVersion() {
-  return (_runtimeConfig && _runtimeConfig.version) || '8.4.14';
+  return (_runtimeConfig && _runtimeConfig.version) || '8.5.0';
 }
 function applyAppVersion() {
   var v = _appVersion();

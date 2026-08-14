@@ -34,3 +34,12 @@ citrus_agent_deploy.zip
 # 测试临时文件（v8.4.14）
 agent/tests/.tmp_runner/
 agent/tests/.tmp_session_hist.db
+
+# 内部开发文档（v8.5.0 开源化：不进公开仓库）
+AGENT_CHANGES.md
+AUDIT_*.md
+DEPLOY.md
+TUNE_PARAMS.md
+开发现状.md
+未来建议待办.md
+readme2.md

@@ -115,7 +115,7 @@ class Settings(BaseSettings):
     PERMISSION_WAIT_SEC: int = Field(default_factory=lambda: _yaml_val("permission", "wait_sec", default=90))
 
     # ── Version (v8.4.5: 版本单源——UI/健康检查/文档以此为准) ──
-    VERSION: str = "8.4.14"
+    VERSION: str = "8.5.0"
 
     # ── Context Engineering (阶段1: 静态前缀灰度开关) ──
     # true = SystemMessage 字节级稳定（format 指南/策略卡片/skills 移出前缀，
@@ -200,9 +200,40 @@ class Settings(BaseSettings):
     SANDBOX_ALLOWED_PATTERNS: list = Field(default_factory=lambda: _yaml_val("sandbox", "allowed_patterns", default=["read_*", "search_*", "list_*"]))
     SANDBOX_DANGEROUS_PATTERNS: list = Field(default_factory=lambda: _yaml_val("sandbox", "dangerous_patterns", default=["delete_*", "exec_*", "write_*"]))
 
+    # v8.5.0 开源版：运行时 API Key（WebUI 引导填写）——优先于 .env，
+    # 持久化到 state/api_key（gitignore 内，不入仓库）；.env 保持不动
+    _runtime_api_key: str = ""
+
+    def _load_runtime_api_key(self) -> None:
+        """启动时从 state/api_key 读取（WebUI 填写的 key 跨重启保留）。"""
+        try:
+            p = PROJECT_ROOT / "state" / "api_key"
+            if p.exists():
+                v = p.read_text(encoding="utf-8").strip()
+                if v:
+                    self._runtime_api_key = v
+        except Exception:
+            pass
+
+    def save_runtime_api_key(self, api_key: str) -> bool:
+        """持久化 WebUI 填写的 key（state/api_key，权限收紧）。"""
+        try:
+            p = PROJECT_ROOT / "state" / "api_key"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(api_key.strip(), encoding="utf-8")
+            try:
+                import os
+                os.chmod(p, 0o600)
+            except Exception:
+                pass
+            self._runtime_api_key = api_key.strip()
+            return True
+        except Exception:
+            return False
+
     @property
     def RESOLVED_MAIN_API_KEY(self) -> str:
-        return self.DEEPSEEK_API_KEY or self.MAIN_API_KEY
+        return self._runtime_api_key or self.DEEPSEEK_API_KEY or self.MAIN_API_KEY
 
     @property
     def RESOLVED_FAST_API_KEY(self) -> str:
@@ -213,6 +244,7 @@ class Settings(BaseSettings):
         return self.FAST_BASE_URL or self.MAIN_BASE_URL
 
 settings = Settings()
+settings._load_runtime_api_key()
 
 # ── 启动配置校验（v8.3.3 fail-fast）──
 def validate_config() -> list:
