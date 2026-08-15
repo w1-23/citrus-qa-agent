@@ -656,6 +656,54 @@ footer {
   text-align: center; color: var(--text-muted);
   padding: 28px 16px; font-size: 12px; line-height: 1.6;
 }
+/* v8.9 会话管理 + 工作区侧栏 */
+.session-new-btn {
+  margin-left: auto;
+  background: var(--accent-muted); color: var(--accent);
+  border: 1px solid var(--accent); border-radius: 5px;
+  font-size: 12px; line-height: 1; padding: 2px 7px; cursor: pointer;
+  font-family: inherit;
+}
+.session-new-btn:hover { background: var(--accent-glow); }
+.session-item {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 8px; border-radius: 6px;
+  margin-bottom: 3px; cursor: pointer;
+  border: 1px solid transparent;
+  transition: all 0.15s var(--ease-out-quint);
+}
+.session-item:hover { background: var(--bg-hover); }
+.session-item.active {
+  background: var(--accent-muted);
+  border-color: rgba(217, 119, 6, 0.25);
+}
+.session-item.active .session-title { color: var(--accent); font-weight: 600; }
+.session-title {
+  flex: 1; min-width: 0;
+  font-size: 12px; color: var(--text-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.session-meta {
+  font-family: var(--font-mono); font-size: 9px;
+  color: var(--text-muted); flex-shrink: 0;
+}
+.session-ops { display: none; gap: 2px; flex-shrink: 0; }
+.session-item:hover .session-ops { display: flex; }
+.session-op {
+  background: none; border: none; cursor: pointer;
+  font-size: 11px; color: var(--text-muted); padding: 1px 3px;
+  border-radius: 4px;
+}
+.session-op:hover { color: var(--accent); background: var(--bg-elevated); }
+.session-op.del:hover { color: var(--error); }
+.workspace-file {
+  display: block;
+  font-size: 12px; color: var(--text-primary);
+  padding: 5px 8px; border-radius: 6px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  text-decoration: none;
+}
+.workspace-file:hover { background: var(--bg-hover); color: var(--accent); }
 .citation-item {
   background: var(--bg-elevated);
   border: 1px solid var(--border-hairline);
@@ -1103,6 +1151,28 @@ footer {
         </button>
       </div>
     </div>
+    <!-- v8.9 会话管理：会话列表（切换/新建/重命名/软删除） -->
+    <div class="sidebar-section" id="session-section">
+      <div class="sidebar-header" onclick="toggleSection('session')">
+        <span>会话</span>
+        <span class="sidebar-count" id="session-count">0</span>
+        <span class="toggle-icon" id="session-toggle">▼</span>
+        <button class="session-new-btn" onclick="event.stopPropagation();newSession()" title="新建会话">＋</button>
+      </div>
+      <div class="sidebar-content" id="session-list">
+        <div class="empty-sidebar">加载中...</div>
+      </div>
+    </div>
+    <!-- v8.9 工作区：当前会话写作成果 -->
+    <div class="sidebar-section" id="workspace-section">
+      <div class="sidebar-header" onclick="toggleSection('workspace')">
+        <span>工作区</span>
+        <span class="toggle-icon collapsed" id="workspace-toggle">▼</span>
+      </div>
+      <div class="sidebar-content collapsed" id="workspace-list">
+        <div class="empty-sidebar">加载中...</div>
+      </div>
+    </div>
     <div class="sidebar-section" id="citation-section" style="flex:2">
       <div class="sidebar-header" onclick="toggleSection('citation')">
         <span>文献引用</span>
@@ -1429,11 +1499,106 @@ function toggleMode() {
 
 /* ─── Sidebar ─── */
 function toggleSection(section) {
-  var map = { citation: 'sidebar-content' };
+  // v8.9: session/workspace 区块同样支持折叠
+  var map = { citation: 'sidebar-content', session: 'session-list', workspace: 'workspace-list' };
   var el = document.getElementById(map[section]);
   var icon = document.getElementById(section + '-toggle');
+  if (!el || !icon) return;
   el.classList.toggle('collapsed');
   icon.classList.toggle('collapsed');
+}
+
+/* ─── v8.9 会话管理（列表/切换/新建/重命名/软删除）+ 工作区文件 ─── */
+var _sessions = [];
+
+function loadSessions() {
+  fetch('/api/v2/sessions').then(function (r) { return r.json(); }).then(function (d) {
+    _sessions = (d && d.sessions) || [];
+    renderSessions();
+  }).catch(function () {});
+}
+
+function renderSessions() {
+  var box = document.getElementById('session-list');
+  var count = document.getElementById('session-count');
+  if (!box) return;
+  if (count) count.textContent = _sessions.length;
+  if (_sessions.length === 0) {
+    box.innerHTML = '<div class="empty-sidebar">暂无会话，点击 ＋ 新建</div>';
+    return;
+  }
+  var html = '';
+  for (var i = 0; i < _sessions.length; i++) {
+    var s = _sessions[i];
+    var active = s.session_id === sessionId ? ' active' : '';
+    var title = escapeHtml(s.title || '新会话');
+    html += '<div class="session-item' + active + '">' +
+      '<div class="session-title" onclick="switchSession(\'' + s.session_id + '\')" title="' + title + '">' + title + '</div>' +
+      '<div class="session-meta">' + (s.msg_count || 0) + '</div>' +
+      '<div class="session-ops">' +
+      '<button class="session-op" onclick="renameSession(\'' + s.session_id + '\')" title="重命名">✎</button>' +
+      '<button class="session-op del" onclick="deleteSession(\'' + s.session_id + '\')" title="删除">🗑</button>' +
+      '</div></div>';
+  }
+  box.innerHTML = html;
+}
+
+function switchSession(sid) {
+  if (!sid || sid === sessionId) return;
+  if (currentAbortController) { currentAbortController.abort(); currentAbortController = null; }
+  setSendDisabled(false);
+  sessionId = sid;
+  localStorage.setItem('citrus_session_id', sid);
+  chatContainer.innerHTML = '';
+  roundHistory = [];
+  _ctxData = null; _totalTokensUsed = 0;
+  sidebarContent.innerHTML = '<div class="empty-sidebar">提交问题后文献将在此展示</div>';
+  citationCount.textContent = '0';
+  renderSessions();
+  loadWorkspaceFiles();
+  restoreSessionHistory();
+  userInput.focus();
+}
+
+function renameSession(sid) {
+  var cur = null;
+  for (var i = 0; i < _sessions.length; i++) if (_sessions[i].session_id === sid) cur = _sessions[i];
+  var title = prompt('重命名会话：', cur ? (cur.title && cur.title !== '新会话' ? cur.title : '') : '');
+  if (title === null || !title.trim()) return;
+  fetch('/api/v2/session/' + encodeURIComponent(sid) + '/rename', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: title.trim() })
+  }).then(function (r) { return r.json(); }).then(function () { loadSessions(); });
+}
+
+function deleteSession(sid) {
+  var isCur = sid === sessionId;
+  if (!confirm('删除会话？\n' + (isCur ? '（当前会话）' : '') + '\n仅从列表隐藏，历史数据保留（可追溯）。')) return;
+  fetch('/api/v2/session/' + encodeURIComponent(sid), { method: 'DELETE' })
+    .then(function (r) { return r.json(); }).then(function () {
+      if (isCur) { newSession(); } else { loadSessions(); }
+    });
+}
+
+function loadWorkspaceFiles() {
+  var box = document.getElementById('workspace-list');
+  if (!box) return;
+  box.innerHTML = '<div class="empty-sidebar">加载中...</div>';
+  fetch('/api/v2/session/' + encodeURIComponent(sessionId) + '/workspace-files')
+    .then(function (r) { return r.json(); }).then(function (d) {
+      var files = (d && d.files) || [];
+      if (files.length === 0) {
+        box.innerHTML = '<div class="empty-sidebar">本会话暂无写作成果</div>';
+        return;
+      }
+      var html = '';
+      for (var i = 0; i < files.length; i++) {
+        var f = files[i];
+        html += '<a class="workspace-file" href="/workspace/output/' + encodeURIComponent(f.path) +
+          '" target="_blank" title="' + escapeHtml(f.path) + '">📄 ' + escapeHtml(f.name) + '</a>';
+      }
+      box.innerHTML = html;
+    }).catch(function () { box.innerHTML = '<div class="empty-sidebar">加载失败</div>'; });
 }
 
 /* ─── Context Drawer ─── */
@@ -1693,6 +1858,9 @@ async function clearSession() {
     _totalTokensUsed = 0;
     renderContextPanel({ estimated_tokens: 0, max_tokens: _ctxMaxTokens(), history_msgs: 0,
                          soft_threshold: 0.75, hard_threshold: 0.93 });
+    // v8.9: 清空后刷新会话列表（标题回到"新会话"）与工作区
+    loadSessions();
+    loadWorkspaceFiles();
   } catch (e) { alert('清空失败: ' + e.message); }
 }
 
@@ -2040,6 +2208,8 @@ async function restoreSessionHistory() {
 
 if (sessionId) { userInput.focus(); }
 restoreSessionHistory();
+loadSessions();
+loadWorkspaceFiles();
 </script>
 </body>
 </html>

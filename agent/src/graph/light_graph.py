@@ -466,9 +466,11 @@ async def save_context_node(state: AgentState) -> dict:
                 facts = memory_store.extract_key_facts(q, a)
                 for f in facts:
                     # v8.6 (书 §3.1 偏好追踪): type=preference 走 preference_memory
+                    # v8.9: 偏好写入全局域（用户级偏好跨会话生效）
                     if f.get("type") == "preference":
                         memory_store.set_preference(
-                            sid, f.get("key", ""), f.get("value", ""))
+                            memory_store.GLOBAL_PREF_DOMAIN,
+                            f.get("key", ""), f.get("value", ""))
                         continue
                     memory_store.save_long_term_fact(
                         f.get("key", ""),

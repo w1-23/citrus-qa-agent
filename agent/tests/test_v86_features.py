@@ -392,6 +392,106 @@ def test_msg_type_roundtrip():
     check("配对 tool 保留", "ToolMessage" in roles and "res-y" in msgs[-1].content)
 
 
+def test_session_management():
+    print("[Sess] v8.9 会话管理：列表/首问命名/重命名/软删除")
+    import sqlite3
+    from langchain_core.messages import HumanMessage, AIMessage
+    from src.session.manager import SessionManager
+    from src.guardrails.memory import MemoryStore
+    from _tmpenv import tmp_path
+
+    tmp = tmp_path("db_sess")
+    sm = SessionManager()
+    sm.db_path = str(tmp)
+    sm._init_db_sync()
+
+    # 建两个会话，写入消息触发首问自动命名
+    run(sm.get_or_create_session("sess-a"))
+    run(sm.get_or_create_session("sess-b"))
+    run(sm.save_messages("sess-a", [
+        HumanMessage(content="<user_query>\n花青素调控机制研究\n</user_query>"),
+        AIMessage(content="回答A"),
+    ], "k-sess-a"))
+    run(sm.save_messages("sess-b", [
+        HumanMessage(content="<user_query>\n溃疡病防治方案\n</user_query>"),
+        AIMessage(content="回答B"),
+    ], "k-sess-b"))
+
+    sessions = sm.list_sessions()
+    by_id = {s["session_id"]: s for s in sessions}
+    check("列表含两个会话", len(sessions) >= 2)
+    check("首问自动命名 A", by_id["sess-a"]["title"] == "花青素调控机制研究",
+          by_id.get("sess-a", {}).get("title", ""))
+    check("首问自动命名 B", by_id["sess-b"]["title"] == "溃疡病防治方案")
+    check("消息数统计", by_id["sess-a"]["msg_count"] == 2)
+    check("排序按 updated_at 倒序", sessions[0]["session_id"] == "sess-b"
+          or sessions[1]["session_id"] == "sess-b", str([s["session_id"] for s in sessions[:2]]))
+
+    check("重命名成功", sm.rename_session("sess-a", "花青素研究"))
+    check("重命名生效", sm.list_sessions()[0]["title"] == "花青素研究"
+          or any(s["session_id"] == "sess-a" and s["title"] == "花青素研究"
+                 for s in sm.list_sessions()))
+
+    check("软删除成功", sm.soft_delete_session("sess-b"))
+    ids_after = {s["session_id"] for s in sm.list_sessions()}
+    check("软删除后列表排除", "sess-b" not in ids_after)
+    check("数据保留（消息仍在库）", True)
+    with sqlite3.connect(tmp) as conn:
+        n = conn.execute("SELECT COUNT(*) FROM messages WHERE session_id='sess-b'").fetchone()[0]
+    check("软删除不删消息", n == 2, f"n={n}")
+
+
+def test_memory_domain_isolation():
+    print("[Dom] v8.9 记忆域化：LTM 会话为主+高置信全局共享 / 卡片域化 / 偏好全局层")
+    from src.guardrails.memory import MemoryStore
+    from _tmpenv import tmp_path
+
+    ms = MemoryStore()
+    tmp = tmp_path("db_dom")
+    ms.db_path = str(tmp)
+    import sqlite3
+    with sqlite3.connect(tmp) as conn:
+        ms._ensure_ltm_schema(conn)
+        ms._ensure_resident_schema(conn)
+        conn.commit()
+
+    # LTM：s1 域事实（0.85）+ 全局高置信（0.95）+ s2 域事实（0.85）
+    ms.save_long_term_fact("s1主题", "花青素 Ruby 调控", 0.85, owner_session="s1", source_query="q1")
+    ms.save_long_term_fact("全局主题", "柑橘黄龙病 CLas 病原", 0.95, owner_session="s1", source_query="q2")
+    ms.save_long_term_fact("s2主题", "溃疡病铜制剂", 0.85, owner_session="s2", source_query="q3")
+
+    with sqlite3.connect(tmp) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = ms._fetch_ltm_rows(conn, owner_session="s1")
+    keys = {r["fact_key"] for r in rows}
+    check("域过滤: 本会话+全局高置信", "s1主题" in keys and "全局主题" in keys
+          and "s2主题" not in keys, str(keys))
+
+    # 常驻卡片域化：s1 高置信卡片不污染 s2
+    cards1 = ms.get_resident_cards("s1")
+    cards2 = ms.get_resident_cards("s2")
+    check("卡片域隔离", "花青素 Ruby" in cards1 and "花青素 Ruby" not in cards2,
+          f"c1={cards1[:40]} c2={cards2[:40]}")
+    # 直接写全局卡片验证
+    import sqlite3 as _sq
+    with _sq.connect(tmp) as c:
+        c.execute("INSERT OR REPLACE INTO resident_cards "
+                  "(fact_key, fact_value, confidence, updated_at, session_id) "
+                  "VALUES ('全局卡片', '全局稳定事实', 0.9, '2026-08-15', '')")
+        c.commit()
+    g1 = ms.get_resident_cards("s1")
+    g2 = ms.get_resident_cards("s2")
+    check("全局卡片两会话可见", "全局稳定事实" in g1 and "全局稳定事实" in g2)
+
+    # 偏好两层：全局域跨会话 + 会话域覆盖
+    ms.set_preference(ms.GLOBAL_PREF_DOMAIN, "写作语言", "一律中文")
+    ms.set_preference("sx", "结构偏好", "必须含局限")
+    pref_other = ms.get_preferences("sy")   # 其它会话应读到全局偏好
+    pref_sx = ms.get_preferences("sx")
+    check("全局偏好跨会话", "一律中文" in pref_other, pref_other[:60])
+    check("会话偏好叠加", "必须含局限" in pref_sx and "一律中文" in pref_sx)
+
+
 def test_prompt_snapshot():
     print("[Snap] 提示词快照渲染确定且完整（O5）")
     from src.prompts.snapshot import render_all

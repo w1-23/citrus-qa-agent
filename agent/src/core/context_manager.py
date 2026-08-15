@@ -137,14 +137,17 @@ class ContextManager:
         if self._memory:
             try:
                 # v8.4.5: LTM 语义召回含 embed 推理（≤500 条事实），走线程池防阻塞事件循环
-                ltm = await asyncio.to_thread(self._memory.recall_long_term_memory, query)
+                # v8.9 记忆域化：传 session_id——会话为主 + 高置信全局共享
+                ltm = await asyncio.to_thread(
+                    self._memory.recall_long_term_memory, query, 5, session_id)
                 if ltm:
                     ctx.long_term_memory = ltm
                     logger.info(f"[ContextManager] LTM recalled: {len(ltm)} chars")
             except Exception as e:
                 logger.debug(f"[ContextManager] LTM recall skipped: {e}")
             try:
-                cards = await asyncio.to_thread(self._memory.get_resident_cards)
+                cards = await asyncio.to_thread(
+                    self._memory.get_resident_cards, session_id)
                 if cards:
                     ctx.resident_cards = cards
             except Exception as e:

@@ -186,6 +186,8 @@ class SessionManager:
                     ("checkpoint_msg_id", "INTEGER DEFAULT 0"),
                     ("checkpoint_summary", "TEXT DEFAULT ''"),
                     ("checkpoint_updated_at", "TEXT DEFAULT ''"),
+                    ("title", "TEXT DEFAULT ''"),        # v8.9 会话管理：首问自动命名
+                    ("deleted_at", "TEXT DEFAULT ''"),   # v8.9 会话管理：软删除标记
                 ]:
                     if col not in session_cols:
                         try:
@@ -556,6 +558,14 @@ class SessionManager:
                     (datetime.now().isoformat(), session_id),
                 )
                 conn.commit()
+        # v8.9 会话管理：首问自动命名（title 为空时用首条用户消息生成）
+        try:
+            for msg in messages:
+                if getattr(msg, "type", "") == "human" or isinstance(msg, HumanMessage):
+                    self.ensure_session_title(session_id, getattr(msg, "content", "") or "")
+                    break
+        except Exception:
+            pass
         return True
 
     async def replace_history(self, session_id: str, messages: List[BaseMessage]) -> None:
@@ -604,6 +614,94 @@ class SessionManager:
                 (datetime.now().isoformat(), session_id),
             )
             conn.commit()
+
+    # ── v8.9 会话管理（列表 / 首问自动命名 / 重命名 / 软删除）──
+
+    @staticmethod
+    def _extract_query_text(content: str) -> str:
+        """从完整上下文 HumanMessage 提取用户原始问题（<user_query> 块优先）。"""
+        import re as _re
+        m = _re.search(r"<user_query>\s*([\s\S]*?)\s*</user_query>", content or "")
+        text = m.group(1).strip() if m else str(content or "").strip()
+        return " ".join(text.split())
+
+    def ensure_session_title(self, session_id: str, content: str) -> None:
+        """首问自动命名（v8.9）：会话无标题且写入首条用户消息时生成（≤30 字）。"""
+        text = self._extract_query_text(content)
+        if not text:
+            return
+        title = text[:30]
+        try:
+            import sqlite3
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT title FROM sessions WHERE session_id=?", (session_id,)
+                ).fetchone()
+                if row is None or (row[0] or "").strip():
+                    return
+                conn.execute(
+                    "UPDATE sessions SET title=?, updated_at=? WHERE session_id=?",
+                    (title, datetime.now().isoformat(), session_id))
+                conn.commit()
+        except Exception as e:
+            logger.debug(f"[SessionManager] ensure title failed: {e}")
+
+    def list_sessions(self, limit: int = 100) -> list[dict]:
+        """会话列表（排除软删除，按最近更新倒序），含消息数与标题。"""
+        try:
+            import sqlite3
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    """SELECT s.session_id, s.title, s.created_at, s.updated_at,
+                              (SELECT COUNT(*) FROM messages m
+                                WHERE m.session_id = s.session_id) AS msg_count
+                       FROM sessions s
+                       WHERE s.deleted_at = '' OR s.deleted_at IS NULL
+                       ORDER BY s.updated_at DESC LIMIT ?""",
+                    (int(limit),)).fetchall()
+            out = []
+            for r in rows:
+                out.append({
+                    "session_id": r["session_id"],
+                    "title": (r["title"] or "").strip() or "新会话",
+                    "created_at": r["created_at"] or "",
+                    "updated_at": r["updated_at"] or "",
+                    "msg_count": int(r["msg_count"] or 0),
+                })
+            return out
+        except Exception as e:
+            logger.warning(f"[SessionManager] list_sessions failed: {e}")
+            return []
+
+    def rename_session(self, session_id: str, title: str) -> bool:
+        try:
+            import sqlite3
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "UPDATE sessions SET title=?, updated_at=? WHERE session_id=?",
+                    (str(title or "").strip()[:60], datetime.now().isoformat(), session_id))
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.warning(f"[SessionManager] rename failed: {e}")
+            return False
+
+    def soft_delete_session(self, session_id: str) -> bool:
+        """软删除（v8.9）：deleted_at 标记；消息/证据/记忆/LTM 全部保留
+        （LTM 为跨会话资产，不能级联删），仅从列表隐藏。"""
+        try:
+            import sqlite3
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "UPDATE sessions SET deleted_at=?, updated_at=? WHERE session_id=?",
+                    (datetime.now().isoformat(), datetime.now().isoformat(), session_id))
+                conn.commit()
+            logger.info(f"[SessionManager] session soft-deleted: {session_id[:8]}")
+            return True
+        except Exception as e:
+            logger.warning(f"[SessionManager] soft delete failed: {e}")
+            return False
 
     # ── Evidence Ledger（v8.3.8）──
 

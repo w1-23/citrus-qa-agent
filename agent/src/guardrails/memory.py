@@ -93,6 +93,9 @@ class MemoryStore:
             store[key] = {"value": value, "updated_at": datetime.now().isoformat()}
             self._save_store(session_id, "preference_memory", store)
 
+    # v8.9 偏好全局域（用户级偏好跨会话生效；会话域偏好仅本会话）
+    GLOBAL_PREF_DOMAIN = "__global__"
+
     def get_preferences(self, session_id: str, max_chars: int = 300) -> str:
         """用户显式偏好（书 §3.1 偏好追踪）→ 上下文块（≤max_chars，空则 ""）。
 
@@ -100,16 +103,22 @@ class MemoryStore:
         这里在 build_human_message 中作为 <user_preferences> 块注入——
         偏好是用户明确表达的长期约定（如"综述一律中文、要含局限与边界"），
         注入后模型在写作/回答中自动遵循，无需用户每次重申。
+        v8.9 两层：全局域（__global__，用户级偏好跨会话）+ 当前会话域（覆盖全局）。
         """
         store = self._load_store(session_id, "preference_memory")
-        if not store:
+        merged: dict = {}
+        if session_id != self.GLOBAL_PREF_DOMAIN:
+            g = self._load_store(self.GLOBAL_PREF_DOMAIN, "preference_memory")
+            merged.update(g)          # 全局为底
+        merged.update(store)          # 会话域覆盖
+        if not merged:
             return ""
         header = ("## 用户偏好（历史交互中用户明确表达的偏好；如与用户最新要求冲突，"
                   "以用户最新要求为准）\n")
         budget = max(0, max_chars - len(header))
         parts: list[str] = []
         total = 0
-        for key, item in list(store.items())[:10]:
+        for key, item in list(merged.items())[:10]:
             value = item.get("value", "") if isinstance(item, dict) else str(item)
             if not value:
                 continue
@@ -197,16 +206,24 @@ class MemoryStore:
                 fact_key TEXT PRIMARY KEY,
                 fact_value TEXT,
                 confidence REAL DEFAULT 0.5,
-                updated_at TEXT
+                updated_at TEXT,
+                session_id TEXT DEFAULT ''
             )"""
         )
+        # v8.9 常驻卡片域化迁移（''=全局域；旧数据全部归全局）
+        try:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(resident_cards)")}
+            if "session_id" not in cols:
+                conn.execute("ALTER TABLE resident_cards ADD COLUMN session_id TEXT DEFAULT ''")
+        except Exception:
+            pass
 
     RESIDENT_CARD_MIN_CONF = 0.8     # 高置信度事实才进常驻卡片
     RESIDENT_CARD_MAX = 8            # 常驻卡片上限（约 ≤500 字符预算）
     RESIDENT_CARD_MAX_CHARS = 60     # 单条卡片值上限
 
     def _upsert_resident_card(self, conn, fact_key: str, fact_value: str,
-                              confidence: float) -> None:
+                              confidence: float, session_id: str = "") -> None:
         self._ensure_resident_schema(conn)
         if not fact_key or not fact_value:
             return
@@ -215,13 +232,14 @@ class MemoryStore:
         if len(fact_value) > self.RESIDENT_CARD_MAX_CHARS:
             return
         conn.execute(
-            """INSERT INTO resident_cards (fact_key, fact_value, confidence, updated_at)
-               VALUES (?, ?, ?, ?)
+            """INSERT INTO resident_cards (fact_key, fact_value, confidence, updated_at, session_id)
+               VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(fact_key) DO UPDATE SET
                  fact_value=excluded.fact_value,
                  confidence=excluded.confidence,
-                 updated_at=excluded.updated_at""",
-            (fact_key, fact_value, confidence, datetime.now().isoformat()),
+                 updated_at=excluded.updated_at,
+                 session_id=excluded.session_id""",
+            (fact_key, fact_value, confidence, datetime.now().isoformat(), session_id or ""),
         )
         # 超上限淘汰：最低置信度 + 最旧的先出（代码维护，非 LLM）
         cur = conn.execute(
@@ -234,8 +252,12 @@ class MemoryStore:
                     LIMIT 1)"""
             )
 
-    def get_resident_cards(self, max_chars: int = 500) -> str:
-        """常驻卡片（双层记忆的'概览'层）：按置信度取 top-N 拼文本，≤max_chars。"""
+    def get_resident_cards(self, session_id: str = "", max_chars: int = 500) -> str:
+        """常驻卡片（双层记忆的'概览'层）：按置信度取 top-N 拼文本，≤max_chars。
+
+        v8.9 域化：返回「当前会话域 + 全局域」卡片（会话为主，全局高置信共享）；
+        空域时只读全局（兼容旧调用方）。
+        """
         try:
             import sqlite3
             from pathlib import Path
@@ -246,10 +268,18 @@ class MemoryStore:
             with sqlite3.connect(str(db_path)) as conn:
                 conn.row_factory = sqlite3.Row
                 self._ensure_resident_schema(conn)
-                rows = conn.execute(
-                    "SELECT fact_key, fact_value, confidence, updated_at "
-                    "FROM resident_cards ORDER BY confidence DESC, updated_at DESC"
-                ).fetchall()
+                if session_id:
+                    rows = conn.execute(
+                        "SELECT fact_key, fact_value, confidence, updated_at, session_id "
+                        "FROM resident_cards "
+                        "WHERE session_id = ? OR session_id = '' "
+                        "ORDER BY confidence DESC, updated_at DESC",
+                        (session_id,)).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT fact_key, fact_value, confidence, updated_at, session_id "
+                        "FROM resident_cards ORDER BY confidence DESC, updated_at DESC"
+                    ).fetchall()
             if not rows:
                 return ""
             parts = []
@@ -294,7 +324,9 @@ class MemoryStore:
                         (fact_key, fact_value, confidence, datetime.now().isoformat(),
                          owner_session, source_query),
                     )
-                    self._upsert_resident_card(conn, fact_key, fact_value, confidence)
+                    # v8.9: 常驻卡片带会话域（''=全局；域内高置信事实仅本会话可见）
+                    self._upsert_resident_card(conn, fact_key, fact_value, confidence,
+                                               session_id=owner_session)
                     conn.commit()
                 return True
             except Exception as e:
@@ -316,12 +348,40 @@ class MemoryStore:
     def recall_long_term_memory(self, query: str, top_k: int = 5,
                                 owner_session: str = "", max_chars: int = 1500) -> str:
         """语义向量检索跨会话长期记忆 (fallback 到关键词)。
-        AG-5: 置信度按时间衰减(0.95/天)，输出带来源与更新时间标注，超 max_chars 截断。"""
+        AG-5: 置信度按时间衰减(0.95/天)，输出带来源与更新时间标注，超 max_chars 截断。
+        v8.9 记忆域化（会话为主 + 高置信全局共享）：owner_session 传入当前会话——
+        召回该会话域事实 + 全局高置信（≥0.9）事实；跨域事实排序权重 0.9（本会话优先）。
+        """
         try:
             return self._recall_semantic(query, top_k, owner_session, max_chars)
         except Exception as e:
             logger.debug(f"[Memory] 语义召回失败, 回退关键词: {e}")
             return self._recall_keyword_fallback(query, top_k, owner_session, max_chars)
+
+    # v8.9 记忆域化参数：跨域（全局共享）事实的排序权重（本会话域事实 1.0）
+    CROSS_DOMAIN_WEIGHT = 0.9
+    GLOBAL_SHARE_CONF = 0.9   # 全局共享置信度门槛
+
+    def _fetch_ltm_rows(self, conn, limit: int = 500, owner_session: str = ""):
+        """v8.4: 从 ltm_facts 读取；若新表为空回退老表（迁移前兼容）。
+        v8.9 域过滤：本会话域 + 全局高置信（≥0.9）+ 旧数据（无域标记）三类。"""
+        conn.row_factory = sqlite3.Row
+        if owner_session:
+            rows = conn.execute(
+                "SELECT fact_key, fact_value, confidence, updated_at, owner_session, source_query "
+                "FROM ltm_facts "
+                "WHERE owner_session = ? OR owner_session = '' OR confidence >= ? "
+                "ORDER BY updated_at DESC LIMIT ?",
+                (owner_session, self.GLOBAL_SHARE_CONF, limit)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT fact_key, fact_value, confidence, updated_at, owner_session, source_query "
+                "FROM ltm_facts ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
+        if not rows:
+            rows = conn.execute(
+                "SELECT fact_key, fact_value, confidence, updated_at, owner_session, source_query "
+                "FROM long_term_memory ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
+        return rows
 
     def _recall_semantic(self, query: str, top_k: int, owner_session: str, max_chars: int) -> str:
         import numpy as np
@@ -333,7 +393,7 @@ class MemoryStore:
             return ""
         with sqlite3.connect(str(db_path)) as conn:
             self._ensure_ltm_schema(conn)
-            rows = self._fetch_ltm_rows(conn)
+            rows = self._fetch_ltm_rows(conn, owner_session=owner_session)
         if not rows:
             return ""
 
@@ -356,7 +416,12 @@ class MemoryStore:
                 days = max((now - datetime.fromisoformat(ts)).days, 0)
             except Exception:
                 days = 0
-            eff_confs[i] = conf * (0.95 ** days)  # AG-5: 时间衰减
+            eff = conf * (0.95 ** days)  # AG-5: 时间衰减
+            # v8.9 记忆域化：跨域（全局共享）事实轻微降权，本会话域优先
+            row_sid = row["owner_session"] or ""
+            if owner_session and row_sid and row_sid != owner_session:
+                eff *= self.CROSS_DOMAIN_WEIGHT
+            eff_confs[i] = eff
 
         # v8.4 (Mem0 v3): 混合信号排序 = 语义相似度 × 有效置信度
         # 同 key 的多版本（ADD-only 并存）同时参与排序，由时间衰减自然
@@ -403,7 +468,7 @@ class MemoryStore:
                 return ""
             with sqlite3.connect(str(db_path)) as conn:
                 self._ensure_ltm_schema(conn)
-                rows = self._fetch_ltm_rows(conn, limit=200)
+                rows = self._fetch_ltm_rows(conn, limit=200, owner_session=owner_session)
             query_tokens = set(re.findall(r'[\w\u4e00-\u9fff]{2,}', query.lower()))
             scored = []
             now = datetime.now()
@@ -418,6 +483,10 @@ class MemoryStore:
                     except Exception:
                         days = 0
                     eff_conf = conf * (0.95 ** days)
+                    # v8.9 记忆域化：跨域轻微降权
+                    row_sid = row["owner_session"] or ""
+                    if owner_session and row_sid and row_sid != owner_session:
+                        eff_conf *= self.CROSS_DOMAIN_WEIGHT
                     if eff_conf >= 0.30:
                         scored.append((overlap * eff_conf, row["fact_value"], eff_conf, ts,
                                        row["source_query"] or ""))

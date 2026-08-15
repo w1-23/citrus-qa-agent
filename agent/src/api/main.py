@@ -636,6 +636,13 @@ async def serve_frontend():
     return FileResponse(html_path)
 
 
+# v8.9 工作区静态服务（会话侧栏"工作区"文件可点击打开；只读）
+_workspace_static = (PROJECT_ROOT / "workspace")
+if _workspace_static.exists():
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/workspace", StaticFiles(directory=str(_workspace_static)), name="workspace")
+
+
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "version": settings.VERSION}
@@ -659,6 +666,80 @@ async def new_session_endpoint():
     await session_manager.get_or_create_session(new_id)
     logger.info(f"[API] new session: {new_id}")
     return {"status": "ok", "session_id": new_id}
+
+
+# ── v8.9 会话管理（列表 / 重命名 / 软删除 / 工作区文件）──
+
+@app.get("/api/v2/sessions")
+async def list_sessions(limit: int = 100):
+    """会话列表（排除软删除，按最近更新倒序；标题为空显示"新会话"）。"""
+    sessions = await asyncio.to_thread(session_manager.list_sessions, limit)
+    return {"sessions": sessions, "count": len(sessions)}
+
+
+class RenameRequest(BaseModel):
+    title: str = ""
+
+
+@app.post("/api/v2/session/{session_id}/rename")
+async def rename_session(session_id: str, req: RenameRequest):
+    title = (req.title or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="title 不能为空")
+    ok = await asyncio.to_thread(session_manager.rename_session, session_id, title)
+    if not ok:
+        raise HTTPException(status_code=500, detail="重命名失败")
+    return {"status": "ok", "session_id": session_id, "title": title[:60]}
+
+
+@app.delete("/api/v2/session/{session_id}")
+async def delete_session(session_id: str):
+    """软删除：deleted_at 标记，从列表隐藏；消息/证据/记忆全部保留（可追溯）。"""
+    ok = await asyncio.to_thread(session_manager.soft_delete_session, session_id)
+    if not ok:
+        raise HTTPException(status_code=500, detail="删除失败")
+    logger.info(f"[API] session soft-deleted: {session_id[:8]}")
+    return {"status": "ok", "session_id": session_id}
+
+
+@app.get("/api/v2/session/{session_id}/workspace-files")
+async def session_workspace_files(session_id: str):
+    """该会话的写作成果文件（来自 pipeline_tasks 完成记录；文件在 workspace/output/）。"""
+    import sqlite3
+    from pathlib import Path
+    files: list[dict] = []
+    try:
+        with sqlite3.connect(str(PROJECT_ROOT / "state" / "sessions.db")) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT output_path, MAX(updated_at) AS updated_at "
+                "FROM pipeline_tasks WHERE session_id=? AND status IN ('done','partial') "
+                "GROUP BY output_path ORDER BY updated_at DESC LIMIT 50",
+                (session_id,)).fetchall()
+        out_root = (PROJECT_ROOT / "workspace" / "output").resolve()
+        seen = set()
+        for r in rows:
+            rel = (r["output_path"] or "").strip()
+            if not rel or rel in seen:
+                continue
+            seen.add(rel)
+            p = (out_root / rel).resolve()
+            # 路径安全：必须落在 workspace/output 内
+            if not str(p).startswith(str(out_root)):
+                continue
+            if not p.exists() or not p.is_file():
+                continue
+            st = p.stat()
+            files.append({
+                "path": rel,
+                "name": p.name,
+                "size": st.st_size,
+                "modified": st.st_mtime,
+                "modified_at": r["updated_at"] or "",
+            })
+    except Exception as e:
+        logger.warning(f"[API] workspace-files failed: {e}")
+    return {"files": files, "count": len(files)}
 
 
 # ── v8.4.9 会话持久化：历史对话读取（前端刷新/关闭重开后恢复渲染）──
