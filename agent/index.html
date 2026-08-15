@@ -207,11 +207,13 @@ header h1 { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
 .user .avatar { background: var(--accent-muted); color: var(--accent); }
 .bot .avatar { background: var(--success-glow); color: var(--success); }
 /* v8.6 用户反馈（书 §4.6 反馈循环）: 回答下方的 👍/👎 记录条
-   v8.7: flex-basis 100% 换行到 content 下方 + 左缩进对齐 content（avatar 30 + gap 12） */
+   v8.7: flex-basis 100% 换行到 content 下方 + 左缩进对齐 content（avatar 30 + gap 12）；
+   v8.7: 点击后展开"哪里好/哪里不好"填写行 */
 .msg-feedback {
   flex: 1 1 100%;
   display: flex; align-items: center; gap: 6px;
   margin: 0 2px 2px 42px; padding-left: 2px;
+  flex-wrap: wrap;
 }
 .fb-btn {
   background: none; border: 1px solid var(--border-hairline);
@@ -222,6 +224,31 @@ header h1 { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
 .fb-btn:hover { border-color: var(--accent); color: var(--accent); }
 .fb-btn:disabled { opacity: 0.4; cursor: default; }
 .fb-msg { font-size: 11px; color: var(--text-muted); }
+.fb-row {
+  flex: 1 1 100%;
+  display: flex; align-items: center; gap: 6px;
+  margin-top: 4px;
+}
+.fb-input {
+  flex: 1; min-width: 120px;
+  padding: 5px 9px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-hairline);
+  border-radius: 6px;
+  font-size: 12px; font-family: inherit;
+  color: var(--text-primary); outline: none;
+}
+.fb-input:focus { border-color: var(--accent); }
+.fb-submit, .fb-cancel {
+  background: none; border: 1px solid var(--border-hairline);
+  border-radius: 6px; color: var(--text-muted);
+  font-size: 12px; line-height: 1; padding: 5px 10px; cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s var(--ease-out-quint);
+}
+.fb-submit { border-color: var(--accent); color: var(--accent); }
+.fb-submit:hover { background: var(--accent-glow); }
+.fb-cancel:hover { background: var(--bg-hover); }
 .content {
   background: var(--bg-elevated);
   border: 1px solid var(--border-hairline);
@@ -1059,7 +1086,7 @@ footer {
         <!-- v8.7: Enter 发送改为 onkeydown + isComposing 守卫（中文输入法选词确认不再误触发） -->
         <input type="text" id="user-input" placeholder="有什么想做的？" onkeydown="if(event.key==='Enter'&amp;&amp;!event.isComposing)sendMsg()">
         <!-- v8.7: 小巧圆形图标按钮（与胶囊输入框右端同心）；运行中由 JS 隐藏本按钮、显示停止按钮 -->
-        <button class="send-btn" id="send-btn" onclick="sendMsg()" title="发送 (Enter)">➤</button>
+        <button class="send-btn" id="send-btn" onclick="sendMsg()" title="发送 (Enter)">↑</button>
         <!-- v8.4.11 停止按钮：运行中显示；点击中断当前任务（修改问题后重新发送） -->
         <button class="stop-btn" id="stop-btn" onclick="stopCurrentTask()" style="display:none" title="停止当前任务（输入有误时可停止后修改问题重新发送）">⏹</button>
       </div>
@@ -1601,26 +1628,56 @@ function addMessage(role, html) {
   return div.querySelector('.content');
 }
 
-/* v8.6 反馈提交：内容哈希作 message_id（幂等去重），仅记录不阻断 */
+/* v8.6/v8.7 反馈提交：点击 👍/👎 展开"哪里好/哪里不好"填写行，提交时带 comment；
+   内容哈希作 message_id（幂等去重），仅记录不阻断 */
+function submitFeedback(fb, mid, rating, comment) {
+  var fbMsg = fb.querySelector('.fb-msg');
+  fetch('/api/v2/feedback', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId || '', message_id: mid, rating: rating, comment: comment || '' })
+  }).then(function (r) { return r.json(); }).then(function (d) {
+    var row = fb.querySelector('.fb-row');
+    if (row) row.remove();
+    if (d && d.status === 'ok' && fbMsg) { fbMsg.textContent = rating === 1 ? '已记录 👍' : '已记录 👎'; }
+  }).catch(function () {
+    var row = fb.querySelector('.fb-row');
+    if (row) row.remove();
+    var allBtns = fb.querySelectorAll('.fb-btn');
+    for (var i = 0; i < allBtns.length; i++) allBtns[i].disabled = false;
+  });
+}
+
 document.addEventListener('click', function (e) {
   var btn = e.target.closest ? e.target.closest('.fb-btn') : null;
   if (!btn) return;
   var rating = parseInt(btn.getAttribute('data-rating'), 10);
+  var fb = btn.closest('.msg-feedback');
+  if (!fb || fb.querySelector('.fb-input')) return;   // 已展开填写行
   var msgEl = btn.closest('.message');
   var contentEl = msgEl ? msgEl.querySelector('.content') : null;
   var text = (contentEl ? contentEl.textContent || '' : '').substring(0, 2000);
   var hash = 0;
   for (var i = 0; i < text.length; i++) { hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0; }
   var mid = 'h' + (hash >>> 0).toString(16);
-  var fbMsg = btn.closest('.msg-feedback') ? btn.closest('.msg-feedback').querySelector('.fb-msg') : null;
-  btn.disabled = true;
-  fetch('/api/v2/feedback', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session_id: sessionId || '', message_id: mid, rating: rating, comment: '' })
-  }).then(function (r) { return r.json(); }).then(function (d) {
-    if (d && d.status === 'ok' && fbMsg) { fbMsg.textContent = rating === 1 ? '已记录 👍' : '已记录 👎'; }
-  }).catch(function () { btn.disabled = false; });
+
+  var row = document.createElement('div');
+  row.className = 'fb-row';
+  row.innerHTML = '<input class="fb-input" placeholder="哪里好 / 哪里不好（可留空直接提交）" maxlength="500">' +
+                  '<button class="fb-submit">提交</button>' +
+                  '<button class="fb-cancel">取消</button>';
+  fb.appendChild(row);
+  var inp = row.querySelector('.fb-input');
+  inp.focus();
+  var allBtns = fb.querySelectorAll('.fb-btn');
+  for (var i = 0; i < allBtns.length; i++) allBtns[i].disabled = true;
+  row.querySelector('.fb-submit').addEventListener('click', function () {
+    submitFeedback(fb, mid, rating, inp.value);
+  });
+  row.querySelector('.fb-cancel').addEventListener('click', function () {
+    row.remove();
+    for (var i = 0; i < allBtns.length; i++) allBtns[i].disabled = false;
+  });
 });
 
 async function clearSession() {

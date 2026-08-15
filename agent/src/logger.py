@@ -88,7 +88,13 @@ def setup_logging():
 
 
 class RetrievalLogger:
-    """Writes retrieval search records to structured log files."""
+    """检索日志（v8.7 合并重构）——统一记录检索过滤全过程。
+
+    原 retrieval/（只记通过结果）与 debug_filter/（过滤明细但 filtered 恒空）
+    两个文件功能重叠且都不完整，合并为单个 logs/retrieval/retrieval_YYYY-MM-DD.log：
+    query / 模式 / 候选数 / 动态阈值 / 通过·被过滤明细 / 耗时 / 预算·去重拦截。
+    日志目录跟随 CITRUS_LOG_DIR 覆盖（测试独立 sink）。
+    """
 
     def __init__(self):
         self._log_dir = _log_dir() / "retrieval"
@@ -97,46 +103,68 @@ class RetrievalLogger:
     def _log_path(self) -> Path:
         return self._log_dir / f"retrieval_{datetime.now().strftime('%Y-%m-%d')}.log"
 
-    def log_search(
+    def log_retrieval(
         self,
         query: str,
-        results: List[Dict],
+        reranked: List[Dict],
+        threshold: float,
+        passed: List[Dict],
+        filtered: List[Dict],
         elapsed: Optional[float] = None,
+        extra: Optional[Dict] = None,
     ):
-        """Append a structured search record to today's log file."""
-        if not results:
-            return
+        """Append a complete retrieval-filter record to today's log file.
 
+        reranked: 重排序候选全集；passed: 过阈值保留；filtered: 被动态阈值拦截。
+        """
         now = datetime.now()
         lines = []
         lines.append(f"[{now.isoformat()}] QUERY: {query}")
+        head = (f"  candidates={len(reranked)} | threshold={threshold:.4f} "
+                f"| passed={len(passed)} | filtered={len(filtered)}")
         if elapsed is not None:
-            lines.append(f"  Elapsed: {elapsed:.2f}s | Results: {len(results)}")
+            head += f" | elapsed={elapsed:.2f}s"
+        for k, v in (extra or {}).items():
+            head += f" | {k}={v}"
+        lines.append(head)
         lines.append(f"  {'─' * 80}")
 
-        for i, r in enumerate(results, 1):
-            paper_id = r.get("paper_id", "N/A")
-            doi = r.get("doi", "N/A")
-            section = r.get("section_name", "N/A")
-            batch = r.get("_batch", "N/A")
-            score = r.get("rerank_score", 0)
-            text = r.get("text", "").replace("\n", " ").strip()
-
-            lines.append(f"  [{i:2d}] CE={score:.4f} | {paper_id}")
-            lines.append(f"        Batch: {batch} | DOI: {doi}")
-            lines.append(f"        Section: {section}")
-            lines.append(f"        Text: {text[:200]}{'...' if len(text) > 200 else ''}")
-            lines.append("")
-
+        if passed:
+            lines.append("  ✅ PASSED:")
+            for i, r in enumerate(passed, 1):
+                lines.append(self._fmt_chunk(i, r))
+        if filtered:
+            lines.append("  ❌ FILTERED (dynamic threshold):")
+            for i, r in enumerate(filtered, 1):
+                lines.append(self._fmt_chunk(i, r))
+        if not passed and not filtered:
+            lines.append("  (no candidates)")
         lines.append("")
 
         with open(self._log_path(), "a", encoding="utf-8") as f:
             f.write("\n".join(lines))
 
+    @staticmethod
+    def _fmt_chunk(i: int, r: dict) -> str:
+        paper_id = r.get("paper_id", "N/A")
+        doi = r.get("doi", "N/A")
+        section = r.get("section_name", "N/A")
+        batch = r.get("_batch", "N/A")
+        score = r.get("rerank_score", 0)
+        text = str(r.get("text", "") or "").replace("\n", " ").strip()
+        head = f"    [{i:2d}] CE={score:.4f} | {paper_id} | {section} | batch={batch} | DOI: {doi}"
+        if text:
+            head += f"\n        Text: {text[:160]}{'...' if len(text) > 160 else ''}"
+        return head
+
 
 _search_logger = RetrievalLogger()
 
 
-def log_search(query: str, results: List[Dict], elapsed: Optional[float] = None):
-    """Module-level convenience function."""
-    _search_logger.log_search(query, results, elapsed)
+def log_retrieval(query: str, reranked: List[Dict], threshold: float,
+                  passed: List[Dict], filtered: List[Dict],
+                  elapsed: Optional[float] = None,
+                  extra: Optional[Dict] = None):
+    """Module-level convenience function (v8.7 统一检索过滤日志入口)."""
+    _search_logger.log_retrieval(query, reranked, threshold, passed, filtered,
+                                 elapsed=elapsed, extra=extra)

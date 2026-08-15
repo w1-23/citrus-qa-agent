@@ -255,9 +255,11 @@ def test_stage2_progressive_injection():
 # ─────────────────────────────────────────────
 
 def test_feedback_store():
-    print("[Fb] 反馈落库 + 幂等去重 + 统计")
+    print("[Fb] 反馈落库 + 幂等去重 + 统计 + comment 与 feedback.log 双写")
+    import sqlite3
+    from pathlib import Path
     from src.session.manager import session_manager
-    from _tmpenv import tmp_path
+    from _tmpenv import tmp_path, tmp_dir
 
     tmp = tmp_path("db_fb")
     session_manager.db_path = str(tmp)
@@ -269,6 +271,51 @@ def test_feedback_store():
     check("正向 1 条", stats["positive"] == 1, str(stats))
     check("负向 1 条", stats["negative"] == 1, str(stats))
     check("重复提交未累加", stats["total"] == 2, str(stats))
+    # v8.7: comment 落库
+    with sqlite3.connect(tmp) as conn:
+        row = conn.execute(
+            "SELECT comment FROM feedback WHERE session_id='s1' AND rating=-1"
+        ).fetchone()
+    check("comment 落库", row and row[0] == "有错误", str(row))
+    # v8.7: feedback.log 双写（CITRUS_LOG_DIR 由 conftest 指向 tests/.tmp_runner/logs）
+    log_root = os.environ.get("CITRUS_LOG_DIR", "")
+    fblog = Path(log_root) / "feedback.log" if log_root else Path("feedback.log")
+    check("feedback.log 已写入", fblog.exists()
+          and "feedback_recorded" in fblog.read_text(encoding="utf-8", errors="replace"),
+          f"exists={fblog.exists()} path={fblog}")
+    if fblog.exists():
+        fb_txt = fblog.read_text(encoding="utf-8", errors="replace")
+        check("feedback.log 含 rating/comment", "rating=1" in fb_txt and "有错误" in fb_txt,
+              fb_txt[-200:])
+
+
+def test_retrieval_log():
+    print("[Retr] 统一检索过滤日志（合并后：通过+被过滤明细+阈值+耗时）")
+    from pathlib import Path
+    from datetime import datetime
+    from src.logger import log_retrieval
+    from _tmpenv import tmp_dir
+
+    candidates = [
+        {"paper_id": "p1", "section_name": "intro", "rerank_score": 0.80,
+         "text": "alpha content", "_batch": "b1", "doi": "10.1/x"},
+        {"paper_id": "p2", "section_name": "methods", "rerank_score": 0.10,
+         "text": "beta content", "_batch": "b2", "doi": "10.1/y"},
+    ]
+    log_retrieval("测试查询", candidates, 0.25,
+                  [candidates[0]], [candidates[1]],
+                  elapsed=1.23, extra={"mode": "test"})
+    log_root = os.environ.get("CITRUS_LOG_DIR", "")
+    p = (Path(log_root) / "retrieval" / f"retrieval_{datetime.now():%Y-%m-%d}.log"
+         if log_root else Path("retrieval_test.log"))
+    check("检索日志文件存在", p.exists(), str(p))
+    if not p.exists():
+        return
+    content = p.read_text(encoding="utf-8", errors="replace")
+    check("记录通过明细", "PASSED" in content and "p1" in content, content[-300:])
+    check("记录被过滤明细", "FILTERED" in content and "p2" in content)
+    check("记录阈值/耗时/模式", "threshold=0.2500" in content
+          and "elapsed=1.23s" in content and "mode=test" in content)
 
 
 def test_feedback_endpoint():

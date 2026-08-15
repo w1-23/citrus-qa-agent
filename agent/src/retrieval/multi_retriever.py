@@ -443,11 +443,19 @@ class MultiBatchRetriever:
             return []
         total_ms = (time.time() - _t0) * 1000
         logger.info(f"[Retriever] rerank={dt_rerank:.0f}ms total={total_ms:.0f}ms | top_score={top_score:.4f} threshold={final_threshold:.4f} | passed={len(passed)}/{len(reranked)}")
+        # v8.7: 统一检索过滤日志（合并 retrieval/ 与 debug_filter/——原 debug_filter
+        # 的 filtered 参数恒为空，被拦截明细从未记录；现在真实计算并记录）
+        from src.logger import log_retrieval
+        filtered = [c for c in reranked if c.get("rerank_score", 0) < final_threshold]
+        log_retrieval(primary_query, reranked, final_threshold, passed, filtered,
+                      elapsed=time.time() - _t0, extra={"mode": "search_multi"})
+        # v8.7: 执行过程日志（business.log）补检索事件——此前检索完成无业务事件线
         try:
-            from src.retrieval.debug_logger import log_filter_process
-            log_filter_process(primary_query, reranked, final_threshold, passed, [])
-        except ImportError: pass
-        from src.logger import log_search; log_search(primary_query, passed, elapsed=time.time() - _t0)
+            from src.core.business_logger import blog
+            blog("retrieval_done", mode="search_multi", queries=len(queries),
+                 docs=len(passed), filtered=len(filtered), ms=int(total_ms))
+        except Exception:
+            pass
         return passed
 
     def search(self, query: str) -> List[Dict]:
@@ -534,5 +542,16 @@ class MultiBatchRetriever:
 
         total_ms = (time.time() - _t0) * 1000
         logger.info(f"[Retriever] HyDE done: {len(passed)}/{len(reranked)} passed | {total_ms:.0f}ms")
-        from src.logger import log_search; log_search(original_query, passed, elapsed=time.time() - _t0)
+        # v8.7: HyDE 路径补记统一检索过滤日志（此前该路径只记通过结果、无过滤明细）
+        from src.logger import log_retrieval
+        filtered = [c for c in reranked if c.get("rerank_score", 0) < final_threshold]
+        log_retrieval(original_query, reranked, final_threshold, passed, filtered,
+                      elapsed=time.time() - _t0, extra={"mode": "hyde"})
+        # v8.7: 执行过程日志补检索事件（HyDE 路径）
+        try:
+            from src.core.business_logger import blog
+            blog("retrieval_done", mode="hyde", queries=1,
+                 docs=len(passed), filtered=len(filtered), ms=int(total_ms))
+        except Exception:
+            pass
         return passed

@@ -763,7 +763,10 @@ class SessionManager:
 
     def record_feedback(self, session_id: str, message_id: str,
                         rating: int, comment: str = "") -> bool:
-        """记录 👍(1)/👎(-1) 反馈。幂等（同 session+message+rating 去重）。"""
+        """记录 👍(1)/👎(-1) 反馈。幂等（同 session+message+rating 去重）。
+
+        v8.7: 落库（feedback 表）+ 双写 logs/feedback.log（人工排查/回溯）。
+        """
         try:
             import sqlite3
             with sqlite3.connect(self.db_path) as conn:
@@ -785,9 +788,25 @@ class SessionManager:
                     (session_id, message_id or "", int(rating),
                      str(comment or "")[:500], datetime.now().isoformat()))
                 conn.commit()
+            # v8.7: 反馈日志双写（落库 + feedback.log）
+            try:
+                from src.core.feedback_logger import feedback_log
+                feedback_log("feedback_recorded",
+                             session=session_id[:12] or "-",
+                             message_id=(message_id or "-")[:32],
+                             rating=int(rating),
+                             comment=str(comment or "")[:200])
+            except Exception:
+                pass
             return True
         except Exception as e:
             logger.warning(f"[SessionManager] record feedback failed: {e}")
+            try:
+                from src.core.feedback_logger import feedback_log
+                feedback_log("feedback_failed", err=str(e)[:200],
+                             rating=int(rating))
+            except Exception:
+                pass
             return False
 
     def get_feedback_stats(self) -> dict:
