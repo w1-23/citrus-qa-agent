@@ -190,6 +190,7 @@ header h1 { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
 }
 .message {
   display: flex;
+  flex-wrap: wrap;   /* v8.7: 允许反馈栏换行到 content 下方（此前横向挤在右侧） */
   gap: 12px;
   animation: messageSlide 0.35s var(--ease-out-quint) both;
 }
@@ -205,10 +206,12 @@ header h1 { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
 }
 .user .avatar { background: var(--accent-muted); color: var(--accent); }
 .bot .avatar { background: var(--success-glow); color: var(--success); }
-/* v8.6 用户反馈（书 §4.6 反馈循环）: 回答下方的 👍/👎 记录条 */
+/* v8.6 用户反馈（书 §4.6 反馈循环）: 回答下方的 👍/👎 记录条
+   v8.7: flex-basis 100% 换行到 content 下方 + 左缩进对齐 content（avatar 30 + gap 12） */
 .msg-feedback {
+  flex: 1 1 100%;
   display: flex; align-items: center; gap: 6px;
-  margin: 6px 2px 2px 0; padding-left: 2px;
+  margin: 0 2px 2px 42px; padding-left: 2px;
 }
 .fb-btn {
   background: none; border: 1px solid var(--border-hairline);
@@ -350,15 +353,15 @@ footer {
 .input-box {
   display: flex; gap: 8px;
   max-width: 900px; width: 100%;
-  /* v8.4.12: 发送/停止按钮复用同一位置（绝对定位右侧，运行中切换） */
+  /* v8.7: 发送/停止按钮复用同一位置（绝对定位右侧，运行中切换） */
   position: relative;
 }
 .input-box input {
-  flex: 1; padding: 9px 15px;
-  padding-right: 104px;   /* 为右侧按钮（88px + gap）留位 */
+  flex: 1; padding: 10px 18px;
+  padding-right: 54px;   /* v8.7: 为右侧圆形按钮留位（34px 圆 + 同心间距） */
   background: var(--bg-elevated);
   border: 1px solid var(--border-hairline);
-  border-radius: 8px;
+  border-radius: 999px;  /* v8.7: 胶囊输入框——右端半圆与按钮同心 */
   font-size: 14px; font-family: inherit;
   color: var(--text-primary);
   outline: none;
@@ -366,36 +369,39 @@ footer {
 }
 .input-box input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
 .input-box input::placeholder { color: var(--text-muted); }
-/* v8.4.12: 发送与停止同一位置切换（与主流会话界面一致） */
+/* v8.7: 发送与停止同一位置切换——小巧圆形按钮，圆心与胶囊输入框右端半圆同心 */
 .send-btn, .stop-btn {
   position: absolute;
-  right: 0; top: 50%;
+  right: 3px; top: 50%;
   transform: translateY(-50%);
-  width: 88px; height: 40px;
+  width: 34px; height: 34px;
   padding: 0;
   display: flex; align-items: center; justify-content: center;
-  border-radius: 8px;
-  font-weight: 600; font-size: 13px;
+  border-radius: 50%;
+  font-weight: 600; font-size: 15px;
   cursor: pointer; font-family: inherit;
+  line-height: 1;
   transition: all 0.2s var(--ease-out-quint);
 }
 .send-btn {
   background: var(--accent); color: #FFF;
   border: none;
+  box-shadow: 0 1px 6px var(--accent-glow);
 }
-.send-btn:hover { background: var(--accent-hover); box-shadow: 0 0 16px var(--accent-glow); }
-.send-btn:active { transform: translateY(-50%) scale(0.97); }
-.send-btn:disabled { opacity: 0.3; cursor: not-allowed; transform: translateY(-50%) scale(1); box-shadow: none; }
+.send-btn:hover { background: var(--accent-hover); box-shadow: 0 0 12px var(--accent-glow); }
+.send-btn:active { transform: translateY(-50%) scale(0.94); }
+/* v8.7: 运行中彻底隐藏发送按钮（display 由 JS 切换；此处兜底防残留重叠） */
+.send-btn:disabled { opacity: 0; pointer-events: none; }
 
-/* v8.4.11/8.4.12/8.4.13 停止按钮：与发送按钮同一位置，柔和橙描边区分（与主题一致） */
+/* v8.7 停止按钮：柔和橙描边圆形，与发送按钮同位置切换 */
 .stop-btn {
   background: var(--accent-muted);
   border: 1.5px solid var(--accent);
   color: var(--accent);
-  letter-spacing: .5px;
+  font-size: 13px;
 }
-.stop-btn:hover { background: var(--accent-glow); box-shadow: 0 0 12px var(--accent-glow); }
-.stop-btn:active { transform: translateY(-50%) scale(0.97); }
+.stop-btn:hover { background: var(--accent-glow); box-shadow: 0 0 10px var(--accent-glow); }
+.stop-btn:active { transform: translateY(-50%) scale(0.94); }
 
 /* v8.4.12 权限审批卡片：主题变量驱动（浅/深色一致），会话窗口上方居中弹出 */
 .perm-card {
@@ -1042,10 +1048,12 @@ footer {
 
     <footer>
       <div class="input-box">
-        <input type="text" id="user-input" placeholder="有什么想做的？" onkeypress="if(event.key==='Enter')sendMsg()">
-        <button class="send-btn" id="send-btn" onclick="sendMsg()">发送</button>
+        <!-- v8.7: Enter 发送改为 onkeydown + isComposing 守卫（中文输入法选词确认不再误触发） -->
+        <input type="text" id="user-input" placeholder="有什么想做的？" onkeydown="if(event.key==='Enter'&amp;&amp;!event.isComposing)sendMsg()">
+        <!-- v8.7: 小巧圆形图标按钮（与胶囊输入框右端同心）；运行中由 JS 隐藏本按钮、显示停止按钮 -->
+        <button class="send-btn" id="send-btn" onclick="sendMsg()" title="发送 (Enter)">➤</button>
         <!-- v8.4.11 停止按钮：运行中显示；点击中断当前任务（修改问题后重新发送） -->
-        <button class="stop-btn" id="stop-btn" onclick="stopCurrentTask()" style="display:none" title="停止当前任务（输入有误时可停止后修改问题重新发送）">⏹ 停止</button>
+        <button class="stop-btn" id="stop-btn" onclick="stopCurrentTask()" style="display:none" title="停止当前任务（输入有误时可停止后修改问题重新发送）">⏹</button>
       </div>
     </footer>
   </div>
@@ -1084,7 +1092,7 @@ footer {
     <div class="empty-sidebar" id="ctx-empty">等待首次查询...</div>
     <div id="ctx-body" style="display:none">
       <div class="ctx-bar-outer"><div class="ctx-bar-inner" id="ctxBar"></div></div>
-      <div class="ctx-bar-label" id="ctxBarLabel">0 / 64,000</div>
+      <div class="ctx-bar-label" id="ctxBarLabel">0 / 1,000,000</div>
       <div class="ctx-items" id="ctxItems"></div>
       <div class="ctx-summary" id="ctxSummary"></div>
       <div class="ctx-suggestions" id="ctxSuggestions"></div>
@@ -1328,9 +1336,10 @@ function updateModeUI() {
 
 function setSendDisabled(val) {
   var btn = document.getElementById('send-btn');
-  if (btn) btn.disabled = val;
-  // v8.4.11/8.4.12: 停止按钮与发送按钮同一位置切换（运行中显示，结束/出错/停止后隐藏）
   var stopBtn = document.getElementById('stop-btn');
+  // v8.7: 运行中彻底隐藏发送按钮（此前仅 disabled——两个绝对定位按钮
+  // 同位置叠加造成视觉重叠）；恢复时再显示。停止按钮反向切换。
+  if (btn) { btn.disabled = val; btn.style.display = val ? 'none' : 'flex'; }
   if (stopBtn) stopBtn.style.display = val ? 'flex' : 'none';
 }
 
@@ -1641,6 +1650,9 @@ function toggleRound(id) {
 
 async function sendMsg(isFollowUp) {
   if (isFollowUp === undefined) isFollowUp = false;
+  // v8.7: 运行中忽略重复发送（防连按 Enter/双击造成双气泡与交错回答）
+  var sendBtnEl = document.getElementById('send-btn');
+  if (sendBtnEl && sendBtnEl.disabled) return;
   var query = userInput.value.trim();
   if (!query) return;
 
