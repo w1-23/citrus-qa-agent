@@ -625,10 +625,14 @@ footer {
   from { opacity: 0; transform: translateX(10px); }
   to { opacity: 1; transform: translateX(0); }
 }
+/* v8.10 侧栏手风琴：会话/工作区/文献引用并列收缩——收起时仅标题行，展开时占满剩余空间 */
 .sidebar-section {
   border-bottom: 1px solid var(--border-hairline);
-  flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0;
+  flex: 0 0 auto;
+  display: flex; flex-direction: column; overflow: hidden; min-height: 0;
+  transition: flex-grow 0.25s var(--ease-out-quint);
 }
+.sidebar-section.expanded { flex: 1 1 auto; }
 .sidebar-section:last-child { border-bottom: none; }
 .sidebar-header {
   padding: 9px 16px;
@@ -658,7 +662,6 @@ footer {
 }
 /* v8.9 会话管理 + 工作区侧栏 */
 .session-new-btn {
-  margin-left: auto;
   background: var(--accent-muted); color: var(--accent);
   border: 1px solid var(--accent); border-radius: 5px;
   font-size: 12px; line-height: 1; padding: 2px 7px; cursor: pointer;
@@ -1122,7 +1125,6 @@ footer {
     </button>
     <button class="theme-btn" id="themeBtn" onclick="toggleTheme()" title="切换主题">⊙</button>
     <button class="header-btn" onclick="clearSession()">清空</button>
-    <button class="header-btn primary" onclick="newSession()">新会话</button>
   </div>
 </header>
 
@@ -1175,8 +1177,8 @@ footer {
         </button>
       </div>
     </div>
-    <!-- v8.9 会话管理：会话列表（切换/新建/重命名/软删除） -->
-    <div class="sidebar-section" id="session-section">
+    <!-- v8.9 会话管理：会话列表（切换/新建/重命名/软删除）；v8.10 默认展开 -->
+    <div class="sidebar-section expanded" id="session-section">
       <div class="sidebar-header" onclick="toggleSection('session')">
         <span>会话</span>
         <span class="sidebar-count" id="session-count">0</span>
@@ -1197,7 +1199,7 @@ footer {
         <div class="empty-sidebar">加载中...</div>
       </div>
     </div>
-    <div class="sidebar-section" id="citation-section" style="flex:2">
+    <div class="sidebar-section" id="citation-section">
       <div class="sidebar-header" onclick="toggleSection('citation')">
         <span>文献引用</span>
         <span class="sidebar-count" id="citation-count">0</span>
@@ -1522,15 +1524,39 @@ function toggleMode() {
 (function() { updateModeUI(); })();
 
 /* ─── Sidebar ─── */
-function toggleSection(section) {
-  // v8.9: session/workspace 区块同样支持折叠
-  var map = { citation: 'sidebar-content', session: 'session-list', workspace: 'workspace-list' };
-  var el = document.getElementById(map[section]);
-  var icon = document.getElementById(section + '-toggle');
-  if (!el || !icon) return;
-  el.classList.toggle('collapsed');
-  icon.classList.toggle('collapsed');
+/* v8.10 手风琴：会话/工作区/文献引用并列收缩，同时只展开一个（业界主流侧栏做法）；
+   展开状态持久化到 localStorage，刷新后恢复；全部收起时 active 为空 */
+var _sidebarMap = { citation: 'sidebar-content', session: 'session-list', workspace: 'workspace-list' };
+var _sidebarSections = ['session', 'workspace', 'citation'];
+
+function applySidebar(active) {
+  for (var i = 0; i < _sidebarSections.length; i++) {
+    var s = _sidebarSections[i];
+    var el = document.getElementById(_sidebarMap[s]);
+    var icon = document.getElementById(s + '-toggle');
+    var sec = document.getElementById(s + '-section');
+    if (!el || !icon || !sec) continue;
+    var isActive = (active === s);
+    el.classList.toggle('collapsed', !isActive);
+    icon.classList.toggle('collapsed', !isActive);
+    sec.classList.toggle('expanded', isActive);
+  }
+  localStorage.setItem('citrus_sidebar_active', active || '');
 }
+
+function toggleSection(section) {
+  var el = document.getElementById(_sidebarMap[section]);
+  if (!el) return;
+  var isCollapsed = el.classList.contains('collapsed');
+  applySidebar(isCollapsed ? section : null);
+}
+
+/* 启动恢复上次展开的面板（默认会话区） */
+(function restoreSidebar() {
+  var saved = localStorage.getItem('citrus_sidebar_active');
+  if (saved === 'workspace' || saved === 'citation') applySidebar(saved);
+  else applySidebar('session');
+})();
 
 /* ─── v8.9 会话管理（列表/切换/新建/重命名/软删除）+ 工作区文件 ─── */
 var _sessions = [];
@@ -1957,6 +1983,8 @@ async function newSession() {
     sessionId = data.session_id;
     localStorage.setItem('citrus_session_id', sessionId);
     await clearSession();
+    // v8.10: 新建后展开会话面板，让用户看到会话列表更新
+    applySidebar('session');
   } catch (e) { alert('创建新会话失败: ' + e.message); }
 }
 
@@ -2261,7 +2289,7 @@ async function sendMsg(isFollowUp) {
   streamOnce();
 
   function renderCitationItem(item){var du=item.doi&&item.doi!=='N/A'?'https://doi.org/'+encodeURIComponent(item.doi):'#';var b=item.type==='main'?'citation-badge':item.type==='dynamic'?'citation-badge uncited':'citation-badge uncited';var sl=item.type==='dynamic'?'Agent 发现':item.type==='web'?'Web':item.type==='historical'?'历史证据':(item.score?'CE='+item.score.toFixed(3):'');var h='<div class="citation-item" onclick="this.classList.toggle(\'expanded\')">';h+='<div class="citation-header"><span class="'+b+'">['+escapeHtml(item.ref_id)+']</span><span class="citation-score">'+escapeHtml(sl)+'</span></div>';if(item.type==='web'){if(item.url)h+='<a href="'+escapeHtml(item.url)+'" target="_blank" class="citation-doi" onclick="event.stopPropagation()">'+escapeHtml(item.url)+'</a>'}else if(item.doi&&item.doi!=='N/A'){h+='<a href="'+du+'" target="_blank" class="citation-doi" onclick="event.stopPropagation()">'+escapeHtml(item.doi)+'</a>'}if(item.section_name)h+='<div class="citation-text"><strong>Section:</strong> '+escapeHtml(item.section_name)+'</div>';if(item.text_preview)h+='<div class="citation-text">'+escapeHtml((item.text_preview||'').substring(0,250))+'</div>';h+='<div class="citation-detail">';if(item.title)h+='<div class="citation-text"><strong>Title:</strong> '+escapeHtml((item.title||'').substring(0,200))+'</div>';if(item.authors)h+='<div class="citation-text"><strong>Authors:</strong> '+escapeHtml(item.authors)+'</div>';if(item.year)h+='<div class="citation-text"><strong>Year:</strong> '+escapeHtml(item.year)+'</div>';if(item.chunk_id)h+='<div class="citation-text"><strong>Chunk:</strong> '+escapeHtml(item.chunk_id)+'</div>';h+='</div></div>';return h}
-  function renderRoundSidebar(){if(roundHistory.length===0){sidebarContent.innerHTML='<div class="empty-sidebar">提交问题后文献将在此展示</div>';citationCount.textContent='0';return}var tC=0,tU=0;for(var i=0;i<roundHistory.length;i++){tC+=roundHistory[i].cited.length;tU+=roundHistory[i].uncited.length}citationCount.textContent=(tC+tU);var html='';for(var i=roundHistory.length-1;i>=0;i--){var round=roundHistory[i];var all=[];for(var k=0;k<round.cited.length;k++){if(round.cited[k].type!=='web')all.push(round.cited[k])}for(var k=0;k<round.uncited.length;k++){if(round.uncited[k].type!=='web')all.push(round.uncited[k])}for(var k=0;k<(round.historical||[]).length;k++){all.push(round.historical[k])}if(all.length===0)continue;var qp=round.query.length>25?round.query.substring(0,25)+'...':round.query;var open=i===roundHistory.length-1;html+='<div class="round-group">';html+='<div class="round-header" onclick="toggleRound(\'round-'+round.roundId+'\')">';html+='<span class="toggle-icon" id="round-'+round.roundId+'-icon">▶</span>';html+='<span class="round-title">Round '+round.roundId+': '+qp+'</span>';html+='<span class="round-count">'+all.length+'</span></div>';html+='<div class="round-body" id="round-'+round.roundId+'"'+(open?'':' style="display:none"')+'>';for(var m=0;m<all.length;m++){html+=renderCitationItem(all[m])}html+='</div></div>'}sidebarContent.innerHTML=html||'<div class="empty-sidebar">本轮未检索到相关文献</div>'}
+  function renderRoundSidebar(){if(roundHistory.length===0){sidebarContent.innerHTML='<div class="empty-sidebar">提交问题后文献将在此展示</div>';citationCount.textContent='0';return}var tC=0,tU=0;for(var i=0;i<roundHistory.length;i++){tC+=roundHistory[i].cited.length;tU+=roundHistory[i].uncited.length}citationCount.textContent=(tC+tU);if(sidebarContent.classList.contains('collapsed')){applySidebar('citation')}var html='';for(var i=roundHistory.length-1;i>=0;i--){var round=roundHistory[i];var all=[];for(var k=0;k<round.cited.length;k++){if(round.cited[k].type!=='web')all.push(round.cited[k])}for(var k=0;k<round.uncited.length;k++){if(round.uncited[k].type!=='web')all.push(round.uncited[k])}for(var k=0;k<(round.historical||[]).length;k++){all.push(round.historical[k])}if(all.length===0)continue;var qp=round.query.length>25?round.query.substring(0,25)+'...':round.query;var open=i===roundHistory.length-1;html+='<div class="round-group">';html+='<div class="round-header" onclick="toggleRound(\'round-'+round.roundId+'\')">';html+='<span class="toggle-icon" id="round-'+round.roundId+'-icon">▶</span>';html+='<span class="round-title">Round '+round.roundId+': '+qp+'</span>';html+='<span class="round-count">'+all.length+'</span></div>';html+='<div class="round-body" id="round-'+round.roundId+'"'+(open?'':' style="display:none"')+'>';for(var m=0;m<all.length;m++){html+=renderCitationItem(all[m])}html+='</div></div>'}sidebarContent.innerHTML=html||'<div class="empty-sidebar">本轮未检索到相关文献</div>'}
   }
 
 /* v8.4.9 会话持久化：刷新/关闭重开后恢复历史对话渲染（数据在 sessions.db，只缺读取通道） */
