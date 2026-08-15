@@ -73,7 +73,17 @@ def main():
     ap.add_argument("--batch", default="",
                     help="批次名（默认取输入目录名）")
     ap.add_argument("--chunk-size", type=int, default=800)
+    ap.add_argument("--backend", default="auto", choices=["auto", "qdrant", "lancedb"],
+                    help="向量后端（auto=检测 data/lancedb，默认）")
     args = ap.parse_args()
+
+    # v8.9 后端选择：auto → 已有 lancedb 数据则用 lancedb，否则 qdrant
+    backend = args.backend
+    if backend == "auto":
+        lance_root = ROOT / "data" / "lancedb"
+        backend = "lancedb" if (lance_root.exists() and any(lance_root.glob("*.lance"))) \
+            else "qdrant"
+    print(f"🍊 语料导入 → 批次 [{batch}]（{len(files)} 个文件）| 向量后端: {backend}")
 
     src_dir = Path(args.dir)
     if not src_dir.exists():
@@ -123,43 +133,77 @@ def main():
     vecs = emb.embed_docs([c["text"] for c in all_chunks])
     print(f"    向量化完成（{time.time() - t0:.0f}s, 维度 {emb.dim}）")
 
-    print("  3/3 写入 Qdrant 向量库 + chunks.jsonl ...")
-    from qdrant_client import QdrantClient
-    from qdrant_client.models import Distance, VectorParams, PointStruct
+    print("  3/3 写入向量库 + chunks.jsonl ...")
     batch_dir.mkdir(parents=True, exist_ok=True)
     (batch_dir / "chunks").mkdir(parents=True, exist_ok=True)
-    client = QdrantClient(path=str(qdrant_path))
-    coll = "citrus_literature"
-    if coll not in {c.name for c in client.get_collections().collections}:
-        client.create_collection(
-            collection_name=coll,
-            vectors_config=VectorParams(size=emb.dim, distance=Distance.COSINE),
-        )
-    points = [
-        PointStruct(
-            id=i + 1,
-            vector=vecs[i],
-            payload={
+
+    if backend == "lancedb":
+        import numpy as np
+        import lancedb
+        lance_root = ROOT / "data" / "lancedb"
+        lance_root.mkdir(parents=True, exist_ok=True)
+        db = lancedb.connect(str(lance_root))
+        rows = [
+            {
+                "vector": np.asarray(vecs[i], dtype=np.float32),
                 "paper_id": c["paper_id"],
                 "chunk_index": c["chunk_index"],
-                "title": c["title"],
-            },
-        )
-        for i, c in enumerate(all_chunks)
-    ]
-    client.upsert(collection_name=coll, points=points)
-    client.close()
+            }
+            for i, c in enumerate(all_chunks)
+        ]
+        # 追加式写入（v8.9 热更新：同一批次重复导入会追加，检索即查即得）
+        table = None
+        try:
+            table = db.open_table(batch)
+        except Exception:
+            pass
+        if table is None:
+            table = db.create_table(batch, data=rows)
+            try:
+                table.create_index(metric="cosine", index_type="IVF_HNSW_FLAT",
+                                   num_partitions=64, m=16, ef_construction=200,
+                                   replace=True)
+            except Exception as e:
+                print(f"    ⚠ 索引创建失败（flat 扫描兜底）: {e}")
+        else:
+            table.add(rows)
+        print(f"    ✓ LanceDB 表 [{batch}] 现有 {table.count_rows()} 行")
+    else:
+        from qdrant_client import QdrantClient
+        from qdrant_client.models import Distance, VectorParams, PointStruct
+        qdrant_path = batch_dir / "qdrant_data"
+        client = QdrantClient(path=str(qdrant_path))
+        coll = "citrus_literature"
+        if coll not in {c.name for c in client.get_collections().collections}:
+            client.create_collection(
+                collection_name=coll,
+                vectors_config=VectorParams(size=emb.dim, distance=Distance.COSINE),
+            )
+        points = [
+            PointStruct(
+                id=i + 1,
+                vector=vecs[i],
+                payload={
+                    "paper_id": c["paper_id"],
+                    "chunk_index": c["chunk_index"],
+                    "title": c["title"],
+                },
+            )
+            for i, c in enumerate(all_chunks)
+        ]
+        client.upsert(collection_name=coll, points=points)
+        client.close()
     with open(chunks_path, "w", encoding="utf-8") as f:
         for c in all_chunks:
             f.write(json.dumps(c, ensure_ascii=False) + "\n")
     (batch_dir / "metadata.json").write_text(
-        json.dumps({"batch": batch, "files": len(files), "chunks": len(all_chunks)},
+        json.dumps({"batch": batch, "files": len(files), "chunks": len(all_chunks),
+                    "backend": backend},
                    ensure_ascii=False, indent=2), encoding="utf-8")
 
-    print(f"\n✅ 完成: 批次 [{batch}] 共 {len(all_chunks)} 块")
+    print(f"\n✅ 完成: 批次 [{batch}] 共 {len(all_chunks)} 块（后端: {backend}）")
     print(f"   chunks:  {chunks_path}")
-    print(f"   qdrant:  {qdrant_path}")
-    print("   重启服务（或新会话）后检索自动加载该批次。")
+    print(f"   重启服务（或新会话）后检索自动加载该批次。")
 
 
 if __name__ == "__main__":

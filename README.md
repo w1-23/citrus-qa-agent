@@ -156,6 +156,15 @@ citrus-qa-agent/
 
 `-full-data` 完整包内置**示例语料**（公开下载的科研文献，已编码为向量）——开箱即可测试检索、引用、综述写作全链路。示例语料位于 `agent/data/`，可随时删除或替换。
 
+### 向量后端（v8.9）
+
+默认 `auto`：检测到 `data/lancedb/`（嵌入式向量库：百万级、热更新、无锁）则自动使用，否则回退 Qdrant local（旧数据包兼容）。手动指定可在 `config.yaml` 设置 `retrieval.backend: qdrant|lancedb|auto`。
+
+```bash
+# 将现有 Qdrant 数据迁移到 LanceDB（rag-agent 环境，约 1 分钟）
+python migrate_qdrant_to_lancedb.py
+```
+
 ### 导入自己的文献
 
 使用内置导入工具（在 `agent/` 目录）：
@@ -164,16 +173,18 @@ citrus-qa-agent/
 # 把 PDF/txt/md 放进 agent/data/import/，然后：
 python ingest.py                        # 自动分块 → 向量化 → 写入批次
 python ingest.py --dir 我的文献目录 --batch mycorpus
+python ingest.py --backend lancedb     # 显式指定后端（默认 auto）
 ```
 
-导入后**重启服务即生效**。检索器自动扫描 `agent/data/` 下所有批次目录：
+导入后**重启服务即生效**（LanceDB 后端同一连接 add 后即查即得）。检索器自动扫描 `agent/data/` 下所有批次目录：
 
 ```
 agent/data/
 └── 批次名/                # 任意命名，自动被发现
     ├── chunks/chunks.jsonl   # 分块文本
-    ├── qdrant_data/          # Qdrant 向量库
+    ├── qdrant_data/          # Qdrant 向量库（旧后端）
     └── metadata.json
+agent/data/lancedb/           # LanceDB 向量库（新后端，表名=批次名）
 ```
 
 - `data/` 属于你的私有知识库：**不进 Git 仓库、不进主包**（`pack_release.ps1` 与 `.gitignore` 均已排除；仅 `-full-data` 包附带公开示例语料）

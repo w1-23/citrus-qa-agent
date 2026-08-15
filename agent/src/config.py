@@ -132,6 +132,10 @@ class Settings(BaseSettings):
     # 7. API Timeouts & Limits
     QDRANT_TIMEOUT: int = Field(default_factory=lambda: _yaml_val("api", "qdrant_timeout", default=60))
 
+    # v8.9 向量检索后端（auto | qdrant | lancedb）：lancedb 嵌入式百万级+热更新+无锁；
+    # auto = 检测 data/lancedb 有表则用 lancedb，否则回退 qdrant（新旧数据包开箱即用）
+    RETRIEVAL_BACKEND: str = Field(default_factory=lambda: _yaml_val("retrieval", "backend", default="auto"))
+
     # 8. System Paths & Logging
     DATA_DIR: Path = Field(default_factory=lambda: PROJECT_ROOT / "data")
     LOG_DIR: str = Field(default_factory=lambda: _yaml_val("logging", "dir", default="logs"))

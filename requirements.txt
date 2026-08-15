@@ -1,4 +1,4 @@
-﻿# Core
+# Core
 langchain-core>=0.3.0
 langchain-openai>=0.2.0
 langgraph>=0.2.0
@@ -28,6 +28,8 @@ arxiv>=2.0.0
 pdfplumber>=0.10.0
 PyMuPDF>=1.23.0
 qdrant-client>=1.9.0
+# v8.9: 嵌入式向量库（百万级/热更新/无锁；与 Qdrant 并存，backend=auto 自动选择）
+lancedb==0.37.1
 fastembed>=0.3.0
 onnxruntime>=1.16.0
 

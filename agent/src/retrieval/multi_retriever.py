@@ -103,6 +103,16 @@ class MultiBatchRetriever:
             self.embedder = Embedder()
             self.reranker = Reranker()
             self.batches: Dict[str, Tuple[QdrantClient, str]] = {}
+            self.lance_tables: Dict[str, object] = {}   # v8.9 LanceDB 后端: batch -> table
+            self.lance_db = None
+            self.backend = (settings.RETRIEVAL_BACKEND or "auto").strip().lower()
+            # v8.9 auto：优先 LanceDB（data/lancedb 有表），否则回退 Qdrant——
+            # 新数据包（lancedb）与旧数据包（qdrant_data）开箱即用
+            if self.backend == "auto":
+                lance_root = self.data_dir / "lancedb"
+                has_lance = lance_root.exists() and any(lance_root.glob("*.lance"))
+                self.backend = "lancedb" if has_lance else "qdrant"
+                logger.info(f"[Retriever] backend auto -> {self.backend}")
             self.global_chunks: List[Dict] = []
             self.bm25 = BM25Plus()
             self._idx_map = {}
@@ -113,7 +123,9 @@ class MultiBatchRetriever:
             try:
                 self._load_data()
                 self._initialized = True
-                logger.info(f"[MultiBatchRetriever] 初始化完成 | 批次: {len(self.batches)} | 块数: {len(self.global_chunks)}")
+                logger.info(f"[MultiBatchRetriever] 初始化完成 | backend={self.backend} | "
+                            f"批次: {len(self.batches) + len(self.lance_tables)} | "
+                            f"块数: {len(self.global_chunks)}")
                 if self.failed_batches:
                     logger.error(
                         f"[MultiBatchRetriever] {len(self.failed_batches)} 批次向量库不可用（BM25-only 降级）: "
@@ -128,6 +140,7 @@ class MultiBatchRetriever:
 
         v8.4.3 工单10: 关闭后删除本实例持有的 .lock——否则每次启动都触发
         "cleaned stale lock" 噪音（进程退出不释放锁文件）。
+        v8.9: LanceDB 后端无需关闭（文件级句柄，无锁）。
         """
         for batch_name, (client, _) in list(self.batches.items()):
             try:
@@ -146,9 +159,11 @@ class MultiBatchRetriever:
         except Exception:
             pass
         self.batches.clear()
+        self.lance_tables.clear()
+        self.lance_db = None
         self.global_chunks.clear()
         self._initialized = False
-        logger.info("[MultiBatchRetriever] closed all Qdrant clients")
+        logger.info("[MultiBatchRetriever] closed all vector backends")
 
     # ========== 原有业务逻辑 ==========
     def _clean_stale_locks(self) -> set:
@@ -189,54 +204,56 @@ class MultiBatchRetriever:
         logger.info(f"Scanning multi-source batches in {self.data_dir}...")
         for batch_dir in sorted(self.data_dir.iterdir()):
             if not batch_dir.is_dir(): continue
-            qdrant_path = batch_dir / "qdrant_data"
             chunks_path = batch_dir / "chunks" / "chunks.jsonl"
-            if qdrant_path.exists() and chunks_path.exists():
-                batch_name = batch_dir.name
-                if batch_name in lock_conflict:
-                    # v8.3.4: 另一实例占用 → 跳过 Qdrant（避免重复失败日志），BM25 仍可构建
-                    with open(chunks_path, encoding="utf-8") as f:
-                        for local_idx, line in enumerate(f):
-                            if not line.strip(): continue
-                            chunk = json.loads(line)
-                            chunk["_batch"] = batch_name
-                            chunk["_global_idx"] = len(self.global_chunks)
-                            self.global_chunks.append(chunk)
-                    continue
-                try:
-                    client = QdrantClient(path=str(qdrant_path), timeout=settings.QDRANT_TIMEOUT, prefer_grpc=False)
-                    colls = client.get_collections().collections
-                    coll_name = colls[0].name if colls else "citrus_literature"
-                    self.batches[batch_name] = (client, coll_name)
-                except Exception as e:
-                    # v8.3.4: 瞬时窗口重试一次（删锁后 Qdrant 内部清理延迟/竞态）
-                    msg = str(e)
-                    if "already accessed" in msg or "lock" in msg.lower():
-                        time.sleep(2)
-                        try:
-                            client = QdrantClient(path=str(qdrant_path), timeout=settings.QDRANT_TIMEOUT, prefer_grpc=False)
-                            colls = client.get_collections().collections
-                            coll_name = colls[0].name if colls else "citrus_literature"
-                            self.batches[batch_name] = (client, coll_name)
-                        except Exception as e2:
-                            self.failed_batches[batch_name] = str(e2)[:120]
-                            logger.error(f"Failed to load Qdrant for {batch_name}: {e2}")
-                            continue
-                    else:
-                        self.failed_batches[batch_name] = msg[:120]
-                        logger.warning(f"Failed to load Qdrant for {batch_name}: {e}")
+            if not chunks_path.exists():
+                continue
+            batch_name = batch_dir.name
+            # 公共：chunks.jsonl → global_chunks（两种后端共用；Qdrant 锁冲突时仅此处可用）
+            with open(chunks_path, encoding="utf-8") as f:
+                for local_idx, line in enumerate(f):
+                    if not line.strip(): continue
+                    chunk = json.loads(line)
+                    chunk["_batch"] = batch_name
+                    chunk["_global_idx"] = len(self.global_chunks)
+                    self.global_chunks.append(chunk)
+            if self.backend == "lancedb":
+                self._load_lance_batch(batch_name)
+                continue
+            # ── qdrant 后端 ──
+            if batch_name in lock_conflict:
+                # v8.3.4: 另一实例占用 → 跳过 Qdrant（避免重复失败日志），BM25 仍可构建
+                continue
+            qdrant_path = batch_dir / "qdrant_data"
+            if not qdrant_path.exists():
+                continue
+            try:
+                client = QdrantClient(path=str(qdrant_path), timeout=settings.QDRANT_TIMEOUT, prefer_grpc=False)
+                colls = client.get_collections().collections
+                coll_name = colls[0].name if colls else "citrus_literature"
+                self.batches[batch_name] = (client, coll_name)
+            except Exception as e:
+                # v8.3.4: 瞬时窗口重试一次（删锁后 Qdrant 内部清理延迟/竞态）
+                msg = str(e)
+                if "already accessed" in msg or "lock" in msg.lower():
+                    time.sleep(2)
+                    try:
+                        client = QdrantClient(path=str(qdrant_path), timeout=settings.QDRANT_TIMEOUT, prefer_grpc=False)
+                        colls = client.get_collections().collections
+                        coll_name = colls[0].name if colls else "citrus_literature"
+                        self.batches[batch_name] = (client, coll_name)
+                    except Exception as e2:
+                        self.failed_batches[batch_name] = str(e2)[:120]
+                        logger.error(f"Failed to load Qdrant for {batch_name}: {e2}")
                         continue
-                with open(chunks_path, encoding="utf-8") as f:
-                    for local_idx, line in enumerate(f):
-                        if not line.strip(): continue
-                        chunk = json.loads(line)
-                        chunk["_batch"] = batch_name
-                        chunk["_global_idx"] = len(self.global_chunks)
-                        self.global_chunks.append(chunk)
-        logger.info(f"Loaded {len(self.batches)} batches, {len(self.global_chunks)} total chunks.")
-        if not self.batches:
+                else:
+                    self.failed_batches[batch_name] = msg[:120]
+                    logger.warning(f"Failed to load Qdrant for {batch_name}: {e}")
+                    continue
+        logger.info(f"Loaded {len(self.batches) + len(self.lance_tables)} batches, "
+                    f"{len(self.global_chunks)} total chunks.")
+        if not self.batches and not self.lance_tables:
             logger.error(
-                "[MultiBatchRetriever] 所有批次 Qdrant 加载失败 — 向量检索不可用，仅 BM25 降级运行。"
+                "[MultiBatchRetriever] 所有批次向量后端加载失败 — 向量检索不可用，仅 BM25 降级运行。"
                 "请检查: ① data/ 目录完整性 ② 是否有其他服务实例占用（local 模式单实例限制）"
             )
         if self.global_chunks:
@@ -375,6 +392,57 @@ class MultiBatchRetriever:
             f"(title:{with_title}/{len(self.global_chunks)} year:{with_year}/{len(self.global_chunks)})"
         )
 
+    def _load_lance_batch(self, batch_name: str) -> None:
+        """v8.9 LanceDB 后端：打开 data/lancedb 中该批次的表（表名=批次名）。"""
+        try:
+            if self.lance_db is None:
+                import lancedb
+                self.lance_db = lancedb.connect(str(self.data_dir / "lancedb"))
+            table = self.lance_db.open_table(batch_name)
+            self.lance_tables[batch_name] = table
+            logger.info(f"[Retriever] LanceDB table loaded: {batch_name} "
+                        f"({table.count_rows()} rows)")
+        except Exception as e:
+            self.failed_batches[batch_name] = str(e)[:120]
+            logger.warning(f"Failed to load LanceDB table for {batch_name}: {e}")
+
+    def _vector_search(self, batch_name: str, query_vec: List[float],
+                       limit: int) -> List[Tuple[int, float]]:
+        """按后端分派向量检索（v8.9）。返回 [(global_idx, score)]，score 越大越相关。"""
+        if self.backend == "lancedb":
+            table = self.lance_tables.get(batch_name)
+            if table is None:
+                return []
+            return self._search_lance(batch_name, table, query_vec, limit)
+        item = self.batches.get(batch_name)
+        if item is None:
+            return []
+        client, coll = item
+        return self._search_qdrant(batch_name, client, coll, query_vec, limit)
+
+    def _search_lance(self, batch_name: str, table, query_vec: List[float],
+                      limit: int) -> List[Tuple[int, float]]:
+        try:
+            # v8.9: 与 Qdrant 同口径 cosine 度量——由建索引时 metric="cosine" 决定
+            # （LanceDB 0.37 search() 不支持查询时指定 metric；无索引 flat 默认 L2）
+            res = table.search(query_vec).limit(limit).to_list()
+            out = []
+            for r in res:
+                # AG-11 同款定位：LanceDB 行内 (paper_id, chunk_index) → global_idx
+                g = self._idx_map.get((str(r.get("paper_id", "")),
+                                       int(r.get("chunk_index", -1))))
+                if g is None:
+                    continue
+                # cosine 度量下 _distance = 1 - cos_sim → 相似度 = 1 - _distance
+                score = 1.0 - float(r.get("_distance", 0.0))
+                out.append((self.global_chunks[g]["_global_idx"], score))
+            return out
+        except Exception as e:
+            # v8.3.5: 运行时失败累计 → 空结果归因联动（用户/LLM 可感知降级）
+            self.runtime_failed_batches.add(batch_name)
+            logger.error(f"LanceDB search failed for {batch_name}: {e}")
+            return []
+
     def _search_qdrant(self, batch_name: str, client: QdrantClient, coll_name: str,
                        query_vec: List[float], limit: int) -> List[Tuple[int, float]]:
         try:
@@ -405,13 +473,15 @@ class MultiBatchRetriever:
         dt_embed = (time.time() - t_embed) * 1000
 
         all_vector_hits = []
-        if not self.batches:
-            logger.warning("[Retriever] 无可用 Qdrant 批次，降级为 BM25 纯文本检索")
+        if not self.batches and not self.lance_tables:
+            logger.warning("[Retriever] 无可用向量后端，降级为 BM25 纯文本检索")
         t_qdrant = time.time()
-        workers = max(1, len(self.batches) * len(queries))
+        batch_names = list(self.lance_tables.keys()) if self.backend == "lancedb" \
+            else list(self.batches.keys())
+        workers = max(1, len(batch_names) * len(queries))
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            futures = [ex.submit(self._search_qdrant, name, client, coll, vec, settings.TOP_K_VECTOR)
-                       for vec in query_vecs for name, (client, coll) in self.batches.items()]
+            futures = [ex.submit(self._vector_search, name, vec, settings.TOP_K_VECTOR)
+                       for vec in query_vecs for name in batch_names]
             for f in as_completed(futures): all_vector_hits.extend(f.result())
         dt_qdrant = (time.time() - t_qdrant) * 1000
 
@@ -476,17 +546,21 @@ class MultiBatchRetriever:
         orig_vec = self.embedder.embed_query(original_query)
         hyde_vec = self.embedder.embed_query(hyde_answer)
 
-        _emit(f"并发检索 Qdrant ({len(self.batches)} 批次)...")
+        _emit(f"并发检索向量后端 ({len(self.batches) + len(self.lance_tables)} 批次)...")
         orig_v_hits: list[tuple[int, float]] = []
         hyde_v_hits: list[tuple[int, float]] = []
-        if self.batches:
-            workers = max(1, len(self.batches) * 2)
+        batch_names = list(self.lance_tables.keys()) if self.backend == "lancedb" \
+            else list(self.batches.keys())
+        if batch_names:
+            workers = max(1, len(batch_names) * 2)
             with ThreadPoolExecutor(max_workers=workers) as ex:
                 futures_orig: list = []
                 futures_hyde: list = []
-                for name, (client, coll) in self.batches.items():
-                    futures_orig.append(ex.submit(self._search_qdrant, name, client, coll, orig_vec, settings.TOP_K_VECTOR))
-                    futures_hyde.append(ex.submit(self._search_qdrant, name, client, coll, hyde_vec, settings.TOP_K_VECTOR))
+                for name in batch_names:
+                    futures_orig.append(ex.submit(
+                        self._vector_search, name, orig_vec, settings.TOP_K_VECTOR))
+                    futures_hyde.append(ex.submit(
+                        self._vector_search, name, hyde_vec, settings.TOP_K_VECTOR))
                 for f in as_completed(futures_orig):
                     orig_v_hits.extend(f.result())
                 for f in as_completed(futures_hyde):
