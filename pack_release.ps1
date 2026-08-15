@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 #  Citrus QA Agent 发布打包（v8.9.0）
 #  ------------------------------------------------------------
 #  用法:
@@ -24,18 +24,23 @@ $ZipPath = Join-Path $Dist $ZipName
 $Stage = Join-Path $env:TEMP ("citrus-pack-" + [guid]::NewGuid().ToString('N'))
 
 # ── 仅语料附件（zip 内路径 agent/data/...，解压到仓库根目录即得 agent/data）──
+#  v8.9.0: 只打包 LanceDB 向量库 + 各批次 chunks.jsonl（证据定位必需）；
+#  旧 Qdrant 批次目录（向量库本体，1.18GB 冗余）不进发布包——体积减半且远低于
+#  GitHub 2GiB 单文件上限；本地仍完整保留，可随时回退 qdrant 后端。
 if ($CorpusOnly) {
     $DataDir = Join-Path $Root 'agent\data'
     if (-not (Test-Path $DataDir)) {
         Write-Host "⚠ agent/data 不存在，无法打包语料" -ForegroundColor Red
         exit 1
     }
-    Write-Host "打包语料附件 corpus-v$Version.zip (LanceDB 向量库) ..." -ForegroundColor Yellow
+    Write-Host "打包语料附件 corpus-v$Version.zip (LanceDB + chunks.jsonl) ..." -ForegroundColor Yellow
     New-Item -ItemType Directory -Force -Path (Join-Path $Stage 'agent') | Out-Null
-    robocopy $DataDir (Join-Path $Stage 'agent\data') /E /XF *.lock /R:0 /W:0 /NFL /NDL /NJH /NJS | Out-Null
-    if (Test-Path (Join-Path $Stage 'agent\data\data')) {
-        Write-Host "⚠ 检测到 data\data 嵌套，修正..." -ForegroundColor Yellow
-        robocopy (Join-Path $Stage 'agent\data\data') (Join-Path $Stage 'agent\data') /E /MOVE /XF *.lock /R:0 /W:0 /NFL /NDL /NJH /NJS | Out-Null
+    $StageData = Join-Path $Stage 'agent\data'
+    robocopy (Join-Path $DataDir 'lancedb') (Join-Path $StageData 'lancedb') /E /XF *.lock /R:0 /W:0 /NFL /NDL /NJH /NJS | Out-Null
+    Get-ChildItem $DataDir -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'chunks\chunks.jsonl') } | ForEach-Object {
+        $dst = Join-Path $StageData (Join-Path $_.Name 'chunks')
+        New-Item -ItemType Directory -Force -Path $dst | Out-Null
+        Copy-Item -Force (Join-Path $_.FullName 'chunks\chunks.jsonl') (Join-Path $dst 'chunks.jsonl')
     }
     New-Item -ItemType Directory -Force -Path $Dist | Out-Null
     $CorpusZipPath = Join-Path $Dist "corpus-v$Version.zip"
@@ -97,25 +102,27 @@ if ($IncludeModels) {
     }
 }
 
-# ── 完整包: 附带示例语料（用户公开文献，开箱可测检索/引用/写作全链路）──
+# ── 完整包: 附带示例语料（LanceDB 向量库 + chunks.jsonl，开箱可测检索/引用/写作全链路）──
 if ($IncludeData) {
     if (Test-Path $DataDir) {
-        Write-Host "附带示例语料 (data/, 用户公开文献批次) ..." -ForegroundColor Cyan
+        Write-Host "附带示例语料 (data/lancedb + chunks.jsonl) ..." -ForegroundColor Cyan
         $DataStage = Join-Path $StageAgent 'data'
         if (Test-Path $DataStage) { Remove-Item -Recurse -Force $DataStage }
-        # robocopy: 排除 .lock（qdrant 运行中锁）+ 跳过被占用文件
-        robocopy $DataDir $DataStage /E /XF *.lock /R:0 /W:0 /NFL /NDL /NJH /NJS | Out-Null
-        if (Test-Path (Join-Path $DataStage 'data')) {
-            Write-Host "⚠ 检测到 data\data 嵌套，修正..." -ForegroundColor Yellow
-            robocopy (Join-Path $DataStage 'data') $DataStage /E /MOVE /XF *.lock /R:0 /W:0 /NFL /NDL /NJH /NJS | Out-Null
+        robocopy (Join-Path $DataDir 'lancedb') (Join-Path $DataStage 'lancedb') /E /XF *.lock /R:0 /W:0 /NFL /NDL /NJH /NJS | Out-Null
+        Get-ChildItem $DataDir -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'chunks\chunks.jsonl') } | ForEach-Object {
+            $dst = Join-Path $DataStage (Join-Path $_.Name 'chunks')
+            New-Item -ItemType Directory -Force -Path $dst | Out-Null
+            Copy-Item -Force (Join-Path $_.FullName 'chunks\chunks.jsonl') (Join-Path $dst 'chunks.jsonl')
         }
     } else {
         Write-Host "⚠ agent/data 不存在，跳过语料" -ForegroundColor Yellow
     }
 }
 
-# ── 清理暂存区嵌套产物（递归复制不过滤，逐层清理 __pycache__/.pyc/.env）──
+# ── 清理暂存区嵌套产物（递归复制不过滤，逐层清理 __pycache__/.pyc/.env/.tmp_runner）──
 Get-ChildItem -Path $Stage -Recurse -Directory -Filter '__pycache__' -ErrorAction SilentlyContinue |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+Get-ChildItem -Path $Stage -Recurse -Directory -Filter '.tmp_runner' -ErrorAction SilentlyContinue |
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 Get-ChildItem -Path $Stage -Recurse -File -Include '*.pyc', '*.tmp' -ErrorAction SilentlyContinue |
     Remove-Item -Force -ErrorAction SilentlyContinue

@@ -1,4 +1,4 @@
-# Citrus QA Agent 停止脚本（v8.9）
+﻿# Citrus QA Agent 停止脚本（v8.9）
 # 用法: 右键 -> 使用 PowerShell 运行（或在 PowerShell 中执行 .\stop.ps1）
 # 作用: 停止占用 8000 端口的服务进程
 

@@ -24,10 +24,10 @@
 
 ### 方式一：一键运行（推荐，零配置）
 
-从 [Releases](https://github.com/w1-23/citrus-qa-agent/releases) 下载发布包，解压后**双击运行 `run.ps1`**（或右键 → 使用 PowerShell 运行）：
+从 [Releases](https://github.com/w1-23/citrus-qa-agent/releases) 下载主包，解压后**双击运行 `run.ps1`**（或右键 → 使用 PowerShell 运行）：
 
 ```
-下载主包（+ 可选语料包）→ 解压 → 运行 run.ps1 → 浏览器自动打开 http://localhost:8000 → 页面填 API Key
+下载主包 → 解压 → 运行 run.ps1 → 首次自动下载语料 + 模型 → 浏览器自动打开 http://localhost:8000 → 页面填 API Key
 ```
 
 发布包：
@@ -35,7 +35,9 @@
 | 包 | 大小 | 说明 |
 |---|---|---|
 | `citrus-qa-agent-v8.9.0.zip` | ~5 MB | **必下**：代码 + 一键脚本 |
-| `citrus-qa-agent-v8.9.0-data.zip` | ~1.2 GB | **可选**：内置示例语料（公开文献 5 批次），开箱即可测检索/引用/写作全链路 |
+| `corpus-v8.9.0.zip` | ~1.05 GB | **无需手动下载**：示例语料（公开文献 5 批次，LanceDB 向量库）。`run.ps1` 首次运行自动从 Releases 下载并解压到 `agent/data/`，之后秒级跳过 |
+
+> 国内下载加速：下载语料前先设置环境变量 `GH_MIRROR`（如 `https://ghproxy.net/`），`run.ps1` 会自动给下载地址加前缀；也可手动下载 `corpus-v8.9.0.zip` 解压到项目根目录后直接运行。
 
 **模型自动安装**：向量编码（multilingual-e5-large）与重排（bge-reranker-v2-m3）模型不打包（重排模型单文件超 GitHub 2GB 上限）——首次运行 `run.ps1` 自动经 **HuggingFace 国内镜像（hf-mirror.com）** 下载，约 5-15 分钟，一次完成后秒级启动；也可手动运行 `python prepare_models.py`（`--skip-reranker` 可跳过重排模型）。
 
@@ -43,14 +45,15 @@
 
 | 步骤 | 行为 |
 |---|---|
-| 1. Python | 未安装则自动 `winget install Python 3.11` |
-| 2. 虚拟环境 | 自动创建 `agent/.venv`（仅首次） |
-| 3. 依赖 | 自动 `pip install -r requirements.txt`（仅首次，5-10 分钟） |
-| 4. 模型 | 自动下载向量编码模型 + 导出重排模型到本地缓存（仅首次，5-15 分钟；之后秒级启动） |
-| 5. 启动 | 启动服务并自动打开浏览器 |
+| 1. 语料 | 检测 `agent/data/lancedb`，缺失则自动从 GitHub Releases 下载（仅首次，~1.2GB） |
+| 2. Python | 未安装则自动 `winget install Python 3.11` |
+| 3. 虚拟环境 | 自动创建 `agent/.venv`（仅首次） |
+| 4. 依赖 | 自动 `pip install -r requirements.txt`（仅首次，5-10 分钟） |
+| 5. 模型 | 自动下载向量编码模型 + 导出重排模型到本地缓存（仅首次，5-15 分钟；之后秒级启动） |
+| 6. 启动 | 启动服务并自动打开浏览器 |
 
-> 首次等待较长是因为安装依赖和下载模型（向量编码/重排约 2GB）；一次完成后下次启动秒级。
-> 也可选择 `-full` 完整包（含模型缓存，约 2.5GB），下载后跳过第 4 步直接运行。
+> 首次等待较长是因为下载语料和安装依赖/模型（语料 ~1.05GB，依赖+模型约 2GB）；一次完成后下次启动秒级。
+> 也可选择 `-full` 完整包（含模型缓存，约 2.5GB），下载后跳过第 5 步直接运行。
 
 ### 停止服务
 
