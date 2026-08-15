@@ -1,7 +1,6 @@
-# Citrus QA Agent 停止脚本（v8.7）
+# Citrus QA Agent 停止脚本（v8.9）
 # 用法: 右键 -> 使用 PowerShell 运行（或在 PowerShell 中执行 .\stop.ps1）
-# 作用: 停止占用 8000 端口的服务进程（Qdrant local 单实例限制——
-#       不停止旧实例就启动新实例会导致向量检索降级为 BM25）
+# 作用: 停止占用 8000 端口的服务进程
 
 $ErrorActionPreference = 'SilentlyContinue'
 
@@ -35,4 +34,4 @@ if (Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyCont
     exit 1
 }
 Write-Host '✅ 服务已停止，8000 端口已释放。' -ForegroundColor Green
-Write-Host '提示: 下次启动请运行 run.ps1；Qdrant 锁文件会在下次启动时自动清理。'
+Write-Host '提示: 下次启动请运行 run.ps1（LanceDB 向量库无需锁文件，可直接重启）。'

@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Citrus QA Agent v8.5.0</title>
+<title>Citrus QA Agent v8.9.0</title>
 <script src="https://cdn.jsdelivr.net/npm/marked@4.3.0/marked.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -678,24 +678,48 @@ footer {
   border-color: rgba(217, 119, 6, 0.25);
 }
 .session-item.active .session-title { color: var(--accent); font-weight: 600; }
+.session-folder { font-size: 13px; flex-shrink: 0; opacity: .85; }
 .session-title {
   flex: 1; min-width: 0;
   font-size: 12px; color: var(--text-primary);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.session-meta {
-  font-family: var(--font-mono); font-size: 9px;
-  color: var(--text-muted); flex-shrink: 0;
+.session-time {
+  font-size: 9px; color: var(--text-muted); flex-shrink: 0;
+  white-space: nowrap;
 }
 .session-ops { display: none; gap: 2px; flex-shrink: 0; }
 .session-item:hover .session-ops { display: flex; }
 .session-op {
   background: none; border: none; cursor: pointer;
-  font-size: 11px; color: var(--text-muted); padding: 1px 3px;
+  font-size: 13px; line-height: 1; color: var(--text-muted); padding: 2px 5px;
   border-radius: 4px;
 }
 .session-op:hover { color: var(--accent); background: var(--bg-elevated); }
 .session-op.del:hover { color: var(--error); }
+.session-more {
+  width: 100%; margin-top: 4px; padding: 5px 0;
+  background: none; border: 1px dashed var(--border-hairline);
+  border-radius: 6px; color: var(--text-muted);
+  font-size: 11px; cursor: pointer; font-family: inherit;
+}
+.session-more:hover { color: var(--accent); border-color: var(--accent); }
+.session-menu {
+  position: fixed; z-index: 200;
+  min-width: 120px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-hairline);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.3);
+  padding: 4px;
+}
+.session-menu-item {
+  font-size: 12px; padding: 6px 10px; border-radius: 6px;
+  cursor: pointer; color: var(--text-primary);
+}
+.session-menu-item:hover { background: var(--bg-hover); }
+.session-menu-item.danger { color: var(--error); }
+.session-menu-item.danger:hover { background: var(--error-glow, rgba(220,80,80,.1)); }
 .workspace-file {
   display: block;
   font-size: 12px; color: var(--text-primary);
@@ -1079,7 +1103,7 @@ footer {
 <header>
   <div class="logo-mark">C</div>
   <h1>Citrus QA Agent</h1>
-  <span class="version-badge" id="versionBadge">v8.5.0</span>
+  <span class="version-badge" id="versionBadge">v8.9.0</span>
   <!-- v8.4.8 HITL 服务端化：权限模式徽标 + 切换菜单 -->
   <span class="perm-badge" id="permBadge" onclick="togglePermMenu(event)" title="权限模式（HITL）：点击切换">权限: --</span>
   <div class="perm-menu" id="permMenu" style="display:none">
@@ -1123,7 +1147,7 @@ footer {
       <div class="message bot">
         <div class="avatar">◆</div>
         <div class="content">
-          您好，我是 <span id="welcomeVersion">Citrus QA Agent v8.5.0</span>。<br>
+          您好，我是 <span id="welcomeVersion">Citrus QA Agent v8.9.0</span>。<br>
           <span style="color:var(--text-muted);font-size:13px">本地 RAG 检索 · CrossRef 学术搜索 · 文献综述写作 · 实验设计 · 文件读写</span>
         </div>
       </div>
@@ -1319,7 +1343,7 @@ function loadRuntimeConfig() {
 }
 /* v8.4.5: 版本单源——后端 /api/v2/config.version 下发，静态文案仅为离线回退 */
 function _appVersion() {
-  return (_runtimeConfig && _runtimeConfig.version) || '8.5.0';
+  return (_runtimeConfig && _runtimeConfig.version) || '8.9.0';
 }
 function applyAppVersion() {
   var v = _appVersion();
@@ -1510,6 +1534,7 @@ function toggleSection(section) {
 
 /* ─── v8.9 会话管理（列表/切换/新建/重命名/软删除）+ 工作区文件 ─── */
 var _sessions = [];
+var _sessionsVisible = 20;   // v8.9: 默认只显示最近 20 个，加载更多展开
 
 function loadSessions() {
   fetch('/api/v2/sessions').then(function (r) { return r.json(); }).then(function (d) {
@@ -1518,29 +1543,90 @@ function loadSessions() {
   }).catch(function () {});
 }
 
+function fmtSessionTime(iso) {
+  if (!iso) return '';
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  var now = new Date();
+  var hh = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  if (d.toDateString() === now.toDateString()) return '今天 ' + hh;
+  var yest = new Date(now); yest.setDate(now.getDate() - 1);
+  if (d.toDateString() === yest.toDateString()) return '昨天 ' + hh;
+  var mm = String(d.getMonth() + 1).padStart(2, '0');
+  var dd = String(d.getDate()).padStart(2, '0');
+  return mm + '-' + dd + ' ' + hh;
+}
+
 function renderSessions() {
   var box = document.getElementById('session-list');
   var count = document.getElementById('session-count');
   if (!box) return;
-  if (count) count.textContent = _sessions.length;
-  if (_sessions.length === 0) {
+  // v8.9: 过滤空会话（无消息的测试/残留不显示）；当前活动会话总是显示
+  var visible = [];
+  for (var i = 0; i < _sessions.length; i++) {
+    var s = _sessions[i];
+    if (s.msg_count > 0 || s.session_id === sessionId) visible.push(s);
+  }
+  if (count) count.textContent = visible.length;
+  if (visible.length === 0) {
     box.innerHTML = '<div class="empty-sidebar">暂无会话，点击 ＋ 新建</div>';
     return;
   }
+  var shown = visible.slice(0, _sessionsVisible);
   var html = '';
-  for (var i = 0; i < _sessions.length; i++) {
-    var s = _sessions[i];
+  for (var i = 0; i < shown.length; i++) {
+    var s = shown[i];
     var active = s.session_id === sessionId ? ' active' : '';
     var title = escapeHtml(s.title || '新会话');
     html += '<div class="session-item' + active + '">' +
+      '<span class="session-folder">📁</span>' +
       '<div class="session-title" onclick="switchSession(\'' + s.session_id + '\')" title="' + title + '">' + title + '</div>' +
-      '<div class="session-meta">' + (s.msg_count || 0) + '</div>' +
+      '<span class="session-time">' + fmtSessionTime(s.updated_at) + '</span>' +
       '<div class="session-ops">' +
-      '<button class="session-op" onclick="renameSession(\'' + s.session_id + '\')" title="重命名">✎</button>' +
-      '<button class="session-op del" onclick="deleteSession(\'' + s.session_id + '\')" title="删除">🗑</button>' +
+      '<button class="session-op" onclick="sessionMenu(event,\'' + s.session_id + '\')" title="更多">⋯</button>' +
       '</div></div>';
   }
+  if (visible.length > _sessionsVisible) {
+    html += '<button class="session-more" onclick="loadMoreSessions()">加载更多（还剩 ' +
+      (visible.length - _sessionsVisible) + '）</button>';
+  }
   box.innerHTML = html;
+}
+
+function loadMoreSessions() {
+  _sessionsVisible += 20;
+  renderSessions();
+}
+
+function closeSessionMenu() {
+  var m = document.querySelector('.session-menu');
+  if (m) m.remove();
+}
+
+function sessionMenu(ev, sid) {
+  ev.stopPropagation();
+  closeSessionMenu();
+  var item = ev.currentTarget.closest('.session-item');
+  var menu = document.createElement('div');
+  menu.className = 'session-menu';
+  menu.innerHTML = '<div class="session-menu-item" onclick="sessionMenuAction(\'rename\',\'' + sid + '\')">✎ 重命名</div>' +
+                   '<div class="session-menu-item danger" onclick="sessionMenuAction(\'delete\',\'' + sid + '\')">🗑 删除</div>';
+  var rect = item ? item.getBoundingClientRect() : { bottom: 80, right: 160 };
+  menu.style.top = (rect.bottom + 4) + 'px';
+  menu.style.left = Math.max(8, rect.right - 130) + 'px';
+  document.body.appendChild(menu);
+  setTimeout(function () {
+    document.addEventListener('click', function once() {
+      closeSessionMenu();
+      document.removeEventListener('click', once);
+    });
+  }, 0);
+}
+
+function sessionMenuAction(action, sid) {
+  closeSessionMenu();
+  if (action === 'rename') renameSession(sid);
+  else if (action === 'delete') deleteSession(sid);
 }
 
 function switchSession(sid) {

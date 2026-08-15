@@ -1,25 +1,56 @@
-﻿# ============================================================
-#  Citrus QA Agent 发布打包（v8.5.0）
+# ============================================================
+#  Citrus QA Agent 发布打包（v8.9.0）
 #  ------------------------------------------------------------
 #  用法:
 #    powershell -File pack_release.ps1                # 主包（代码，~2MB）
-#    powershell -File pack_release.ps1 -IncludeData   # 语料包（~1.2GB，GitHub 可上传）
+#    powershell -File pack_release.ps1 -CorpusOnly    # 语料附件（~1.2GB，上传 GitHub Releases）
+#    powershell -File pack_release.ps1 -IncludeData   # 主包+语料（~1.2GB，可上传）
 #    powershell -File pack_release.ps1 -IncludeModels -IncludeData  # 本地完整包（~3.3GB，仅本地/其他渠道分发）
 #  说明: GitHub Releases 单文件上限 2GB——大模型（reranker 2.2GB）不走发布包，
-#        首次运行经 HF 镜像自动下载（run.ps1 / prepare_models.py 已内置）。
-#  输出: dist/citrus-qa-agent-v8.5.0[-full[-data]].zip
+#        首次运行经 HF 镜像自动下载（run.ps1 / prepare_models.py 已内置）；
+#        语料（LanceDB 向量库）用 -CorpusOnly 单独打包，run.ps1 首次运行自动下载。
+#  输出: dist/citrus-qa-agent-v8.9.0[-full[-data]].zip / dist/corpus-v8.9.0.zip
 #  用户拿到 zip → 解压 → 双击运行 run.ps1 → 浏览器打开即用
 # ============================================================
-param([switch]$IncludeModels, [switch]$IncludeData)
+param([switch]$IncludeModels, [switch]$IncludeData, [switch]$CorpusOnly)
 
 $ErrorActionPreference = 'Stop'
 $Root = $PSScriptRoot
-$Version = '8.5.0'
+$Version = '8.9.0'
 $Dist = Join-Path $Root 'dist'
 $Suffix = $(if ($IncludeModels) { '-full' } else { '' }) + $(if ($IncludeData) { '-data' } else { '' })
 $ZipName = "citrus-qa-agent-v$Version$Suffix.zip"
 $ZipPath = Join-Path $Dist $ZipName
 $Stage = Join-Path $env:TEMP ("citrus-pack-" + [guid]::NewGuid().ToString('N'))
+
+# ── 仅语料附件（zip 内路径 agent/data/...，解压到仓库根目录即得 agent/data）──
+if ($CorpusOnly) {
+    $DataDir = Join-Path $Root 'agent\data'
+    if (-not (Test-Path $DataDir)) {
+        Write-Host "⚠ agent/data 不存在，无法打包语料" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "打包语料附件 corpus-v$Version.zip (LanceDB 向量库) ..." -ForegroundColor Yellow
+    New-Item -ItemType Directory -Force -Path (Join-Path $Stage 'agent') | Out-Null
+    robocopy $DataDir (Join-Path $Stage 'agent\data') /E /XF *.lock /R:0 /W:0 /NFL /NDL /NJH /NJS | Out-Null
+    if (Test-Path (Join-Path $Stage 'agent\data\data')) {
+        Write-Host "⚠ 检测到 data\data 嵌套，修正..." -ForegroundColor Yellow
+        robocopy (Join-Path $Stage 'agent\data\data') (Join-Path $Stage 'agent\data') /E /MOVE /XF *.lock /R:0 /W:0 /NFL /NDL /NJH /NJS | Out-Null
+    }
+    New-Item -ItemType Directory -Force -Path $Dist | Out-Null
+    $CorpusZipPath = Join-Path $Dist "corpus-v$Version.zip"
+    if (Test-Path $CorpusZipPath) { Remove-Item $CorpusZipPath -Force }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::CreateFromDirectory(
+        $Stage, $CorpusZipPath,
+        [System.IO.Compression.CompressionLevel]::NoCompression, $false)
+    $sizeMB = [Math]::Round((Get-Item $CorpusZipPath).Length / 1MB, 1)
+    Remove-Item -Recurse -Force $Stage
+    Write-Host ""
+    Write-Host "✅ 语料附件打包完成: $CorpusZipPath  ($sizeMB MB)" -ForegroundColor Green
+    Write-Host "   上传到 GitHub Releases v$Version，run.ps1 首次运行自动下载"
+    exit 0
+}
 
 $ExcludeDirs = @('state', 'logs', 'workspace', 'data', '__pycache__',
                  '.pytest_cache', '.tmp_runner', '.venv', '.git', '.hf_cache')

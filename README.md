@@ -34,8 +34,8 @@
 
 | 包 | 大小 | 说明 |
 |---|---|---|
-| `citrus-qa-agent-v8.5.0.zip` | ~5 MB | **必下**：代码 + 一键脚本 |
-| `citrus-qa-agent-v8.5.0-data.zip` | ~1.2 GB | **可选**：内置示例语料（公开文献 5 批次），开箱即可测检索/引用/写作全链路 |
+| `citrus-qa-agent-v8.9.0.zip` | ~5 MB | **必下**：代码 + 一键脚本 |
+| `citrus-qa-agent-v8.9.0-data.zip` | ~1.2 GB | **可选**：内置示例语料（公开文献 5 批次），开箱即可测检索/引用/写作全链路 |
 
 **模型自动安装**：向量编码（multilingual-e5-large）与重排（bge-reranker-v2-m3）模型不打包（重排模型单文件超 GitHub 2GB 上限）——首次运行 `run.ps1` 自动经 **HuggingFace 国内镜像（hf-mirror.com）** 下载，约 5-15 分钟，一次完成后秒级启动；也可手动运行 `python prepare_models.py`（`--skip-reranker` 可跳过重排模型）。
 
