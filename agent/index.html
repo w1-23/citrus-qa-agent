@@ -473,32 +473,40 @@ footer {
   color: var(--text-muted);
 }
 
-/* v8.4.13 思维链「深度思考」折叠块 + 写作「执行计划」折叠块 */
+/* v8.7 思维链「深度思考」极简折叠条——与回答共用一个气泡（气泡上部，回答在下部），
+   无图标，对齐 DeepSeek Harness 的 reasoning 展示形式 */
 .reasoning-block {
-  margin: 8px 0 4px;
-  border-left: 2px solid var(--accent);
-  background: var(--bg-hover);
-  border-radius: 6px;
-  padding: 6px 10px;
-  font-size: 12px;
-  color: var(--text-secondary);
+  border-bottom: 1px dashed var(--border-hairline);
+  margin-bottom: 8px;
+  padding-bottom: 6px;
 }
-.reasoning-header, .plan-header {
+.reasoning-header {
+  cursor: pointer; user-select: none;
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; font-weight: 500;
+  color: var(--text-muted); letter-spacing: .4px;
+}
+.reasoning-arrow {
+  font-size: 8px; display: inline-block;
+  transition: transform 0.2s var(--ease-out-quint);
+}
+.reasoning-block.open .reasoning-arrow { transform: rotate(90deg); }
+.reasoning-body {
+  white-space: pre-wrap;
+  margin-top: 6px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border-hairline);
+  font-size: 12px; line-height: 1.6;
+  color: var(--text-muted);
+  max-height: 240px; overflow-y: auto;
+  word-break: break-word;
+}
+.plan-header {
   cursor: pointer;
   font-weight: 600;
   color: var(--accent);
   display: flex; gap: 8px; align-items: center;
   user-select: none;
-}
-.reasoning-header .reasoning-toggle { font-weight: 400; font-size: 11px; color: var(--text-muted); }
-.reasoning-body {
-  white-space: pre-wrap;
-  margin-top: 6px;
-  line-height: 1.6;
-  max-height: 320px;
-  overflow-y: auto;
-  word-break: break-word;
-  color: var(--text-secondary);
 }
 .plan-block {
   margin: 8px 0 4px;
@@ -1669,10 +1677,8 @@ async function sendMsg(isFollowUp) {
   var stopMsg = document.getElementById('stop-msg');
   if (stopMsg) stopMsg.style.display = 'none';
   userInput.placeholder = '有什么想做的？';
-  // v8.4.13: 新轮清空思维链块（保留在历史中的旧块不动——它们属于上一轮）
+  // v8.4.13: 新轮清空思维链文本（块随消息气泡创建，无需全局清理）
   _reasoningText = '';
-  var rb = document.getElementById('reasoning-block');
-  if (rb) rb.remove();
 
   addMessage('user', query);
   userInput.value = '';
@@ -1703,7 +1709,15 @@ async function sendMsg(isFollowUp) {
   var citationsDiv = document.createElement('div');
   citationsDiv.style.display = 'none';
 
-  botContent.appendChild(statusDiv);
+  /* v8.7: 思维链折叠条——与回答共用一个气泡（气泡上部，回答在下部）；
+     极简无图标，对齐 DeepSeek Harness 的 reasoning 展示形式 */
+  var reasoningDiv = document.createElement('div');
+  reasoningDiv.className = 'reasoning-block';
+  reasoningDiv.style.display = 'none';
+  reasoningDiv.innerHTML = '<div class="reasoning-header"><span class="reasoning-arrow">▶</span><span>深度思考</span></div><div class="reasoning-body"></div>';
+  reasoningDiv.querySelector('.reasoning-header').addEventListener('click', toggleReasoning);
+
+  botContent.appendChild(reasoningDiv);
   botContent.appendChild(answerDiv);
   botContent.appendChild(citationsDiv);
 
@@ -1783,36 +1797,30 @@ async function sendMsg(isFollowUp) {
     showBanner._t = setTimeout(function () { b.style.display = 'none'; }, 8000);
   }
 
-  /* v8.4.13 思维链「深度思考」折叠块：reasoning 事件逐 chunk 累积；
-     text 首 token（回答开始）自动折叠——与主流会话界面一致 */
+  /* v8.4.13/8.7 思维链「深度思考」折叠条：逐 chunk 累积到本消息气泡上部；
+     出现即折叠（细标题条），点击展开；回答首 token 自动收起 */
   var _reasoningText = '';
   function handleReasoning(content) {
     if (!content) return;
     _reasoningText += content;
-    var block = document.getElementById('reasoning-block');
-    if (!block) {
-      block = document.createElement('div');
-      block.id = 'reasoning-block';
-      block.className = 'reasoning-block';
-      block.innerHTML = '<div class="reasoning-header" onclick="toggleReasoning()">🧠 深度思考 <span class="reasoning-toggle" id="reasoning-toggle">收起</span></div><div class="reasoning-body" id="reasoning-body"></div>';
-      chatContainer.appendChild(block);
+    if (reasoningDiv.style.display === 'none') {
+      reasoningDiv.style.display = '';
+      collapseReasoning();
     }
-    var body = document.getElementById('reasoning-body');
+    var body = reasoningDiv.querySelector('.reasoning-body');
     if (body) { body.textContent = _reasoningText; chatContainer.scrollTop = chatContainer.scrollHeight; }
   }
   function toggleReasoning() {
-    var body = document.getElementById('reasoning-body');
-    var tg = document.getElementById('reasoning-toggle');
+    var body = reasoningDiv.querySelector('.reasoning-body');
     if (!body) return;
-    var open = body.style.display !== 'none';
+    var open = reasoningDiv.classList.contains('open');
+    reasoningDiv.classList.toggle('open', !open);
     body.style.display = open ? 'none' : '';
-    if (tg) tg.textContent = open ? '展开' : '收起';
   }
   function collapseReasoning() {
-    var body = document.getElementById('reasoning-body');
-    var tg = document.getElementById('reasoning-toggle');
-    if (body && body.style.display !== 'none') body.style.display = 'none';
-    if (tg) tg.textContent = '展开';
+    var body = reasoningDiv.querySelector('.reasoning-body');
+    if (body) body.style.display = 'none';
+    reasoningDiv.classList.remove('open');
   }
   /* v8.4.13 写作「执行计划」折叠块：plan 事件（大纲步骤列表） */
   function handlePlan(data) {

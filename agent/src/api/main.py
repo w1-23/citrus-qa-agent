@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from typing import Optional
@@ -663,6 +664,16 @@ async def new_session_endpoint():
 # ── v8.4.9 会话持久化：历史对话读取（前端刷新/关闭重开后恢复渲染）──
 # 数据本就持久化在 sessions.db（save_messages 全量入库），此前只缺读取通道；
 # 本端点只回用户可见的 Human/AI 轮次，工具/系统消息留在库内不进聊天区。
+# v8.7: user 消息为完整上下文 HumanMessage（含记忆召回/格式指南/策略卡片等
+# 内部块）——显示层裁剪为 <user_query> 原文，内部上下文不显示到前端
+# （存储与模型注入不变，仍走 INV-10 存储全量）。
+
+def _user_display_text(content: str) -> str:
+    """用户可见文本：提取 <user_query> 块；无标签（旧数据/直通消息）回退原文。"""
+    m = re.search(r"<user_query>\s*([\s\S]*?)\s*</user_query>", content)
+    if m and m.group(1).strip():
+        return m.group(1).strip()
+    return content
 
 @app.get("/api/v2/session/{session_id}/messages")
 async def session_messages(session_id: str, limit: int = 200):
@@ -671,6 +682,7 @@ async def session_messages(session_id: str, limit: int = 200):
     返回顺序与库内一致（id 升序）；limit 为对话消息条数上限（默认 200 → 100 轮）。
     v8.4.10: 响应附加 context 快照（与请求期 context_status 事件同构）——
     刷新后上下文概览面板无需等下一次提问即可恢复显示。
+    v8.7: user 消息只返回 <user_query> 原文（内部上下文块不显示）。
     """
     try:
         msgs, _ = await session_manager.get_messages_with_ids(session_id)
@@ -684,7 +696,7 @@ async def session_messages(session_id: str, limit: int = 200):
         if isinstance(m, HumanMessage):
             content = str(getattr(m, "content", "") or "").strip()
             if content:
-                out.append({"role": "user", "content": content})
+                out.append({"role": "user", "content": _user_display_text(content)})
         elif isinstance(m, AIMessage):
             content = str(getattr(m, "content", "") or "").strip()
             # 纯工具轮（只有 tool_calls 无文本）不渲染；合成收尾指令已由读路径过滤

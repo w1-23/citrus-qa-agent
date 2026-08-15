@@ -755,7 +755,11 @@ def test_session_history_restore():
         AIMessage(content="HITL 即人在环中。"),
         ToolMessage(content="ok", tool_call_id="t1", name="citrus_rag_search"),
         SystemMessage(content="system noise"),
-        HumanMessage(content="怎么验证？"),
+        # v8.7: 真实链路 user 消息为完整上下文 HumanMessage——显示层只回 <user_query> 原文
+        HumanMessage(content=(
+            "<long_term_memory>\n## 跨会话记忆\n- 内部记忆块</long_term_memory>\n\n"
+            "<format_guide>\n内部格式指南</format_guide>\n\n"
+            "<user_query>\n怎么验证？\n</user_query>")),
         AIMessage(content="通过审批卡片闭环验证。"),
     ]
     _asyncio.run(sm.save_messages("hist-test", msgs, "idem-hist-1"))
@@ -771,6 +775,15 @@ def test_session_history_restore():
         check("顺序保持", roles == ["user", "assistant", "user", "assistant"], str(roles))
         check("内容完整", r["messages"][1]["content"] == "HITL 即人在环中。",
               r["messages"][1]["content"][:30] if r["messages"] else "none")
+        # v8.7: 内部上下文块（记忆/格式指南）不显示，只回原始问题
+        u2 = r["messages"][2]["content"]
+        check("user 消息裁剪为原始问题", u2 == "怎么验证？",
+              u2[:80] if u2 else "none")
+        check("内部块不泄露", "<long_term_memory>" not in u2
+              and "<format_guide>" not in u2 and "<user_query>" not in u2, u2[:80])
+        # 无 <user_query> 标签的旧数据回退原文
+        check("无标签回退原文",
+              api_main._user_display_text("普通旧消息") == "普通旧消息")
 
         r2 = _asyncio.run(api_main.session_messages("hist-test", limit=2))
         check("limit=2 生效", r2["count"] == 2, f"count={r2['count']}")
