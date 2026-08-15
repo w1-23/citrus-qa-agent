@@ -345,6 +345,53 @@ def test_feedback_endpoint():
 # 5. 提示词版本化快照（书 §6.10.4）
 # ─────────────────────────────────────────────
 
+def test_msg_type_roundtrip():
+    print("[MsgType] v8.8: AIMessageChunk 保存归一化 + 旧数据加载兼容 + 孤立 ToolMessage 防御")
+    import sqlite3
+    from src.session.manager import SessionManager
+    from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, AIMessageChunk
+    from _tmpenv import tmp_path
+
+    tmp = tmp_path("db_msgtype")
+    sm = SessionManager()
+    sm.db_path = str(tmp)
+    sm._init_db_sync()
+
+    # 1) 保存端归一化：AIMessageChunk（v8.4.13 流式化后的消息类型）→ 存为 'ai'
+    chunk = AIMessageChunk(
+        content="思考并调用工具",
+        tool_calls=[{"id": "call_x", "name": "t1", "args": {}}])
+    run(sm.save_messages("s1", [
+        HumanMessage(content="q1"),
+        chunk,
+        ToolMessage(content="r1", tool_call_id="call_x", name="t1"),
+    ], "k-msgtype-1"))
+    with sqlite3.connect(tmp) as conn:
+        types = [r[0] for r in conn.execute(
+            "SELECT msg_type FROM messages WHERE session_id='s1' ORDER BY id")]
+    check("AIMessageChunk 归一化为 ai", types == ["human", "ai", "tool"], str(types))
+
+    # 2) 旧数据（历史库中残留的 AIMessageChunk 行）加载兼容 + 工具配对完整
+    with sqlite3.connect(tmp) as conn:
+        conn.execute(
+            "INSERT INTO messages (session_id, msg_type, content, tool_calls_json) "
+            "VALUES ('s2', 'AIMessageChunk', '', "
+            "'[{\"id\":\"call_y\",\"name\":\"t2\",\"args\":{}}]')")
+        conn.execute(
+            "INSERT INTO messages (session_id, msg_type, content, tool_call_id, name) "
+            "VALUES ('s2', 'tool', 'res-y', 'call_y', 't2')")
+        # 3) 孤立 ToolMessage（前无带 tool_calls 的 AI 消息）→ 加载时丢弃（INV-01 防御）
+        conn.execute(
+            "INSERT INTO messages (session_id, msg_type, content, tool_call_id, name) "
+            "VALUES ('s2', 'tool', 'orphan-z', 'call_z', 't3')")
+        conn.commit()
+    msgs, _ = run(sm.get_messages_with_ids("s2"))
+    roles = [type(m).__name__ for m in msgs]
+    check("旧 AIMessageChunk 按 ai 还原", "AIMessage" in roles, str(roles))
+    check("孤立 ToolMessage 被丢弃", len(msgs) == 2, str(roles))
+    check("配对 tool 保留", "ToolMessage" in roles and "res-y" in msgs[-1].content)
+
+
 def test_prompt_snapshot():
     print("[Snap] 提示词快照渲染确定且完整（O5）")
     from src.prompts.snapshot import render_all

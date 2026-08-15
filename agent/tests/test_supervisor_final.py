@@ -752,7 +752,10 @@ def test_session_history_restore():
 
     msgs = [
         HumanMessage(content="什么是 HITL？"),
-        AIMessage(content="HITL 即人在环中。"),
+        # v8.8: 协议合法结构——AI 带 tool_calls 后紧跟配对 ToolMessage
+        # （此前是无 tool_calls 的 AI + 孤立 ToolMessage，被加载端 INV-01 防御丢弃）
+        AIMessage(content="先检索 HITL 相关资料", tool_calls=[
+            {"id": "t1", "name": "citrus_rag_search", "args": {}}]),
         ToolMessage(content="ok", tool_call_id="t1", name="citrus_rag_search"),
         SystemMessage(content="system noise"),
         # v8.7: 真实链路 user 消息为完整上下文 HumanMessage——显示层只回 <user_query> 原文
@@ -773,7 +776,7 @@ def test_session_history_restore():
         check("工具消息被过滤", "tool" not in roles, str(roles))
         check("系统消息被过滤", "system" not in roles, str(roles))
         check("顺序保持", roles == ["user", "assistant", "user", "assistant"], str(roles))
-        check("内容完整", r["messages"][1]["content"] == "HITL 即人在环中。",
+        check("内容完整", r["messages"][1]["content"] == "先检索 HITL 相关资料",
               r["messages"][1]["content"][:30] if r["messages"] else "none")
         # v8.7: 内部上下文块（记忆/格式指南）不显示，只回原始问题
         u2 = r["messages"][2]["content"]

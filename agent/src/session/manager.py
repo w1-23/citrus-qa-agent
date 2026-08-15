@@ -144,6 +144,18 @@ class SessionManager:
         self._ensure_idempotency_index()
         # v8.4.3: 存量伪造指令一次性 purge（幂等，读时过滤保留为 DEBUG 安全网）
         self._purge_synth_history()
+        # v8.7: 存量 msg_type 归一化——v8.4.13 流式化阶段写入的 "AIMessageChunk"
+        # 统一改为 "ai"（加载端兼容 + 数据一致性；幂等，无则跳过）
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cur = conn.execute(
+                    "UPDATE messages SET msg_type='ai' WHERE msg_type='AIMessageChunk'")
+                if cur.rowcount:
+                    logger.info(f"[SessionManager] 迁移 {cur.rowcount} 条 "
+                                f"AIMessageChunk -> ai")
+                conn.commit()
+        except Exception as e:
+            logger.debug(f"[SessionManager] msg_type migration skipped: {e}")
 
     def _migrate_schema(self):
         """Add columns if missing from older schemas."""
@@ -348,6 +360,7 @@ class SessionManager:
                 "FROM messages WHERE session_id = ? ORDER BY id ASC",
                 (session_id,),
             )
+            ai_tool_pending = 0   # v8.7 INV-01 防御：待配对的工具结果数（跨行保持）
             for row in cur.fetchall():
                 msg_type = row["msg_type"] or ""
                 content = row["content"] or ""
@@ -365,7 +378,11 @@ class SessionManager:
                                 f"(session={session_id[:8]})")
                             continue
                         messages.append(HumanMessage(content=content))
-                    elif msg_type == "ai":
+                        ai_tool_pending = 0
+                    elif msg_type in ("ai", "AIMessageChunk"):
+                        # v8.7: "AIMessageChunk" 为 v8.4.13 流式化后的旧数据
+                        # 类型残留（保存端已归一化为 "ai"）——按 ai 还原，避免
+                        # 其 ToolMessage 配对消息因跳过而孤立（API 400 根因）。
                         kw = {"content": content, "name": name or None}
                         if tool_calls_json:
                             try:
@@ -378,7 +395,19 @@ class SessionManager:
                             except Exception:
                                 pass
                         messages.append(AIMessage(**{k: v for k, v in kw.items() if v is not None}))
+                        # v8.7 INV-01 防御：记录待配对工具结果数（孤立 ToolMessage 防护）
+                        ai_tool_pending = len(kw.get("tool_calls") or [])
                     elif msg_type == "tool":
+                        # v8.7 INV-01 协议配对防御：tool 消息前必须存在带 tool_calls
+                        # 的 AI 消息（预算跳过/熔断/压缩切割任何路径破坏配对时，
+                        # 宁可丢弃也不让非法消息列表进入 API 触发 400）
+                        if ai_tool_pending <= 0:
+                            logger.warning(
+                                f"[SessionManager] 丢弃孤立 ToolMessage "
+                                f"(session={session_id[:8]}, id={row['id']}, "
+                                f"tc_id={(tool_call_id or '')[:12]})")
+                            continue
+                        ai_tool_pending -= 1
                         messages.append(ToolMessage(
                             content=content,
                             tool_call_id=tool_call_id or "unknown",
@@ -464,6 +493,13 @@ class SessionManager:
             msg_type = msg.type
         elif hasattr(msg, "role"):
             msg_type = msg.role
+
+        # v8.7: 类型归一化——v8.4.13 真流式化后 supervisor 消息为 AIMessageChunk，
+        # 其 .type == "AIMessageChunk"，入库后加载端不认识会跳过 → 工具配对断裂
+        # （孤立 ToolMessage → API 400 "tool must be a response to tool_calls"）。
+        # 统一归一为 "ai"，与历史数据一致。
+        if msg_type in ("AIMessageChunk", "AI", "AIMessage"):
+            msg_type = "ai"
 
         if hasattr(msg, "content") and msg.content:
             c = msg.content
