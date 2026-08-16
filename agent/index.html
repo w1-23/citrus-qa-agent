@@ -447,25 +447,18 @@ footer {
 .stop-btn:hover { background: var(--accent-glow); box-shadow: 0 0 10px var(--accent-glow); }
 .stop-btn:active { transform: scale(0.94); }
 
-/* v8.10o: 执行动态光环——执行中环绕旋转提示（结束即隐藏，告知用户有在执行） */
-.exec-ring {
-  position: relative;
-  width: 40px; height: 40px;
-  border-radius: 50%;
-  display: none;
-  align-items: center; justify-content: center;
-  flex-shrink: 0;
-  pointer-events: none;
-}
-.exec-ring.active { display: flex; }
-.exec-ring::before {
-  content: '';
-  position: absolute;
-  inset: 0;
+/* v8.10p: 执行光环移至回答气泡状态行——执行中旋转提示（完成即隐藏），
+   输入框不再渲染光环（v8.10o 曾置于输入框，改回回答气泡降低延迟感） */
+.exec-spinner {
+  display: inline-block;
+  width: 12px; height: 12px;
   border-radius: 50%;
   border: 2px solid var(--accent-muted);
   border-top-color: var(--accent);
   animation: execSpin 0.9s linear infinite;
+  vertical-align: -2px;
+  margin-right: 7px;
+  flex-shrink: 0;
 }
 @keyframes execSpin { to { transform: rotate(360deg); } }
 
@@ -1226,11 +1219,9 @@ footer {
           <div class="input-actions">
             <!-- v8.7: 小巧圆形图标按钮；运行中由 JS 隐藏本按钮、显示停止按钮 -->
             <button class="send-btn" id="send-btn" onclick="sendMsg()" title="发送 (Enter)">↑</button>
-            <!-- v8.10o: 执行动态光环容器——执行中环绕旋转提示，结束隐藏 -->
-            <span class="exec-ring" id="execRing">
-              <!-- v8.4.11 停止按钮：运行中显示；点击中断当前任务（修改问题后重新发送） -->
-              <button class="stop-btn" id="stop-btn" onclick="stopCurrentTask()" style="display:none" title="停止当前任务（输入有误时可停止后修改问题重新发送）">⏹</button>
-            </span>
+            <!-- v8.4.11 停止按钮：运行中显示；点击中断当前任务（修改问题后重新发送）
+                 v8.10p: 执行光环已移至回答气泡状态行（不再渲染在输入框） -->
+            <button class="stop-btn" id="stop-btn" onclick="stopCurrentTask()" style="display:none" title="停止当前任务（输入有误时可停止后修改问题重新发送）">⏹</button>
           </div>
         </div>
       </div>
@@ -1558,13 +1549,10 @@ function updateModeUI() {
 function setSendDisabled(val) {
   var btn = document.getElementById('send-btn');
   var stopBtn = document.getElementById('stop-btn');
-  var ring = document.getElementById('execRing');
   // v8.7: 运行中彻底隐藏发送按钮（此前仅 disabled——两个绝对定位按钮
   // 同位置叠加造成视觉重叠）；恢复时再显示。停止按钮反向切换。
   if (btn) { btn.disabled = val; btn.style.display = val ? 'none' : 'flex'; }
   if (stopBtn) stopBtn.style.display = val ? 'flex' : 'none';
-  // v8.10o: 执行动态光环——执行中旋转提示用户（结束/停止即"死亡"隐藏）
-  if (ring) ring.classList.toggle('active', val);
 }
 
 /* v8.4.11 用户中断（书中 §4.7.6 取消式处理）：
@@ -2224,7 +2212,7 @@ async function sendMsg(isFollowUp) {
 
   /* ── status (opencode style: single line, expandable terminal) ── */
   var statusDiv = document.createElement('div');
-  statusDiv.innerHTML = '<div class="exec-status" onclick="var t=document.getElementById(\'terminal_' + currentRoundId + '\'); if(t){t.style.display=t.style.display==\'none\'?\'block\':\'none\'}">◆ 思考中...<span class="tool-subtitle"></span></div>';
+  statusDiv.innerHTML = '<div class="exec-status" onclick="var t=document.getElementById(\'terminal_' + currentRoundId + '\'); if(t){t.style.display=t.style.display==\'none\'?\'block\':\'none\'}"><span class="exec-spinner"></span>◆ 思考中...<span class="tool-subtitle"></span></div>';
   var termId = 'terminal_' + currentRoundId;
   var termLog = document.createElement('div');
   termLog.id = termId;
@@ -2263,7 +2251,8 @@ async function sendMsg(isFollowUp) {
     var icon = _icons[type] || '•';
     var safeText = escapeHtml(text);
     var subtitle = text.length > 30 ? ' <span class="tool-subtitle">' + safeText + '</span>' : '';
-    statusDiv.innerHTML = '<div class="exec-status" onclick="var t=document.getElementById(\'' + termId + '\'); if(t){t.style.display=t.style.display==\'none\'?\'block\':\'none\'}">' + icon + ' ' + safeText.split('.')[0] + '...' + subtitle + '</div>';
+    // v8.10p: 执行中状态行前置旋转光环（回答气泡内提示执行中；完成摘要不带）
+    statusDiv.innerHTML = '<div class="exec-status" onclick="var t=document.getElementById(\'' + termId + '\'); if(t){t.style.display=t.style.display==\'none\'?\'block\':\'none\'}"><span class="exec-spinner"></span>' + icon + ' ' + safeText.split('.')[0] + '...' + subtitle + '</div>';
   }
 
   function appendTerminal(msg) {
