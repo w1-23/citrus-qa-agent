@@ -1090,6 +1090,23 @@ footer {
 .ctx-suggestions { margin-top: 8px; }
 .ctx-suggestions .ctx-sug-item { font-size: 10px; color: var(--text-secondary); padding: 2px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ctx-suggestions .ctx-sug-label { font-size: 9px; color: var(--text-muted); text-transform: uppercase; margin-bottom: 2px; }
+/* v8.10 上下文细分列表 */
+.ctx-detail-label { font-size: 9px; color: var(--text-muted); text-transform: uppercase; margin-top: 12px; margin-bottom: 2px; }
+.ctx-seg { border: 1px solid var(--border-hairline); border-radius: 8px; margin-top: 6px; overflow: hidden; background: var(--bg-elevated); }
+.ctx-seg-head { display: flex; align-items: center; gap: 6px; padding: 6px 8px; cursor: pointer; font-size: 11px; }
+.ctx-seg-head:hover { background: var(--bg-hover); }
+.ctx-seg-role { font-family: var(--font-mono); font-size: 9px; padding: 1px 5px; border-radius: 3px; font-weight: 700; text-transform: uppercase; flex-shrink: 0; }
+.ctx-seg-role.system { background: var(--accent-muted); color: var(--accent); }
+.ctx-seg-role.user { background: var(--success-glow); color: var(--success); }
+.ctx-seg-role.ai { background: var(--bg-hover); color: var(--text-secondary); }
+.ctx-seg-role.tool { background: rgba(99,102,241,.15); color: #818cf8; }
+.ctx-seg-role.memory { background: rgba(245,158,11,.14); color: var(--warning); }
+.ctx-seg-role.other { background: var(--bg-hover); color: var(--text-muted); }
+.ctx-seg-src { flex: 1; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ctx-seg-chars { font-family: var(--font-mono); font-size: 9px; color: var(--text-muted); flex-shrink: 0; }
+.ctx-seg-arrow { font-size: 8px; color: var(--text-muted); flex-shrink: 0; }
+.ctx-seg-body { border-top: 1px solid var(--border-hairline); max-height: 240px; overflow-y: auto; }
+.ctx-seg-body pre { margin: 0; padding: 8px 10px; font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: var(--text-secondary); font-family: var(--font-mono); }
 .ctx-compressed {
   margin-top: 8px; padding: 6px 8px;
   background: var(--accent-muted); border: 1px solid var(--accent-glow);
@@ -1231,6 +1248,9 @@ footer {
       <div class="ctx-items" id="ctxItems"></div>
       <div class="ctx-summary" id="ctxSummary"></div>
       <div class="ctx-suggestions" id="ctxSuggestions"></div>
+      <!-- v8.10: 上下文细分——system/历史消息/记忆块逐段展开查看原文 -->
+      <div class="ctx-detail-label">上下文细分</div>
+      <div class="ctx-detail" id="ctxDetail"></div>
       <div class="ctx-compressed" id="ctxCompressed" style="display:none"></div>
     </div>
   </div>
@@ -1726,8 +1746,51 @@ var CTX_BTN_CIRCUM = 2 * Math.PI * CTX_BTN_R;
 function toggleCtxDrawer() {
   var drawer = document.getElementById('ctxDrawer');
   var backdrop = document.getElementById('ctxBackdrop');
+  var willOpen = !drawer.classList.contains('open');
   drawer.classList.toggle('open');
   backdrop.classList.toggle('open');
+  // v8.10: 打开抽屉即拉取上下文细分（真实构成，逐段可展开查看原文）
+  if (willOpen) loadCtxDetail();
+}
+
+/* v8.10: 上下文细分——system 提示词 / 历史消息(user·ai·tool·system) / 记忆块 */
+function loadCtxDetail() {
+  var box = document.getElementById('ctxDetail');
+  if (!box || !sessionId) return;
+  box.innerHTML = '<div class="ctx-sug-item" style="padding:6px 0">加载上下文细分...</div>';
+  fetch('/api/v2/session/' + encodeURIComponent(sessionId) + '/context-detail')
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      var segs = (d && d.segments) || [];
+      if (segs.length === 0) {
+        box.innerHTML = '<div class="ctx-sug-item" style="padding:6px 0">当前会话暂无上下文</div>';
+        return;
+      }
+      var html = '';
+      for (var i = 0; i < segs.length; i++) {
+        var s = segs[i];
+        html += '<div class="ctx-seg">' +
+          '<div class="ctx-seg-head" onclick="toggleCtxSeg(' + i + ')">' +
+          '<span class="ctx-seg-role ' + (s.role || 'other') + '">' + (s.role || 'other') + '</span>' +
+          '<span class="ctx-seg-src">' + escapeHtml(s.source) + '</span>' +
+          '<span class="ctx-seg-chars">' + (s.chars || 0).toLocaleString() + ' 字符</span>' +
+          '<span class="ctx-seg-arrow" id="ctx-seg-' + i + '-arrow">▶</span>' +
+          '</div>' +
+          '<div class="ctx-seg-body" id="ctx-seg-' + i + '" style="display:none"><pre>' + escapeHtml(s.content || '') + '</pre></div>' +
+          '</div>';
+      }
+      box.innerHTML = html;
+    })
+    .catch(function () { box.innerHTML = '<div class="ctx-sug-item">细分加载失败</div>'; });
+}
+
+function toggleCtxSeg(i) {
+  var body = document.getElementById('ctx-seg-' + i);
+  var arrow = document.getElementById('ctx-seg-' + i + '-arrow');
+  if (!body) return;
+  var open = body.style.display !== 'none';
+  body.style.display = open ? 'none' : '';
+  if (arrow) arrow.textContent = open ? '▶' : '▼';
 }
 
 function _ctxLevelClass(pct) {
@@ -1811,18 +1874,11 @@ function renderContextPanel(data) {
 
   var sugEl = document.getElementById('ctxSuggestions');
   if (sugEl) {
+    // v8.10: 搜索建议（检索内部提示）不再显示——上下文面板只展示真实上下文构成
     if (data.format_hint) {
       sugEl.innerHTML = '<div class="ctx-sug-label">格式提示</div><div class="ctx-sug-item">' + data.format_hint + '</div>';
     } else {
       sugEl.innerHTML = '';
-    }
-    if (data.suggestions && data.suggestions.length > 0) {
-      var sugHtml = sugEl.innerHTML;
-      sugHtml += '<div class="ctx-sug-label" style="margin-top:4px">搜索建议</div>';
-      for (var si = 0; si < data.suggestions.length; si++) {
-        sugHtml += '<div class="ctx-sug-item">· ' + data.suggestions[si] + '</div>';
-      }
-      sugEl.innerHTML = sugHtml;
     }
   }
 
@@ -1891,22 +1947,27 @@ function renderContextPanel(data) {
 
 
 /* ─── Chat ─── */
+/* v8.10: 反馈栏默认不随气泡创建（回答生成完成后由 appendFeedback 追加，主流时序）；
+   历史恢复的 bot 消息同样不带反馈 */
 function addMessage(role, html) {
   var div = document.createElement('div');
   div.className = 'message ' + role;
   div.innerHTML = '<div class="avatar">' + (role === 'user' ? '→' : '◆') + '</div><div class="content">' + html + '</div>';
-  // v8.6 用户反馈（书 §4.6 反馈循环）: 助手回答下方追加 👍/👎 记录条（纯记录，不影响回答）
-  if (role === 'bot') {
-    var fb = document.createElement('div');
-    fb.className = 'msg-feedback';
-    fb.innerHTML = '<button class="fb-btn" data-rating="1" title="回答有帮助">👍 有用</button>' +
-                   '<button class="fb-btn" data-rating="-1" title="回答有问题">👎 有问题</button>' +
-                   '<span class="fb-msg"></span>';
-    div.appendChild(fb);
-  }
   chatContainer.appendChild(div);
   chatContainer.scrollTop = chatContainer.scrollHeight;
   return div.querySelector('.content');
+}
+
+/* v8.6 用户反馈（书 §4.6 反馈循环）: 助手回答下方追加 👍/👎 记录条（纯记录，不影响回答）
+   v8.10: 回答完整生成后才调用（done 事件），不再随气泡创建即显示 */
+function appendFeedback(msgEl) {
+  if (!msgEl || msgEl.querySelector('.msg-feedback')) return;
+  var fb = document.createElement('div');
+  fb.className = 'msg-feedback';
+  fb.innerHTML = '<button class="fb-btn" data-rating="1" title="回答有帮助">👍 有用</button>' +
+                 '<button class="fb-btn" data-rating="-1" title="回答有问题">👎 有问题</button>' +
+                 '<span class="fb-msg"></span>';
+  msgEl.appendChild(fb);
 }
 
 /* v8.6/v8.7 反馈提交：点击 👍/👎 展开"哪里好/哪里不好"填写行，提交时带 comment；
@@ -2248,6 +2309,8 @@ async function sendMsg(isFollowUp) {
         var s=(data.gen_time_ms/1000).toFixed(1);
         var td=document.createElement('div');td.style.cssText='margin-top:8px;font-size:11px;color:var(--text-muted);font-family:var(--font-mono)';td.textContent='⏱ '+s+'s';botContent.appendChild(td);
         sessionId=data.session_id;if(sessionId)localStorage.setItem('citrus_session_id',sessionId);
+        // v8.10: 回答完整生成后才显示 👍/👎 反馈栏（主流时序）
+        appendFeedback(answerDiv.closest('.message'));
         setSendDisabled(false);userInput.focus();break;
       case 'error':
         clearTimeout(spinnerTimeout);isCancelled=true;setSendDisabled(false);userInput.focus();
@@ -2324,10 +2387,22 @@ async function restoreSessionHistory() {
   } catch (e) { /* 无历史或读取失败：保持欢迎语，不打扰用户 */ }
 }
 
-if (sessionId) { userInput.focus(); }
-restoreSessionHistory();
-loadSessions();
-loadWorkspaceFiles();
+/* v8.10: 无会话时自动创建默认会话（主流行为）——打开即有一个会话，历史回答有处可存，
+   不再依赖用户手动点 ＋ 新建 */
+(async function ensureSession() {
+  if (!sessionId) {
+    try {
+      var resp = await fetch('/api/v1/session/new', { method: 'POST' });
+      var data = await resp.json();
+      sessionId = data.session_id;
+      localStorage.setItem('citrus_session_id', sessionId);
+    } catch (e) { /* 后端不可达则保持无会话（页面仍可浏览） */ }
+  }
+  if (sessionId) { userInput.focus(); }
+  restoreSessionHistory();
+  loadSessions();
+  loadWorkspaceFiles();
+})();
 </script>
 </body>
 </html>

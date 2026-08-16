@@ -825,3 +825,83 @@ def _build_context_snapshot(msgs: list, session_id: str = "") -> dict:
         "ltm_recalled": False, "ltm_chars": 0,
         "resident_cards": False, "suggestions": [], "format_hint": "",
     }
+
+
+# ── v8.10 上下文细分（管理面板逐段查看用）──
+
+@app.get("/api/v2/session/{session_id}/context-detail")
+async def context_detail_endpoint(session_id: str, mode: str = "expert"):
+    """上下文细分：system 提示词 / 历史消息（区分 user·ai·tool·system）/ 内部记忆块，
+    均含原文，供前端"上下文管理"面板逐段展开查看。
+
+    user 消息展示裁剪版（<user_query> 原文，内部块不混入对话文本）；
+    内部块（LTM 记忆/用户偏好/格式指南等）单独提取为 memory 段展示。
+    """
+    try:
+        from src.prompts.loader import assemble_system_prompt
+        from langchain_core.messages import (
+            HumanMessage, AIMessage, ToolMessage, SystemMessage)
+
+        segments: list[dict] = []
+
+        # 1) system 段：静态前缀全文
+        sys_prompt = assemble_system_prompt(mode=mode, format_hint=None, query=None)
+        segments.append({
+            "role": "system", "source": "系统提示词（静态前缀）",
+            "chars": len(sys_prompt), "content": sys_prompt,
+        })
+
+        # 2) 历史消息段（区分 user/ai/tool/system）
+        msgs, _ = await session_manager.get_messages_with_ids(session_id)
+        internal: dict[str, list[str]] = {}
+        seq = 0
+        for m in msgs:
+            if isinstance(m, HumanMessage):
+                role = "user"
+            elif isinstance(m, AIMessage):
+                role = "ai"
+            elif isinstance(m, ToolMessage):
+                role = "tool"
+            elif isinstance(m, SystemMessage):
+                role = "system"
+            else:
+                role = "other"
+            content = str(getattr(m, "content", "") or "")
+            if role == "user":
+                # 提取内部块 → memory 段；剩余显示 <user_query> 原文
+                for tag in ("long_term_memory", "user_preferences", "format_guide",
+                            "output_guide", "skill_cards", "strategy_cards",
+                            "search_suggestions", "evidence", "task_plan",
+                            "resident_cards"):
+                    pat = re.compile(rf"<{tag}>([\s\S]*?)</{tag}>", re.IGNORECASE)
+                    for mm in pat.finditer(content):
+                        v = mm.group(1).strip()
+                        if v:
+                            internal.setdefault(tag, []).append(v)
+                content = _user_display_text(content)
+            if not content.strip():
+                continue
+            seq += 1
+            segments.append({
+                "role": role,
+                "source": f"对话历史 #{seq}",
+                "chars": len(content),
+                "content": content,
+            })
+
+        # 3) 内部记忆块段（同类合并）
+        for tag, blocks in internal.items():
+            text = "\n\n".join(blocks)
+            if not text:
+                continue
+            segments.append({
+                "role": "memory",
+                "source": f"记忆/提示块 · {tag}",
+                "chars": len(text),
+                "content": text,
+            })
+
+        return {"session_id": session_id, "segments": segments, "count": len(segments)}
+    except Exception as e:
+        logger.error(f"[API] context-detail failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
