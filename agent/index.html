@@ -2503,8 +2503,10 @@ async function restoreSessionHistory() {
         pendingTools.push(m);
       } else if (m.role === 'assistant') {
         var contentEl = addMessage('bot', '');
-        var msgEl = contentEl.closest('.message');
-        // v8.10l: 重建工具链折叠块（工具调用过程可见）
+        // v8.10n: 先渲染回答内容，再把工具链/深度思考块插入气泡内部顶部
+        // （此前 append 到 .message 外层会被 flex 排到对话区右侧——位置错乱）
+        contentEl.innerHTML = renderMarkdownSafe(m.content);
+        // v8.10l: 重建工具链折叠块（工具调用过程可见，回答气泡内、回答上方）
         if (pendingTools.length > 0) {
           var tid = 'terminal_hist_' + (++histSeq);
           var st = document.createElement('div');
@@ -2528,10 +2530,10 @@ async function restoreSessionHistory() {
               tl.appendChild(det);
             }
           }
-          msgEl.appendChild(st);
-          msgEl.appendChild(tl);
+          contentEl.insertBefore(st, contentEl.firstChild);
+          contentEl.insertBefore(tl, contentEl.firstChild);
         }
-        // v8.10l: 重建深度思考折叠块（reasoning 已持久化）
+        // v8.10l: 重建深度思考折叠块（reasoning 已持久化，回答气泡内、工具块下方）
         if (m.reasoning) {
           var rb = document.createElement('div');
           rb.className = 'reasoning-block';
@@ -2544,9 +2546,8 @@ async function restoreSessionHistory() {
             arrow.textContent = open ? '▼' : '▶';
           });
           rb.querySelector('.reasoning-body').textContent = m.reasoning;
-          contentEl.parentNode.insertBefore(rb, contentEl);
+          contentEl.insertBefore(rb, contentEl.firstChild);
         }
-        contentEl.innerHTML = renderMarkdownSafe(m.content);
       }
     }
     updateStatus('ok', '已恢复历史会话（' + msgs.length + ' 条消息）');
