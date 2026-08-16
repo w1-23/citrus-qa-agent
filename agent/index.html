@@ -447,10 +447,12 @@ footer {
 .stop-btn:hover { background: var(--accent-glow); box-shadow: 0 0 10px var(--accent-glow); }
 .stop-btn:active { transform: scale(0.94); }
 
-/* v8.4.12 权限审批卡片：主题变量驱动（浅/深色一致），会话窗口上方居中弹出 */
+/* v8.4.12 权限审批卡片：主题变量驱动（浅/深色一致）
+   v8.10j: 位置改为输入气泡上方弹出（bottom 定位，与输入框同轴居中）——
+   不再悬在窗口顶部，与对话气泡保持空间链接 */
 .perm-card {
   position: fixed;
-  top: 64px; left: 50%;
+  bottom: 128px; left: 50%;
   transform: translateX(-50%);
   z-index: 9999;
   width: min(430px, calc(100vw - 40px));
@@ -465,7 +467,7 @@ footer {
   animation: permCardIn 0.18s var(--ease-out-quint);
 }
 @keyframes permCardIn {
-  from { opacity: 0; transform: translateX(-50%) translateY(-6px); }
+  from { opacity: 0; transform: translateX(-50%) translateY(8px); }
   to   { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 .perm-card .perm-title {
@@ -1416,8 +1418,9 @@ var _permMeta = {
   'deny': { ico: _permSvg(_SHIELD + '<path d="M12 8.2v5.2"/><path d="M12 16.6h.01"/>'), name: '只读', label: '只读（一律拒绝）' },
 };
 function updatePermBadge() {
-  // v8.10e: 后端下发的 permission_mode 优先，其次本地记忆，兜底默认全权
-  if (_runtimeConfig && _runtimeConfig.permission_mode) _permMode = _runtimeConfig.permission_mode;
+  // v8.10j: 仅首次（_permMode 未初始化）用后端下发值；切换后 _permMode 优先——
+  // 旧逻辑每帧用缓存的 runtimeConfig 覆盖新值，导致切换后徽标不刷新（需刷新页面才正确）
+  if (_permMode === null && _runtimeConfig && _runtimeConfig.permission_mode) _permMode = _runtimeConfig.permission_mode;
   var mode = _permMode || 'auto_workspace';
   var meta = _permMeta[mode] || _permMeta['auto_workspace'];
   var b = document.getElementById('permBadge');
@@ -1491,7 +1494,8 @@ function grantPermission(toolName, scope) {
     var card = document.getElementById('permission-card');
     if (card) card.remove();
     _pendingPermission = null;
-    if (_lastStreamOnce) _lastStreamOnce();   /* 授权后重放同请求（幂等不重复写历史） */
+    // v8.10j: 不再重放流——v8.4.5 起后端为"挂起等待授权→同一执行内继续"，
+    // 授权后原请求自动继续输出；前端重放会造成双通道（二次权限检查 + 二次回答）
   }).catch(function(e) { alert('授权失败: ' + e.message); });
 }
 
