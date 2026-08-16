@@ -171,6 +171,7 @@ class SessionManager:
                     ("name", "TEXT"),
                     ("client_request_id", "TEXT"),   # v8.3.7 M1
                     ("idempotency_key", "TEXT"),     # v8.3.7 M1
+                    ("reasoning", "TEXT"),           # v8.10l 深度思考持久化
                 ]:
                     if col not in existing:
                         try:
@@ -358,7 +359,7 @@ class SessionManager:
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.execute(
-                "SELECT id, msg_type, content, tool_call_id, tool_calls_json, name "
+                "SELECT id, msg_type, content, tool_call_id, tool_calls_json, name, reasoning "
                 "FROM messages WHERE session_id = ? ORDER BY id ASC",
                 (session_id,),
             )
@@ -369,6 +370,7 @@ class SessionManager:
                 tool_call_id = row["tool_call_id"]
                 tool_calls_json = row["tool_calls_json"]
                 name = row["name"]
+                reasoning = row["reasoning"] if "reasoning" in row.keys() else None
 
                 try:
                     if msg_type == "human":
@@ -386,6 +388,8 @@ class SessionManager:
                         # 类型残留（保存端已归一化为 "ai"）——按 ai 还原，避免
                         # 其 ToolMessage 配对消息因跳过而孤立（API 400 根因）。
                         kw = {"content": content, "name": name or None}
+                        if reasoning:
+                            kw["additional_kwargs"] = {"reasoning_content": reasoning}
                         if tool_calls_json:
                             try:
                                 tool_calls = [
@@ -484,12 +488,14 @@ class SessionManager:
             return False
 
     def _serialize_message(self, msg: BaseMessage) -> tuple:
-        """Extract (msg_type, content, tool_call_id, tool_calls_json, name) from a message."""
+        """Extract (msg_type, content, tool_call_id, tool_calls_json, name, reasoning)
+        from a message."""
         msg_type = ""
         content = ""
         tool_call_id = None
         tool_calls_json = None
         name = None
+        reasoning = None
 
         if hasattr(msg, "type"):
             msg_type = msg.type
@@ -526,7 +532,13 @@ class SessionManager:
         if hasattr(msg, "name"):
             name = msg.name
 
-        return (msg_type, content, tool_call_id, tool_calls_json, name)
+        # v8.10l: 深度思考持久化（stream_llm 聚合时注入 additional_kwargs）
+        if hasattr(msg, "additional_kwargs") and isinstance(msg.additional_kwargs, dict):
+            rk = msg.additional_kwargs.get("reasoning_content")
+            if rk:
+                reasoning = str(rk)
+
+        return (msg_type, content, tool_call_id, tool_calls_json, name, reasoning)
 
     def _save_messages_sync(self, session_id: str, messages: List[BaseMessage],
                             idempotency_key: str = "") -> bool:
@@ -547,8 +559,8 @@ class SessionManager:
                     conn.execute(
                         "INSERT INTO messages "
                         "(session_id, msg_type, content, tool_call_id, tool_calls_json, "
-                        "name, client_request_id, idempotency_key) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        "name, reasoning, client_request_id, idempotency_key) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (session_id, *self._serialize_message(msg),
                          idempotency_key if (idx == 0 and idempotency_key.startswith("crid:")) else None,
                          row_key),
@@ -590,8 +602,8 @@ class SessionManager:
                 for msg in messages:
                     conn.execute(
                         "INSERT INTO messages "
-                        "(session_id, msg_type, content, tool_call_id, tool_calls_json, name) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        "(session_id, msg_type, content, tool_call_id, tool_calls_json, name, reasoning) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
                         (session_id, *self._serialize_message(msg)),
                     )
                 conn.execute(

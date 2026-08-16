@@ -33,6 +33,7 @@ async def stream_llm_response(
         on_reasoning: reasoning_content 增量回调（深度思考折叠块）
     """
     full = None
+    reasoning_parts: list[str] = []   # v8.10l: 显式收集 reasoning（chunk 合并不可靠）
     async for chunk in llm.astream(messages):
         if full is None:
             full = chunk
@@ -49,12 +50,21 @@ async def stream_llm_response(
 
         # 思维链增量（CitrusChatOpenAI 透传到 additional_kwargs）
         rc = (getattr(chunk, "additional_kwargs", None) or {}).get("reasoning_content")
-        if rc and on_reasoning is not None:
-            try:
-                on_reasoning(rc)
-            except Exception:
-                pass
+        if rc:
+            reasoning_parts.append(rc)
+            if on_reasoning is not None:
+                try:
+                    on_reasoning(rc)
+                except Exception:
+                    pass
 
     if full is None:
         raise RuntimeError("stream_llm_response: empty stream")
+    # v8.10l: 聚合后的完整消息显式携带 reasoning（历史持久化用——
+    # 退出会话再回来可恢复深度思考折叠块）
+    if reasoning_parts:
+        try:
+            full.additional_kwargs["reasoning_content"] = "".join(reasoning_parts)
+        except Exception:
+            pass
     return full

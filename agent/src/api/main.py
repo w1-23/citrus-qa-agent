@@ -851,7 +851,7 @@ async def session_messages(session_id: str, limit: int = 200):
         return {"session_id": session_id, "messages": [], "count": 0,
                 "context": _build_context_snapshot([])}
     out: list[dict] = []
-    from langchain_core.messages import HumanMessage, AIMessage
+    from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
     for m in msgs:
         if isinstance(m, HumanMessage):
             content = str(getattr(m, "content", "") or "").strip()
@@ -861,7 +861,21 @@ async def session_messages(session_id: str, limit: int = 200):
             content = str(getattr(m, "content", "") or "").strip()
             # 纯工具轮（只有 tool_calls 无文本）不渲染；合成收尾指令已由读路径过滤
             if content:
-                out.append({"role": "assistant", "content": content})
+                item: dict = {"role": "assistant", "content": content}
+                # v8.10l: 深度思考随历史返回（退出会话再回来可恢复思考过程）
+                rc = (getattr(m, "additional_kwargs", None) or {}).get("reasoning_content")
+                if rc:
+                    item["reasoning"] = rc
+                out.append(item)
+        elif isinstance(m, ToolMessage):
+            # v8.10l: 工具调用结果随历史返回（前端恢复工具链折叠块）
+            tcontent = str(getattr(m, "content", "") or "")
+            out.append({
+                "role": "tool",
+                "name": getattr(m, "name", "") or "tool",
+                "content": tcontent[:500],
+                "truncated": len(tcontent) > 500,
+            })
         if len(out) >= max(int(limit), 1):
             break
     return {"session_id": session_id, "messages": out, "count": len(out),

@@ -772,14 +772,19 @@ def test_session_history_restore():
     try:
         r = _asyncio.run(api_main.session_messages("hist-test"))
         roles = [m["role"] for m in r["messages"]]
-        check("端点返回 4 条对话轮", r["count"] == 4, f"count={r['count']}")
-        check("工具消息被过滤", "tool" not in roles, str(roles))
+        # v8.10l: 工具消息随历史返回（前端恢复工具链折叠块）——5 条而非 4 条
+        check("端点返回 5 条（含工具消息）", r["count"] == 5, f"count={r['count']}")
+        check("工具消息随历史返回", "tool" in roles, str(roles))
         check("系统消息被过滤", "system" not in roles, str(roles))
-        check("顺序保持", roles == ["user", "assistant", "user", "assistant"], str(roles))
+        check("顺序保持", roles == ["user", "assistant", "tool", "user", "assistant"], str(roles))
+        tmsg = [m for m in r["messages"] if m["role"] == "tool"][0]
+        check("工具消息含名称与截断标记",
+              tmsg.get("name") == "citrus_rag_search" and "truncated" in tmsg, str(tmsg))
         check("内容完整", r["messages"][1]["content"] == "先检索 HITL 相关资料",
               r["messages"][1]["content"][:30] if r["messages"] else "none")
         # v8.7: 内部上下文块（记忆/格式指南）不显示，只回原始问题
-        u2 = r["messages"][2]["content"]
+        # v8.10l: 顺序为 user/assistant/tool/user/assistant——第二条 user 在 index 3
+        u2 = r["messages"][3]["content"]
         check("user 消息裁剪为原始问题", u2 == "怎么验证？",
               u2[:80] if u2 else "none")
         check("内部块不泄露", "<long_term_memory>" not in u2

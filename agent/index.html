@@ -1777,9 +1777,11 @@ function deleteSession(sid) {
 function loadWorkspaceFiles() {
   var box = document.getElementById('workspace-list');
   if (!box) return;
+  var reqSid = sessionId;   // v8.10l: 竞态防护——快速切换会话时丢弃过期响应
   box.innerHTML = '<div class="empty-sidebar">加载中...</div>';
   fetch('/api/v2/session/' + encodeURIComponent(sessionId) + '/workspace-files')
     .then(function (r) { return r.json(); }).then(function (d) {
+      if (reqSid !== sessionId) return;
       var files = (d && d.files) || [];
       if (files.length === 0) {
         box.innerHTML = '<div class="empty-sidebar">本会话暂无写作成果</div>';
@@ -1805,8 +1807,10 @@ function loadWorkspaceFiles() {
 function restoreSessionCitations() {
   var box = document.getElementById('sidebar-content');
   if (!box || !sessionId) return;
+  var reqSid = sessionId;   // v8.10l: 竞态防护——快速切换会话时丢弃过期响应
   fetch('/api/v2/session/' + encodeURIComponent(sessionId) + '/citations')
     .then(function (r) { return r.json(); }).then(function (d) {
+      if (reqSid !== sessionId) return;
       var rounds = (d && d.rounds) || [];
       if (rounds.length === 0) {
         if (roundHistory.length === 0) {
@@ -2472,7 +2476,8 @@ async function sendMsg(isFollowUp) {
   function renderRoundSidebar(){if(roundHistory.length===0){sidebarContent.innerHTML='<div class="empty-sidebar">提交问题后文献将在此展示</div>';citationCount.textContent='0';return}var tC=0,tU=0;for(var i=0;i<roundHistory.length;i++){tC+=roundHistory[i].cited.length;tU+=roundHistory[i].uncited.length}citationCount.textContent=(tC+tU);if(sidebarContent.classList.contains('collapsed')){applySidebar('citation')}var html='';for(var i=roundHistory.length-1;i>=0;i--){var round=roundHistory[i];var all=[];for(var k=0;k<round.cited.length;k++){if(round.cited[k].type!=='web')all.push(round.cited[k])}for(var k=0;k<round.uncited.length;k++){if(round.uncited[k].type!=='web')all.push(round.uncited[k])}for(var k=0;k<(round.historical||[]).length;k++){all.push(round.historical[k])}if(all.length===0)continue;var qp=round.query.length>25?round.query.substring(0,25)+'...':round.query;var open=i===roundHistory.length-1;html+='<div class="round-group">';html+='<div class="round-header" onclick="toggleRound(\'round-'+round.roundId+'\')">';html+='<span class="toggle-icon" id="round-'+round.roundId+'-icon">▶</span>';html+='<span class="round-title">Round '+round.roundId+': '+qp+'</span>';html+='<span class="round-count">'+all.length+'</span></div>';html+='<div class="round-body" id="round-'+round.roundId+'"'+(open?'':' style="display:none"')+'>';for(var m=0;m<all.length;m++){html+=renderCitationItem(all[m])}html+='</div></div>'}sidebarContent.innerHTML=html||'<div class="empty-sidebar">本轮未检索到相关文献</div>'}
   }
 
-/* v8.4.9 会话持久化：刷新/关闭重开后恢复历史对话渲染（数据在 sessions.db，只缺读取通道） */
+/* v8.4.9 会话持久化：刷新/关闭重开后恢复历史对话渲染（数据在 sessions.db，只缺读取通道）
+   v8.10l: 恢复增强——工具链折叠块（tool 消息）+ 深度思考折叠块（reasoning 持久化） */
 async function restoreSessionHistory() {
   if (!sessionId) return;
   try {
@@ -2487,12 +2492,60 @@ async function restoreSessionHistory() {
     }
     if (msgs.length === 0) return;
     chatContainer.innerHTML = '';
+    var pendingTools = [];
+    var histSeq = 0;
     for (var i = 0; i < msgs.length; i++) {
       var m = msgs[i];
       if (m.role === 'user') {
+        pendingTools = [];
         addMessage('user', escapeHtml(m.content));
+      } else if (m.role === 'tool') {
+        pendingTools.push(m);
       } else if (m.role === 'assistant') {
         var contentEl = addMessage('bot', '');
+        var msgEl = contentEl.closest('.message');
+        // v8.10l: 重建工具链折叠块（工具调用过程可见）
+        if (pendingTools.length > 0) {
+          var tid = 'terminal_hist_' + (++histSeq);
+          var st = document.createElement('div');
+          st.innerHTML = '<div class="exec-status done" onclick="var t=document.getElementById(\'' + tid + '\'); if(t){t.style.display=t.style.display==\'none\'?\'block\':\'none\'}">⚙ 工具执行 ' + pendingTools.length + ' 项 · 点击展开详情</div>';
+          var tl = document.createElement('div');
+          tl.id = tid;
+          tl.className = 'terminal-log';
+          tl.style.display = 'none';
+          for (var t = 0; t < pendingTools.length; t++) {
+            var pt = pendingTools[t];
+            var line = document.createElement('div');
+            line.className = 'term-line';
+            line.innerHTML = '<span class="term-time">[tool]</span> <span class="term-msg">' +
+              escapeHtml(pt.name || 'tool') + (pt.truncated ? ' · (结果过长已截断)' : '') + '</span>';
+            tl.appendChild(line);
+            if (pt.content) {
+              var det = document.createElement('div');
+              det.className = 'term-line';
+              det.style.cssText = 'padding-left: 52px; color: var(--text-muted);';
+              det.textContent = (pt.content || '').substring(0, 180) + (pt.content.length > 180 ? ' …' : '');
+              tl.appendChild(det);
+            }
+          }
+          msgEl.appendChild(st);
+          msgEl.appendChild(tl);
+        }
+        // v8.10l: 重建深度思考折叠块（reasoning 已持久化）
+        if (m.reasoning) {
+          var rb = document.createElement('div');
+          rb.className = 'reasoning-block';
+          rb.innerHTML = '<div class="reasoning-header"><span class="reasoning-arrow">▶</span><span>深度思考</span></div><div class="reasoning-body" style="display:none"></div>';
+          rb.querySelector('.reasoning-header').addEventListener('click', function () {
+            var open = this.parentNode.classList.toggle('open');
+            var body = this.parentNode.querySelector('.reasoning-body');
+            var arrow = this.parentNode.querySelector('.reasoning-arrow');
+            body.style.display = open ? '' : 'none';
+            arrow.textContent = open ? '▼' : '▶';
+          });
+          rb.querySelector('.reasoning-body').textContent = m.reasoning;
+          contentEl.parentNode.insertBefore(rb, contentEl);
+        }
         contentEl.innerHTML = renderMarkdownSafe(m.content);
       }
     }
