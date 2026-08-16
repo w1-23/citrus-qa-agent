@@ -126,7 +126,8 @@ header h1 { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
   padding: 2px 7px; border-radius: 5px; border: 1px solid var(--border-hairline);
 }
 /* v8.4.8 HITL：权限模式徽标 + 切换菜单
-   v8.10e: 图标化——🔓 全权 / 🛡️ 询问 / 🔒 只读（收起=当前图标+名称，展开=三项切换） */
+   v8.10f: SVG 简笔线条图标——护盾内对号(全权)/护盾内一杆笔(询问)/护盾内感叹号(只读)，
+   全部 currentColor 描边，无彩色渲染 */
 .perm-badge {
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 11px; font-family: var(--font-mono); cursor: pointer;
@@ -134,7 +135,8 @@ header h1 { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
   padding: 3px 9px; border-radius: 6px; border: 1px solid var(--border-hairline);
   user-select: none; position: relative;
 }
-.perm-badge .perm-ico { font-size: 13px; line-height: 1; }
+.perm-badge .perm-ico { display: inline-flex; line-height: 1; }
+.perm-badge .perm-ico svg { width: 14px; height: 14px; display: block; }
 .perm-badge:hover { border-color: var(--accent); color: var(--accent); }
 .perm-badge.ask { color: #e8a33d; border-color: rgba(232,163,61,.5); background: rgba(232,163,61,.08); }
 .perm-badge.deny { color: var(--error); border-color: rgba(220,80,80,.5); background: rgba(220,80,80,.08); }
@@ -150,7 +152,8 @@ header h1 { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
   font-size: 12px; padding: 7px 8px; border-radius: 6px; cursor: pointer;
   color: var(--text-primary);
 }
-.perm-menu-item .perm-ico { font-size: 14px; }
+.perm-menu-item .perm-ico { display: inline-flex; }
+.perm-menu-item .perm-ico svg { width: 15px; height: 15px; display: block; }
 .perm-menu-item:hover { background: var(--bg-hover); }
 .perm-menu-item.active { color: var(--accent); background: var(--bg-elevated); }
 .perm-menu-note { font-size: 10px; color: var(--text-muted); padding: 6px 8px 2px; opacity: .8; }
@@ -1177,16 +1180,16 @@ footer {
         <textarea id="user-input" rows="2" placeholder="有什么想做的？(Enter 发送 / Shift+Enter 换行)" onkeydown="if(event.key==='Enter'&amp;&amp;!event.shiftKey&amp;&amp;!event.isComposing)sendMsg()"></textarea>
         <div class="input-bottom">
           <!-- v8.4.8 HITL 服务端化：权限模式徽标 + 切换菜单（v8.10 迁入输入框左下角
-               v8.10e 图标化：🔓 全权 / 🛡️ 询问 / 🔒 只读） -->
+               v8.10f SVG 线条图标：护盾+对号 全权 / 护盾+笔 询问 / 护盾+感叹号 只读） -->
           <button class="perm-badge" id="permBadge" onclick="togglePermMenu(event)" title="权限模式（HITL）：点击切换">
-            <span class="perm-ico" id="permIco">🔓</span>
+            <span class="perm-ico" id="permIco"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 2.8v5.2c0 4.3-2.9 7.8-7 9.5-4.1-1.7-7-5.2-7-9.5V5.8z"/><path d="M8.6 12.4l2.3 2.3 4.5-4.8"/></svg></span>
             <span class="perm-name" id="permName">全权</span>
           </button>
           <div class="perm-menu" id="permMenu" style="display:none">
             <div class="perm-menu-title">权限模式（HITL）</div>
-            <div class="perm-menu-item" data-mode="auto_workspace" onclick="setPermMode('auto_workspace')"><span class="perm-ico">🔓</span><span>全权 — 工作区写文件免询问（默认）</span></div>
-            <div class="perm-menu-item" data-mode="ask" onclick="setPermMode('ask')"><span class="perm-ico">🛡️</span><span>询问 — 危险操作弹卡片审批</span></div>
-            <div class="perm-menu-item" data-mode="deny" onclick="setPermMode('deny')"><span class="perm-ico">🔒</span><span>只读 — 一律拒绝危险操作</span></div>
+            <div class="perm-menu-item" data-mode="auto_workspace" onclick="setPermMode('auto_workspace')"><span class="perm-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 2.8v5.2c0 4.3-2.9 7.8-7 9.5-4.1-1.7-7-5.2-7-9.5V5.8z"/><path d="M8.6 12.4l2.3 2.3 4.5-4.8"/></svg></span><span>全权 — 工作区写文件免询问（默认）</span></div>
+            <div class="perm-menu-item" data-mode="ask" onclick="setPermMode('ask')"><span class="perm-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 2.8v5.2c0 4.3-2.9 7.8-7 9.5-4.1-1.7-7-5.2-7-9.5V5.8z"/><path d="M14.4 6.2l3.4 3.4L9.5 18H7.5v-2z"/><path d="M13 8.6l2.4 2.4"/></svg></span><span>询问 — 危险操作弹卡片审批</span></div>
+            <div class="perm-menu-item" data-mode="deny" onclick="setPermMode('deny')"><span class="perm-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 2.8v5.2c0 4.3-2.9 7.8-7 9.5-4.1-1.7-7-5.2-7-9.5V5.8z"/><path d="M12 8.2v5.2"/><path d="M12 16.6h.01"/></svg></span><span>只读 — 一律拒绝危险操作</span></div>
             <div class="perm-menu-note">重启后回落到 config.yaml 配置值</div>
           </div>
           <div class="input-actions">
@@ -1393,12 +1396,17 @@ function applyAppVersion() {
   updatePermBadge();
 }
 /* v8.4.8 HITL 服务端化：权限模式徽标与 WebUI 切换
-   v8.10e: 图标化——🔓 全权 / 🛡️ 询问 / 🔒 只读 */
+   v8.10f: SVG 简笔线条图标——护盾+对号(全权)/护盾+笔(询问)/护盾+感叹号(只读)，
+   currentColor 描边不渲染色彩 */
 var _permMode = null;
+var _SHIELD = '<path d="M12 3l7 2.8v5.2c0 4.3-2.9 7.8-7 9.5-4.1-1.7-7-5.2-7-9.5V5.8z"/>';
+function _permSvg(inner) {
+  return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' + inner + '</svg>';
+}
 var _permMeta = {
-  'auto_workspace': { ico: '🔓', name: '全权', label: '全权（工作区免询问）' },
-  'ask': { ico: '🛡️', name: '询问', label: '询问（危险操作审批）' },
-  'deny': { ico: '🔒', name: '只读', label: '只读（一律拒绝）' },
+  'auto_workspace': { ico: _permSvg(_SHIELD + '<path d="M8.6 12.4l2.3 2.3 4.5-4.8"/>'), name: '全权', label: '全权（工作区免询问）' },
+  'ask': { ico: _permSvg(_SHIELD + '<path d="M14.4 6.2l3.4 3.4L9.5 18H7.5v-2z"/><path d="M13 8.6l2.4 2.4"/>'), name: '询问', label: '询问（危险操作审批）' },
+  'deny': { ico: _permSvg(_SHIELD + '<path d="M12 8.2v5.2"/><path d="M12 16.6h.01"/>'), name: '只读', label: '只读（一律拒绝）' },
 };
 function updatePermBadge() {
   // v8.10e: 后端下发的 permission_mode 优先，其次本地记忆，兜底默认全权
@@ -1408,7 +1416,7 @@ function updatePermBadge() {
   var b = document.getElementById('permBadge');
   var ico = document.getElementById('permIco');
   var nm = document.getElementById('permName');
-  if (ico) ico.textContent = meta.ico;
+  if (ico) ico.innerHTML = meta.ico;
   if (nm) nm.textContent = meta.name;
   if (b) { b.className = 'perm-badge ' + mode; b.title = '权限模式（HITL）：' + meta.label + '，点击切换'; }
   var items = document.querySelectorAll('.perm-menu-item');

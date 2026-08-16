@@ -58,8 +58,9 @@ if ($CorpusOnly) {
 }
 
 $ExcludeDirs = @('state', 'logs', 'workspace', 'data', '__pycache__',
-                 '.pytest_cache', '.tmp_runner', '.venv', '.git', '.hf_cache')
-$ExcludeFiles = @('.env', '*.pyc', '*.tmp', '*.lock')
+                 '.pytest_cache', '.tmp_runner', '.venv', '.git', '.hf_cache',
+                 'tests')
+$ExcludeFiles = @('.env', '*.pyc', '*.tmp', '*.lock', 'MODEL_ROUTING.md')
 $DataDir = Join-Path $Root 'agent\data'
 
 Write-Host "打包 Citrus QA Agent v$Version $(if ($IncludeModels) { '(含模型) ' } else { '(主包) ' })$(if ($IncludeData) { '(含示例语料) ' } else { '' })" -ForegroundColor Yellow

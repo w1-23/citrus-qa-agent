@@ -163,10 +163,7 @@ citrus-qa-agent/
 
 默认 `auto`：检测到 `data/lancedb/`（嵌入式向量库：百万级、热更新、无锁）则自动使用，否则回退 Qdrant local（旧数据包兼容）。手动指定可在 `config.yaml` 设置 `retrieval.backend: qdrant|lancedb|auto`。
 
-```bash
-# 将现有 Qdrant 数据迁移到 LanceDB（rag-agent 环境，约 1 分钟）
-python migrate_qdrant_to_lancedb.py
-```
+> v8.9 已内置 LanceDB 语料（示例语料包即 LanceDB 格式），无需再迁移；历史 Qdrant 数据迁移脚本已随 v8.10 清理（见 git 历史 `agent/migrate_qdrant_to_lancedb.py`）。
 
 ### 导入自己的文献
 
