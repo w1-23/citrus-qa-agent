@@ -704,7 +704,14 @@ async def delete_session(session_id: str):
 
 @app.get("/api/v2/session/{session_id}/workspace-files")
 async def session_workspace_files(session_id: str):
-    """该会话的写作成果文件（来自 pipeline_tasks 完成记录；文件在 workspace/output/）。"""
+    """该会话的写作成果文件（workspace/output/）。
+
+    来源两层（v8.10i）：
+    1) pipeline_tasks 完成记录（plan_execute 路径落库）；
+    2) 兜底扫描 workspace/output/ 最近修改的 md 文件——直接写作/ReAct 等
+       非 plan_execute 路径只写文件不落 pipeline_tasks，此前工作区查不到；
+       现按修改时间展示最近 20 个（跨会话，部署到用户本地同样适用）。
+    """
     import sqlite3
     from pathlib import Path
     files: list[dict] = []
@@ -736,7 +743,30 @@ async def session_workspace_files(session_id: str):
                 "size": st.st_size,
                 "modified": st.st_mtime,
                 "modified_at": r["updated_at"] or "",
+                "source": "task",
             })
+        # v8.10i 兜底：最近修改的 md（直接写作路径的文件也有记录可点开；排除草稿）
+        try:
+            recent = sorted(
+                (p for p in out_root.glob("*.md")
+                 if p.is_file() and not p.name.endswith(".draft.md")),
+                key=lambda p: p.stat().st_mtime, reverse=True)[:20]
+            for p in recent:
+                rel = str(p.relative_to(out_root))
+                if rel in seen:
+                    continue
+                seen.add(rel)
+                st = p.stat()
+                files.append({
+                    "path": rel,
+                    "name": p.name,
+                    "size": st.st_size,
+                    "modified": st.st_mtime,
+                    "modified_at": "",
+                    "source": "recent",
+                })
+        except Exception as e:
+            logger.debug(f"[API] workspace-files recent scan skipped: {e}")
     except Exception as e:
         logger.warning(f"[API] workspace-files failed: {e}")
     return {"files": files, "count": len(files)}

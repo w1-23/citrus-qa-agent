@@ -205,8 +205,10 @@ header h1 { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
   display: flex; align-items: center; justify-content: center;
   font-size: 13px; flex-shrink: 0; margin-top: 2px;
 }
-/* v8.10h: 统一无色系——用户气泡系统灰、回答气泡系统白（主题背景）、头像同灰 */
-.user .avatar, .bot .avatar { background: var(--bg-elevated); color: var(--text-secondary); }
+/* v8.10i: 色彩体系——助手回答气泡系统白(bg-surface), 用户气泡浅橙(accent-muted),
+   助手头像绿色调(success), 用户头像系统灰 */
+.user .avatar { background: var(--bg-elevated); color: var(--text-secondary); }
+.bot .avatar { background: var(--success-glow); color: var(--success); }
 /* v8.10: 左右交替——用户气泡在右（头像右、内容靠右），回答气泡在左 */
 .message.user { flex-direction: row-reverse; }
 .message.user .content { flex: 0 1 auto; max-width: 72%; }
@@ -255,9 +257,9 @@ header h1 { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
 .fb-submit:hover { background: var(--accent-glow); }
 .fb-cancel:hover { background: var(--bg-hover); }
 .content {
-  /* v8.10h: 回答气泡不渲染色彩——系统白（主题背景）无边框，与对话区融为一体 */
-  background: transparent;
-  border: none;
+  /* v8.10i: 助手回答气泡——系统白（bg-surface），与对话区同底色 */
+  background: var(--bg-surface);
+  border: 1px solid var(--border-hairline);
   border-radius: 9px;
   padding: 13px 17px;
   line-height: 1.65;
@@ -270,9 +272,9 @@ header h1 { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
   transition: border-color 0.2s var(--ease-out-quint);
 }
 .user .content {
-  /* v8.10h: 用户气泡——系统灰底 + 细分隔线 */
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-hairline);
+  /* v8.10i: 用户输入气泡——系统内浅橙色（accent-muted） */
+  background: var(--accent-muted);
+  border-color: rgba(217,119,6,0.12);
 }
 .content p { margin: 0 0 7px 0; }
 .content p:last-child { margin-bottom: 0; }
@@ -1778,7 +1780,9 @@ function loadWorkspaceFiles() {
       var html = '';
       for (var i = 0; i < files.length; i++) {
         var f = files[i];
-        html += '<a class="workspace-file" href="/workspace/output/' + encodeURIComponent(f.path) +
+        // v8.10i: 路径分段编码（整体 encodeURIComponent 会把 / 编成 %2F 导致 404）
+        var enc = f.path.split('/').map(encodeURIComponent).join('/');
+        html += '<a class="workspace-file" href="/workspace/output/' + enc +
           '" target="_blank" title="' + escapeHtml(f.path) + '">📄 ' + escapeHtml(f.name) + '</a>';
       }
       box.innerHTML = html;
@@ -2181,7 +2185,7 @@ async function sendMsg(isFollowUp) {
   var isAnswerStarted = false;
   var renderPending = false;
 
-  var _icons = {thinking: '💭', tool: '⚙', agent: '◆', answer: '✍'};
+  var _icons = {thinking: '💭', tool: '⚙', agent: '◆', answer: '…'};
   var _toolCount = 0;   // v8.10h: 本轮工具执行次数（完成摘要保留用）
 
   function updateStatus(type, text) {
@@ -2338,7 +2342,7 @@ async function sendMsg(isFollowUp) {
         appendTerminal('📑 大纲: ' + (data.title||'') + ' | 章节: ' + (data.sections||[]).join(' → '));
         break;
       case 'section_start':
-        updateStatus('answer', '✍️ 正在写第 ' + (data.index||'') + '/' + (data.total||'') + ' 章: ' + (data.heading||''));
+        updateStatus('answer', '正在写第 ' + (data.index||'') + '/' + (data.total||'') + ' 章: ' + (data.heading||''));
         break;
       case 'section_done':
         updateStatus('answer', '✅ 第 ' + (data.index||'') + '/' + (data.total||'') + ' 章完成');
