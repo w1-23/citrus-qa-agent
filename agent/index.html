@@ -252,7 +252,9 @@ header h1 { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
   font-size: 13.5px;
   color: var(--text-primary);
   flex: 1;
-  overflow-x: auto;
+  /* v8.10b: 气泡显示真实内容长度——长文本/URL 自动换行，不出现滚动条 */
+  overflow-wrap: break-word;
+  word-break: break-word;
   transition: border-color 0.2s var(--ease-out-quint);
 }
 .user .content {
