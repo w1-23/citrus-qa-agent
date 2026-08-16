@@ -35,56 +35,6 @@ class MemoryStore:
         # v8.4: DB 路径实例化属性（测试可定向到临时库；此前硬编码 PROJECT_ROOT）
         self.db_path = str(PROJECT_ROOT / "state" / "sessions.db")
 
-    # ─── Entity Memory ───
-
-    def update_entities(self, session_id: str, entities: List[Dict]) -> None:
-        """批量更新实体记忆"""
-        with self._mem_lock:
-            store = self._load_store(session_id, "entity_memory")
-            for ent in entities:
-                name = ent.get("name", "")
-                if not name:
-                    continue
-                if name in store:
-                    store[name]["last_mentioned"] = datetime.now().isoformat()
-                    existing_rels = set(store[name].get("relations", []))
-                    new_rels = set(ent.get("relations", []))
-                    store[name]["relations"] = list(existing_rels | new_rels)
-                    store[name]["mention_count"] = store[name].get("mention_count", 0) + 1
-                else:
-                    store[name] = {
-                        "type": ent.get("type", "unknown"),
-                        "aliases": ent.get("aliases", []),
-                        "relations": ent.get("relations", []),
-                        "first_mentioned": datetime.now().isoformat(),
-                        "last_mentioned": datetime.now().isoformat(),
-                        "mention_count": 1,
-                    }
-            self._save_store(session_id, "entity_memory", store)
-
-    def get_entities(self, session_id: str) -> Dict:
-        return self._load_store(session_id, "entity_memory")
-
-    # ─── Concept Memory ───
-
-    def update_concept(self, session_id: str, concept_key: str, summary: str, confidence: float = 0.5) -> None:
-        with self._mem_lock:
-            store = self._load_store(session_id, "concept_memory")
-            if concept_key in store:
-                store[concept_key]["summary"] = summary
-                store[concept_key]["confidence"] = max(store[concept_key]["confidence"], confidence)
-                store[concept_key]["last_mentioned"] = datetime.now().isoformat()
-                store[concept_key]["mention_count"] += 1
-            else:
-                store[concept_key] = {
-                    "summary": summary,
-                    "confidence": confidence,
-                    "first_mentioned": datetime.now().isoformat(),
-                    "last_mentioned": datetime.now().isoformat(),
-                    "mention_count": 1,
-                }
-            self._save_store(session_id, "concept_memory", store)
-
     # ─── Preference Memory ───
 
     def set_preference(self, session_id: str, key: str, value: str) -> None:
@@ -332,18 +282,6 @@ class MemoryStore:
             except Exception as e:
                 logger.debug(f"[Memory] 保存长期事实失败: {e}")
                 return False
-
-    def _fetch_ltm_rows(self, conn, limit: int = 500):
-        """v8.4: 从 ltm_facts 读取；若新表为空回退老表（迁移前兼容）。"""
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT fact_key, fact_value, confidence, updated_at, owner_session, source_query "
-            "FROM ltm_facts ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
-        if not rows:
-            rows = conn.execute(
-                "SELECT fact_key, fact_value, confidence, updated_at, owner_session, source_query "
-                "FROM long_term_memory ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
-        return rows
 
     def recall_long_term_memory(self, query: str, top_k: int = 5,
                                 owner_session: str = "", max_chars: int = 1500) -> str:
@@ -619,19 +557,6 @@ class MemoryStore:
             logger.info(f"[Memory] 会话 {session_id[:8]}... 记忆已清空")
         except Exception as e:
             logger.error(f"[Memory] 清空记忆失败: {e}")
-
-
-# ─── Entity Extraction Helpers ───
-
-_ENTITY_PATTERNS = {
-    "病害": re.compile(r'(黄龙病|溃疡病|枯萎病|砂皮病|炭疽病|疮痂病|脂点黄斑病|根腐病|青霉病|绿霉病)'),
-    "品种": re.compile(r'(沃柑|丑橘|砂糖橘|蜜桔|脐橙|血橙|葡萄柚|柠檬|柚子|金桔|佛手|枸橼)'),
-    "化合物": re.compile(r'\b([A-Za-z]+(?:酸|素|醇|醛|酮|酯|胺|苷|霉素))\b'),
-    "基因/蛋白": re.compile(r'\b([A-Z][a-z]+(?:\d+)?(?:基因|蛋白|因子|酶))\b|\b(Cs[A-Z][a-z]+\d*)\b'),
-    "数值指标": re.compile(r'(\d+(?:\.\d+)?\s*(?:μM|mM|m?g/mL|g/L|%|°C|pH|bp|kb|kDa))'),
-}
-
-
 
 
 memory_store = MemoryStore()

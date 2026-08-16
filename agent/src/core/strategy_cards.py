@@ -2,7 +2,7 @@
 Strategy Cards — 可向量化的执行策略、输出格式、审查规则卡片库
 与 SkillTree 共用 fastembed 向量空间，按查询语义自动匹配
 """
-from typing import List, Dict, Tuple
+from typing import List, Dict
 import logging
 
 logger = logging.getLogger(__name__)
@@ -126,9 +126,6 @@ _CARDS: List[dict] = [
 
 def get_all_cards() -> List[dict]:
     return _CARDS
-
-def get_cards_by_type(card_type: str) -> List[dict]:
-    return [c for c in _CARDS if c["type"] == card_type]
 
 def get_card_texts() -> List[str]:
     """Build embedding texts for all cards."""

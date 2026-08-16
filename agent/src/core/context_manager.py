@@ -292,14 +292,6 @@ class ContextManager:
         format_hint = await f_task
         return suggestions, format_hint
 
-    def build_human_message(
-        self,
-        ctx: LoadedContext,
-        *,
-        retrieval_context: str | None = None,
-    ) -> HumanMessage:
-        return build_human_message(ctx, retrieval_context=retrieval_context)
-
 
 def build_human_message(
     ctx: LoadedContext,

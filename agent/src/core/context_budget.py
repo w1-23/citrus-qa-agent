@@ -36,7 +36,6 @@ class ContextBudgetConfig:
     target_ratio: float = 0.50        # 批量压缩目标：压到预算 ~50%
     protect_recent_turns: int = 3     # 保护名单：最近 N 轮 Q/A 不压缩
     keep_recent_turns: int = 2        # TRUNCATE 硬截断保留最近轮数
-    summarize_ratio: float = 0.70
     compact_max_tokens: int = 800
     enabled: bool = True
 

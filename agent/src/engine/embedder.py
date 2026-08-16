@@ -41,7 +41,6 @@ def _validate_utf8(text: str) -> str:
 class Embedder:
     _instance = None
     _singleton_lock = threading.Lock()
-    _thread_local = threading.local()
 
     def __new__(cls):
         if cls._instance is None:
@@ -118,7 +117,6 @@ class Embedder:
                         self._needs_lock = False
                         self._shared_model = None
                         self._providers = ["CPUExecutionProvider"]
-                        self._thread_local = threading.local()
                     continue
                 raise
             except Exception as e:
@@ -129,7 +127,6 @@ class Embedder:
                         self._needs_lock = False
                         self._shared_model = None
                         self._providers = ["CPUExecutionProvider"]
-                        self._thread_local = threading.local()
                     continue
                 raise
 

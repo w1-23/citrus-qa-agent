@@ -1,7 +1,8 @@
 """File reading tool — read_local_file (system-wide read, workspace-relative as fallback)
 
 v8.3.0: max_chars parameter — default 30000 for PDF, unlimited for others.
-Supervisor controls read depth; user can say "读全文" or "读前3页".
+v8.10r: PDF 默认读全文（max_chars<=0 = 不截断）——用户明确 PDF 读取不应有
+默认阈值截断；如需限制仍可显式传 max_chars>0。
 """
 import logging
 import os
@@ -14,8 +15,6 @@ from src.config import settings, PROJECT_ROOT
 logger = logging.getLogger(__name__)
 
 _WORKSPACE_ROOT = PROJECT_ROOT / settings.WORKSPACE_DIR
-
-PDF_DEFAULT_MAX_CHARS = 30000
 
 
 def _is_path_allowed(full: Path) -> bool:
@@ -59,7 +58,7 @@ def _resolve_read_path(path: str) -> Path:
 
 
 def _read_pdf(path: Path, max_chars: int = 0) -> str:
-    """Read PDF pages. If max_chars > 0, stop accumulating once threshold exceeded."""
+    """Read PDF pages. max_chars<=0 = 全文不截断；>0 时累计超过阈值停止。"""
     try:
         import fitz
         doc = fitz.open(path)
@@ -156,14 +155,14 @@ def _read_text(path: Path) -> str:
 
 @tool
 async def read_local_file(path: str, max_chars: int = 0) -> str:
-    """读取本地文件。PDF 默认读前 30000 字符（约8-12页），其它格式默认读全文。
+    """读取本地文件。PDF 默认读全文（max_chars<=0 不截断；传正数可限制字符数）。
 
     绝对路径：仅允许项目根目录内的文件。
     相对路径：从 workspace/ 或当前工作目录查找。
 
     Args:
         path: 文件的绝对路径或相对路径
-        max_chars: 最大读取字符数（0 = PDF默认30000, 其他不限）
+        max_chars: 最大读取字符数（<=0 = 不限制全文；>0 = 超过即停止）
     """
     logger.info(f"[read_local_file] path={path} max_chars={max_chars}")
 
@@ -188,8 +187,6 @@ async def read_local_file(path: str, max_chars: int = 0) -> str:
 
     try:
         if ext == ".pdf":
-            if max_chars <= 0:
-                max_chars = PDF_DEFAULT_MAX_CHARS
             content = _read_pdf(full_path, max_chars)
         elif ext in (".xlsx", ".xls"):
             content = _read_excel(full_path)

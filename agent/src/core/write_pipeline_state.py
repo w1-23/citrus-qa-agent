@@ -103,6 +103,45 @@ def find_resumable_task(session_id: str, output_path: str) -> Optional[dict]:
         return None
 
 
+def claim_resumable_task(session_id: str, output_path: str) -> Optional[dict]:
+    """v8.10r: 原子领取可续传任务——BEGIN IMMEDIATE 内查 running → 置 'resumed'，
+    防同 session+path 双请求并发续传同一任务双写草稿文件。
+    返回与 find_resumable_task 同构（仅成功领取者拿到）。
+    """
+    try:
+        with _connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM pipeline_tasks WHERE session_id=? AND output_path=? "
+                "AND status='running' ORDER BY updated_at DESC LIMIT 1",
+                (session_id, output_path),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                return None
+            conn.execute(
+                "UPDATE pipeline_tasks SET status='resumed', updated_at=? WHERE task_id=?",
+                (datetime.now().isoformat(), row["task_id"]))
+            conn.commit()
+        materials = None
+        try:
+            mj = row["materials_json"] if "materials_json" in row.keys() else None
+            materials = json.loads(mj) if mj else None
+        except Exception:
+            materials = None
+        logger.info(f"[WritePipeline] task {row['task_id']} claimed (resumed)")
+        return {
+            "task_id": row["task_id"],
+            "plan": json.loads(row["plan_json"]),
+            "completed": json.loads(row["completed_sections"] or "[]"),
+            "materials": materials,
+        }
+    except Exception as e:
+        logger.warning(f"[WritePipeline] claim_resumable failed: {e}")
+        return None
+
+
 def mark_section_done(task_id: str, section_index: int) -> None:
     """章节完成后追加到 completed_sections。
 

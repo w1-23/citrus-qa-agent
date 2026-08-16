@@ -46,6 +46,8 @@ class SkillTree:
             self._skills: List[dict] = []
             self._texts: List[str] = []
             self._vectors: Optional[np.ndarray] = None
+            self._card_vectors: Optional[np.ndarray] = None   # v8.10r: 策略卡片向量懒缓存
+            self._card_texts_fp: int = 0
             self._load_index()
             self._build_vectors()
             self._loaded = True
@@ -164,7 +166,7 @@ class SkillTree:
 
     def search_strategy_cards(self, query: str, card_type: str = None, top_k: int = 5) -> str:
         """Search strategy cards and return formatted prompt block."""
-        from src.core.strategy_cards import get_all_cards, get_card_texts, build_card_map, load_card_prompt
+        from src.core.strategy_cards import get_all_cards
 
         cards = get_all_cards()
         if card_type:
@@ -178,7 +180,14 @@ class SkillTree:
         try:
             model = self._get_embedder()
             q_vec = np.array(list(model.embed([query]))[0], dtype=np.float32)
-            c_vecs = np.array(list(model.embed(texts)), dtype=np.float32)
+            # v8.10r: 卡片向量懒缓存（首次计算后复用——38 张卡片每请求重 embed
+            # 既阻塞事件循环又浪费推理；按卡片文本指纹失效）
+            texts_fp = hash("|".join(texts))
+            if (self._card_vectors is None or self._card_texts_fp != texts_fp
+                    or len(self._card_vectors) != len(texts)):
+                self._card_vectors = np.array(list(model.embed(texts)), dtype=np.float32)
+                self._card_texts_fp = texts_fp
+            c_vecs = self._card_vectors
         except Exception:
             return ""
 

@@ -12,12 +12,6 @@ import threading
 _GPU_LOCK = threading.Lock()
 
 
-
-def release_gpu():
-    """Release the global GPU lock. Call after ONNX DML inference completes."""
-    _GPU_LOCK.release()
-
-
 class GPULockGuard:
     """Context manager for GPU-protected operations."""
 

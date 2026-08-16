@@ -1072,8 +1072,9 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
     plan = None
     try:
         if settings.PIPELINE_RESUME_ENABLED and output_path:
-            from src.core.write_pipeline_state import find_resumable_task
-            resumable = find_resumable_task(session_id=session_id, output_path=output_path)
+            # v8.10r: 原子领取（置 resumed）防同 session 并发双续传
+            from src.core.write_pipeline_state import claim_resumable_task
+            resumable = claim_resumable_task(session_id=session_id, output_path=output_path)
             if resumable:
                 plan = resumable["plan"]
                 resume_completed = resumable["completed"]

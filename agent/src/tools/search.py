@@ -943,7 +943,13 @@ def academic_search(query: str, limit_per_source: int = 3, focus: str = "auto", 
         return "学术搜索引擎未启用，请检查 config.yaml", {"main_results": []}
 
     with ThreadPoolExecutor(max_workers=len(active_sources)) as executor:
-        src_timeout = _timeout if _timeout > 0 else getattr(settings, 'ACADEMIC_TIMEOUT', 8)
+        # v8.10r: _timeout 钳制 1-30s——LLM 可能传任意值，防其无限拉长单源超时
+        _default_t = getattr(settings, 'ACADEMIC_TIMEOUT', 8)
+        try:
+            src_timeout = int(_timeout)
+        except (TypeError, ValueError):
+            src_timeout = _default_t
+        src_timeout = min(max(src_timeout if src_timeout > 0 else _default_t, 1), 30)
         futures = {executor.submit(fn, boosted_query, limit_per_source, src_timeout): name
                    for name, fn in active_sources.items()}
 

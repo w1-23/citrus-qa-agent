@@ -506,9 +506,6 @@ async def _force_final_answer(llm, messages: list, reason: str) -> str:
 
 
 # v8.4.3 工单7: write-agent 回执提取（超长结果禁止裸截断，见 supervisor 工具回执处理）
-_RECEIPT_RE = re.compile(r"已保存到:\s*(\S+)")
-
-
 def _extract_write_receipt(result_text: str, hint_path: str = "") -> str:
     """从 write-agent 结果提取结构化回执；失败时读文件生成摘要（禁止裸截断）。"""
     try:
@@ -757,7 +754,11 @@ async def supervisor_node(state: AgentState) -> dict:
                 except Exception:
                     pass
 
-            for pidx, tc in enumerate(pending_calls):
+            # v8.10r: 独立工具调用并行执行——call_retrieve_agent / call_analyze_agent /
+            # read_local_file / pdf_read / write_local_file 互相独立，asyncio.gather 并行
+            # （工具轮延迟减半）；call_write_agent 依赖完整检索上下文，保持串行。
+            # ToolMessage 装配按原调用顺序（INV-01 配对语义不变）。
+            async def _exec_pending_tool(tc, pidx):
                 tc_dict = _make_tool_call(tc)
                 tc_id = _tc_id(tc)
                 if tc_dict["name"] == "call_write_agent":
@@ -814,7 +815,6 @@ async def supervisor_node(state: AgentState) -> dict:
                     except Exception:
                         pass
                 elif tc_dict["name"] == "write_local_file":
-                    # supervisor 直写：保存对话中现成的完成内容（原样写入，不经过 write-agent）
                     try:
                         mark_tool_start(tc_id, "write_local_file")
                     except Exception:
@@ -824,7 +824,6 @@ async def supervisor_node(state: AgentState) -> dict:
                     path = str(args.get("path", "")).strip()
                     content = str(args.get("content", ""))
                     mode = str(args.get("mode", "write") or "write")
-                    # v8.4.5: 直写路径同样经过沙箱/权限判定（deny/ask 语义与子代理一致）
                     from src.tools.registry import _check_tool_sandbox
                     reject = await _check_tool_sandbox("write_local_file", args)
                     if reject:
@@ -861,6 +860,22 @@ async def supervisor_node(state: AgentState) -> dict:
                         )
                     except Exception:
                         pass
+                return pidx, tc, tc_dict, sub_result
+
+            pending_list = [(pidx, tc) for pidx, tc in enumerate(pending_calls)]
+            write_calls = [(p, tc) for p, tc in pending_list
+                           if _make_tool_call(tc)["name"] == "call_write_agent"]
+            other_calls = [(p, tc) for p, tc in pending_list
+                           if _make_tool_call(tc)["name"] != "call_write_agent"]
+            done_list = []
+            if other_calls:
+                done_list.extend(
+                    await asyncio.gather(*[_exec_pending_tool(tc, p) for p, tc in other_calls]))
+            for p, tc in write_calls:
+                done_list.append(await _exec_pending_tool(tc, p))
+            done_list.sort(key=lambda x: x[0])
+
+            for pidx, tc, tc_dict, sub_result in done_list:
 
                 artifacts = sub_result.get("artifacts", {}) or {}
                 all_main_results.extend(artifacts.get("main_results", []))

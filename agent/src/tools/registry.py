@@ -16,7 +16,6 @@ from src.config import settings
 
 logger = logging.getLogger(__name__)
 
-HITL_DANGEROUS_TOOLS = set()
 AUTO_OFFLOAD_THRESHOLD = 15000
 OFFLOAD_DIR = Path(settings.WORKSPACE_DIR) / "tmp"
 

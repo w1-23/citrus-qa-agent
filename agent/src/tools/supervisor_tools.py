@@ -96,8 +96,7 @@ _SUPERVISOR_TOOL_SCHEMAS = [
         "function": {
             "name": "read_local_file",
             "description": "Read a local file from disk (.pdf, .md, .txt, .csv, .xlsx). "
-                           "PDFs default to first 30000 chars (~8-12 pages). "
-                           "For full PDF text, set max_chars=0. "
+                           "Reads the FULL file by default (no truncation). "
                            "Use FIRST when user asks to read/open/view a local file. "
                            "Absolute paths resolve under the project directory; "
                            "relative paths resolve from workspace/. "
@@ -111,7 +110,7 @@ _SUPERVISOR_TOOL_SCHEMAS = [
                     },
                     "max_chars": {
                         "type": "integer",
-                        "description": "Max chars to read (default 0 = auto: PDF 30000, others unlimited). Set 0 for full text.",
+                        "description": "Max chars to read (default 0 = full file, no truncation). Pass a positive number to limit (e.g. 5000).",
                     },
                 },
                 "required": ["path"],

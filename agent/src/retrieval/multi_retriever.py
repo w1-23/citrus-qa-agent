@@ -494,7 +494,15 @@ class MultiBatchRetriever:
         v_seen, b_seen = set(), set()
         unique_v = [(idx, s) for idx, s in all_vector_hits if not (idx in v_seen or v_seen.add(idx))]
         unique_b = [(idx, s) for idx, s in all_bm25_hits if not (idx in b_seen or b_seen.add(idx))]
-        fused = rrf_fuse(unique_v, unique_b, k=settings.RRF_K)
+        # v8.10r: 主检索路径同样应用 RRF 权重（此前只有 HyDE 路径生效——
+        # config rrf_weights.* 对 search_multi 无感）
+        fused = rrf_fuse(
+            unique_v, unique_b, k=settings.RRF_K,
+            weights=[
+                getattr(settings, 'RRF_WEIGHT_ORIG_DENSE', 1.0),
+                getattr(settings, 'RRF_WEIGHT_BM25', 1.0),
+            ],
+        )
         candidates = [self.global_chunks[idx] for idx, _ in fused[:settings.TOP_K_FINAL * 2]]
         primary_query = queries[0]
         t_rerank = time.time()

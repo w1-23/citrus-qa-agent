@@ -50,18 +50,6 @@ def get_log_queue() -> asyncio.Queue:
     return _log_queue
 
 
-def reset_progress_queue() -> None:
-    global _progress_queue, _log_queue
-    _progress_queue = asyncio.Queue()
-    if _log_queue is not None:
-        while not _log_queue.empty():
-            try:
-                _log_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-    _log_queue = asyncio.Queue(maxsize=500)
-
-
 def _encode_event(event_type: str, data: dict) -> dict:
     """Encode an SSE event dict with JSON-string data field (canonical format)."""
     return {"event": event_type, "data": json.dumps(data, ensure_ascii=False)}

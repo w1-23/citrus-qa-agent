@@ -191,9 +191,6 @@ class Settings(BaseSettings):
     BAIDU_OCR_SECRET_KEY: str = Field(default_factory=lambda: _yaml_val("baidu_ocr", "secret_key", default=""))
     BAIDU_OCR_URL: str = Field(default_factory=lambda: _yaml_val("baidu_ocr", "url", default="https://aip.baidubce.com/rest/2.0/brain/online/v2/unlimited-ocr-parser"))
 
-    # ── Compute Scheduler ──
-    PREFER_DEVICE: str = Field(default_factory=lambda: _yaml_val("compute", "prefer_device", default="auto"))
-
     # ── LaTeX ──
     LATEX_OUTPUT_DIR: str = Field(default_factory=lambda: _yaml_val("latex", "output_dir", default="workspace/output"))
 
