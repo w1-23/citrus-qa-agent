@@ -772,6 +772,55 @@ async def session_workspace_files(session_id: str):
     return {"files": files, "count": len(files)}
 
 
+@app.get("/api/v2/session/{session_id}/citations")
+async def session_citations(session_id: str):
+    """v8.10k: 会话历史文献引用恢复（来自 session_evidence 每轮落库）。
+
+    前端内存 roundHistory 在刷新/切换会话后丢失——文献引用栏为空；
+    本端点按轮次返回引用，前端恢复渲染（同一会话内跨轮累加）。
+    """
+    import sqlite3
+    rounds: list[dict] = []
+    try:
+        with sqlite3.connect(str(PROJECT_ROOT / "state" / "sessions.db")) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT turn_seq, query, evidence_json FROM session_evidence "
+                "WHERE session_id=? ORDER BY turn_seq ASC", (session_id,)).fetchall()
+        for r in rows:
+            items: list[dict] = []
+            try:
+                import json as _json
+                raw = _json.loads(r["evidence_json"] or "[]")
+            except Exception:
+                raw = []
+            for i, e in enumerate(raw):
+                if not isinstance(e, dict):
+                    continue
+                doi = str(e.get("doi") or "N/A")
+                items.append({
+                    "ref_id": f"R{r['turn_seq']}-{i + 1}",
+                    "type": "main",
+                    "doi": doi,
+                    "title": str(e.get("title") or "")[:200],
+                    "year": str(e.get("year") or ""),
+                    "score": float(e.get("score") or 0),
+                    "chunk_id": str(e.get("chunk_id") or ""),
+                    "text_preview": str(e.get("snippet") or "")[:250],
+                })
+            if items:
+                rounds.append({
+                    "round_id": f"hist-{r['turn_seq']}",
+                    "query": str(r["query"] or ""),
+                    "cited": items,
+                    "uncited": [],
+                    "historical": [],
+                })
+    except Exception as e:
+        logger.warning(f"[API] session citations failed: {e}")
+    return {"session_id": session_id, "rounds": rounds, "count": len(rounds)}
+
+
 # ── v8.4.9 会话持久化：历史对话读取（前端刷新/关闭重开后恢复渲染）──
 # 数据本就持久化在 sessions.db（save_messages 全量入库），此前只缺读取通道；
 # 本端点只回用户可见的 Human/AI 轮次，工具/系统消息留在库内不进聊天区。

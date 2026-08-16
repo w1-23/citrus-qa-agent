@@ -1607,6 +1607,9 @@ function applySidebar(active) {
     sec.classList.toggle('expanded', isActive);
   }
   localStorage.setItem('citrus_sidebar_active', active || '');
+  // v8.10k: 展开面板即懒加载/刷新（内容不再停留在上次加载的旧状态）
+  if (active === 'workspace') loadWorkspaceFiles();
+  if (active === 'citation') restoreSessionCitations();
 }
 
 function toggleSection(section) {
@@ -1746,6 +1749,7 @@ function switchSession(sid) {
   citationCount.textContent = '0';
   renderSessions();
   loadWorkspaceFiles();
+  restoreSessionCitations();
   restoreSessionHistory();
   userInput.focus();
 }
@@ -1790,7 +1794,37 @@ function loadWorkspaceFiles() {
           '" target="_blank" title="' + escapeHtml(f.path) + '">📄 ' + escapeHtml(f.name) + '</a>';
       }
       box.innerHTML = html;
-    }).catch(function () { box.innerHTML = '<div class="empty-sidebar">加载失败</div>'; });
+    }).catch(function () {
+      // v8.10k: 失败可点击重试（不再静默）
+      box.innerHTML = '<div class="empty-sidebar" style="cursor:pointer" onclick="loadWorkspaceFiles()">加载失败，点击重试</div>';
+    });
+}
+
+/* v8.10k: 会话历史文献引用恢复（刷新/切换会话后文献引用栏不再为空）
+   ——从后端 session_evidence 恢复各轮引用，同会话跨轮累加 */
+function restoreSessionCitations() {
+  var box = document.getElementById('sidebar-content');
+  if (!box || !sessionId) return;
+  fetch('/api/v2/session/' + encodeURIComponent(sessionId) + '/citations')
+    .then(function (r) { return r.json(); }).then(function (d) {
+      var rounds = (d && d.rounds) || [];
+      if (rounds.length === 0) {
+        if (roundHistory.length === 0) {
+          box.innerHTML = '<div class="empty-sidebar">提交问题后文献将在此展示</div>';
+          citationCount.textContent = '0';
+        }
+        return;
+      }
+      // 合并：当前内存轮次 + 历史轮次（按轮去重，内存优先）
+      var seen = {};
+      for (var i = 0; i < roundHistory.length; i++) seen[roundHistory[i].roundId] = true;
+      var merged = roundHistory.slice();
+      for (var j = 0; j < rounds.length; j++) {
+        if (!seen[rounds[j].round_id]) merged.push(rounds[j]);
+      }
+      roundHistory = merged;
+      renderRoundSidebar();
+    }).catch(function () { /* 保持现状，不打扰 */ });
 }
 
 /* ─── Context Drawer ─── */
@@ -2298,7 +2332,8 @@ async function sendMsg(isFollowUp) {
     if (body) body.style.display = 'none';
     reasoningDiv.classList.remove('open');
   }
-  /* v8.4.13 写作「执行计划」折叠块：plan 事件（大纲步骤列表） */
+  /* v8.4.13 写作「执行计划」折叠块：plan 事件（大纲步骤列表）
+     v8.10k: 归入当前回答气泡内部（气泡顶部），不再作为独立气泡弹出 */
   function handlePlan(data) {
     var block = document.createElement('div');
     block.className = 'plan-block';
@@ -2309,7 +2344,7 @@ async function sendMsg(isFollowUp) {
       '<div class="plan-header" onclick="var b=this.parentNode.querySelector(\'.plan-body\');b.style.display=b.style.display===\'none\'?\'\':\'none\'">📋 执行计划：' + escapeHtml(data.title || '') +
       ' <span style="color:var(--text-muted);font-size:11px">(' + (data.chapters || 0) + ' 章)</span></div>' +
       '<div class="plan-body">' + items + '</div>';
-    chatContainer.appendChild(block);
+    botContent.insertBefore(block, botContent.firstChild);
     chatContainer.scrollTop = chatContainer.scrollHeight;
   }
 
@@ -2318,7 +2353,12 @@ async function sendMsg(isFollowUp) {
       case 'reasoning': handleReasoning(data.content || ''); break;
       case 'plan': handlePlan(data); break;
       case 'thinking': updateStatus('thinking', (data.content||'').substring(0,80)); updateContextTokens(((data.content||'').length)*0.7); break;
-      case 'tool_call_start': updateStatus('tool', (data.tool_name||'工具')+' 执行中...'); updateContextTokens(30); break;
+      case 'tool_call_start':
+        updateStatus('tool', (data.tool_name||'工具')+' 执行中...'); updateContextTokens(30);
+        // v8.10k: 每步工具执行实时可见（降低延迟感）——日志展开 + 逐行记录
+        appendTerminal('⚙ ' + (data.tool_name||'工具') + ' 执行中...');
+        termLog.style.display = 'block';
+        break;
       case 'tool_executing': updateStatus('tool', data.message||'执行中...'); break;
       case 'tool_progress': updateStatus('tool', data.message||''); break;
       case 'tool_result':

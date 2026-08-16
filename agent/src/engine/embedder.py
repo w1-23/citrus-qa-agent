@@ -91,15 +91,14 @@ class Embedder:
         return model
 
     def _get_model(self):
-        if self._needs_lock:
-            with self._shared_lock:
-                if self._shared_model is None:
-                    self._shared_model = self._create_session()
-            return self._shared_model
-        tl = self._thread_local
-        if not hasattr(tl, "_model") or tl._model is None:
-            tl._model = self._create_session()
-        return tl._model
+        # v8.10k: 统一共享单例——CPU 模式不再 per-thread 复制。
+        # 旧实现每个线程首次调用都重新加载 e5-large（~10-20s），而 LTM 语义召回
+        # 走 asyncio.to_thread（线程池线程不固定）→"每次首问特别慢"的根因。
+        # onnxruntime CPU 会话并发 Run 是线程安全的，锁仅兜底。
+        with self._shared_lock:
+            if self._shared_model is None:
+                self._shared_model = self._create_session()
+        return self._shared_model
 
     def _safe_embed(self, texts: List[str]) -> List[List[float]]:
         for attempt in range(2):

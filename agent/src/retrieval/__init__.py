@@ -26,5 +26,15 @@ def eager_load_rag():
     except Exception as e:
         logger.warning(f"[RAG] SkillTree preload skipped: {e}")
 
+    # v8.10k: 预热 memory 语义召回用的 Embedder（e5-large 共享单例）——
+    # 启动即加载，首个请求不再现场加载模型（"每次首问 30s+ 慢"的根因之一）
+    try:
+        from src.engine.embedder import Embedder
+        e = Embedder()
+        e.embed_query("warmup")
+        logger.info(f"[RAG] Embedder preloaded ({time.perf_counter()-t0:.1f}s)")
+    except Exception as e:
+        logger.warning(f"[RAG] Embedder preload skipped: {e}")
+
     total = time.perf_counter() - t0
     logger.info(f"[RAG] Preload complete ({total:.1f}s)")
