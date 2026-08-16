@@ -1103,7 +1103,10 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
     # v8.4.13 第三步: 写作计划事件（前端「📋 执行计划」折叠块）——大纲就绪即展示
     try:
         from src.core.progress_bus import emit_encoded
-        sections = [str(s.get("title", "")) for s in (plan.get("sections") or []) if s][:20]
+        # v8.10q: 字段修正——plan 的 sections 项字段是 heading（非 title），
+        # 此前取 title 恒空 → 前端执行计划折叠块"内部为空"（只显示章节数）
+        sections = [str(s.get("heading", "") or s.get("title", ""))
+                    for s in (plan.get("sections") or []) if s][:20]
         emit_encoded("plan", {
             "title": str(plan.get("title") or "")[:80],
             "sections": sections,

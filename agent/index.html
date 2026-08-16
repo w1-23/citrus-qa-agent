@@ -1306,6 +1306,7 @@ var sendBtn = document.getElementById('send-btn');
 var sidebarContent = document.getElementById('sidebar-content');
 var citationCount = document.getElementById('citation-count');
 var roundHistory = [];
+var _citationsRetry = 0;   // v8.10q: citations 空结果延迟重试计数（防 spawn 时序缺口）
 var currentRoundId = 0;
 var currentQuery = '';
 var totalTokens = 0;
@@ -1830,11 +1831,24 @@ function restoreSessionCitations() {
       var rounds = (d && d.rounds) || [];
       if (rounds.length === 0) {
         if (roundHistory.length === 0) {
+          // v8.10q: save_evidence 是后台 spawn 异步落库——切换会话时最新一轮
+          // 证据可能尚未落库（空结果）。仅重试 1 次覆盖时序缺口（避免新会话无限轮询）
+          _citationsRetry = (_citationsRetry || 0) + 1;
           box.innerHTML = '<div class="empty-sidebar">提交问题后文献将在此展示</div>';
           citationCount.textContent = '0';
+          if (_citationsRetry <= 1) {
+            setTimeout(function () {
+              if (reqSid === sessionId) restoreSessionCitations();
+            }, 800);
+          } else {
+            _citationsRetry = 0;
+          }
+        } else {
+          _citationsRetry = 0;
         }
         return;
       }
+      _citationsRetry = 0;
       // 合并：当前内存轮次 + 历史轮次（按轮去重，内存优先）
       var seen = {};
       for (var i = 0; i < roundHistory.length; i++) seen[roundHistory[i].roundId] = true;
