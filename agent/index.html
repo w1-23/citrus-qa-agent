@@ -125,13 +125,16 @@ header h1 { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
   color: var(--text-muted); background: var(--bg-elevated);
   padding: 2px 7px; border-radius: 5px; border: 1px solid var(--border-hairline);
 }
-/* v8.4.8 HITL：权限模式徽标 + 切换菜单 */
+/* v8.4.8 HITL：权限模式徽标 + 切换菜单
+   v8.10e: 图标化——🔓 全权 / 🛡️ 询问 / 🔒 只读（收起=当前图标+名称，展开=三项切换） */
 .perm-badge {
-  font-size: 10px; font-family: var(--font-mono); cursor: pointer;
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; font-family: var(--font-mono); cursor: pointer;
   color: var(--text-muted); background: var(--bg-elevated);
-  padding: 2px 7px; border-radius: 5px; border: 1px solid var(--border-hairline);
+  padding: 3px 9px; border-radius: 6px; border: 1px solid var(--border-hairline);
   user-select: none; position: relative;
 }
+.perm-badge .perm-ico { font-size: 13px; line-height: 1; }
 .perm-badge:hover { border-color: var(--accent); color: var(--accent); }
 .perm-badge.ask { color: #e8a33d; border-color: rgba(232,163,61,.5); background: rgba(232,163,61,.08); }
 .perm-badge.deny { color: var(--error); border-color: rgba(220,80,80,.5); background: rgba(220,80,80,.08); }
@@ -143,9 +146,11 @@ header h1 { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
 }
 .perm-menu-title { font-size: 11px; color: var(--text-muted); padding: 4px 8px; }
 .perm-menu-item {
+  display: flex; align-items: center; gap: 7px;
   font-size: 12px; padding: 7px 8px; border-radius: 6px; cursor: pointer;
   color: var(--text-primary);
 }
+.perm-menu-item .perm-ico { font-size: 14px; }
 .perm-menu-item:hover { background: var(--bg-hover); }
 .perm-menu-item.active { color: var(--accent); background: var(--bg-elevated); }
 .perm-menu-note { font-size: 10px; color: var(--text-muted); padding: 6px 8px 2px; opacity: .8; }
@@ -365,10 +370,11 @@ header h1 { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
 .plan-dot.active { background: var(--accent); }
 .plan-dot.done { background: var(--success); }
 
+/* v8.10e: footer 透明——输入气泡直接绘制在对话界面内（同背景），不再有割裂的底栏 */
 footer {
-  background: var(--bg-surface);
-  border-top: 1px solid var(--border-hairline);
-  padding: 14px 24px;
+  background: transparent;
+  border-top: none;
+  padding: 6px 24px 16px;
   display: flex;
   justify-content: center;
   flex-shrink: 0;
@@ -682,7 +688,6 @@ footer {
   border-color: rgba(217, 119, 6, 0.25);
 }
 .session-item.active .session-title { color: var(--accent); font-weight: 600; }
-.session-folder { font-size: 13px; flex-shrink: 0; opacity: .85; }
 .session-title {
   flex: 1; min-width: 0;
   font-size: 12px; color: var(--text-primary);
@@ -1171,13 +1176,17 @@ footer {
       <div class="input-box">
         <textarea id="user-input" rows="2" placeholder="有什么想做的？(Enter 发送 / Shift+Enter 换行)" onkeydown="if(event.key==='Enter'&amp;&amp;!event.shiftKey&amp;&amp;!event.isComposing)sendMsg()"></textarea>
         <div class="input-bottom">
-          <!-- v8.4.8 HITL 服务端化：权限模式徽标 + 切换菜单（v8.10 迁入输入框左下角） -->
-          <span class="perm-badge" id="permBadge" onclick="togglePermMenu(event)" title="权限模式（HITL）：点击切换">权限: --</span>
+          <!-- v8.4.8 HITL 服务端化：权限模式徽标 + 切换菜单（v8.10 迁入输入框左下角
+               v8.10e 图标化：🔓 全权 / 🛡️ 询问 / 🔒 只读） -->
+          <button class="perm-badge" id="permBadge" onclick="togglePermMenu(event)" title="权限模式（HITL）：点击切换">
+            <span class="perm-ico" id="permIco">🔓</span>
+            <span class="perm-name" id="permName">全权</span>
+          </button>
           <div class="perm-menu" id="permMenu" style="display:none">
             <div class="perm-menu-title">权限模式（HITL）</div>
-            <div class="perm-menu-item" data-mode="auto_workspace" onclick="setPermMode('auto_workspace')">auto_workspace — 工作区写文件免询问（默认）</div>
-            <div class="perm-menu-item" data-mode="ask" onclick="setPermMode('ask')">ask — 危险操作弹卡片审批</div>
-            <div class="perm-menu-item" data-mode="deny" onclick="setPermMode('deny')">deny — 一律拒绝危险操作</div>
+            <div class="perm-menu-item" data-mode="auto_workspace" onclick="setPermMode('auto_workspace')"><span class="perm-ico">🔓</span><span>全权 — 工作区写文件免询问（默认）</span></div>
+            <div class="perm-menu-item" data-mode="ask" onclick="setPermMode('ask')"><span class="perm-ico">🛡️</span><span>询问 — 危险操作弹卡片审批</span></div>
+            <div class="perm-menu-item" data-mode="deny" onclick="setPermMode('deny')"><span class="perm-ico">🔒</span><span>只读 — 一律拒绝危险操作</span></div>
             <div class="perm-menu-note">重启后回落到 config.yaml 配置值</div>
           </div>
           <div class="input-actions">
@@ -1383,15 +1392,25 @@ function applyAppVersion() {
   if (document.title) document.title = document.title.replace(/v\d+(\.\d+)+/, 'v' + v);
   updatePermBadge();
 }
-/* v8.4.8 HITL 服务端化：权限模式徽标与 WebUI 切换 */
+/* v8.4.8 HITL 服务端化：权限模式徽标与 WebUI 切换
+   v8.10e: 图标化——🔓 全权 / 🛡️ 询问 / 🔒 只读 */
 var _permMode = null;
-var _permLabels = { 'auto_workspace': '权限: 自动(工作区免询问)', 'ask': '权限: 审批(ask)', 'deny': '权限: 拒绝(deny)' };
+var _permMeta = {
+  'auto_workspace': { ico: '🔓', name: '全权', label: '全权（工作区免询问）' },
+  'ask': { ico: '🛡️', name: '询问', label: '询问（危险操作审批）' },
+  'deny': { ico: '🔒', name: '只读', label: '只读（一律拒绝）' },
+};
 function updatePermBadge() {
-  var mode = (_runtimeConfig && _runtimeConfig.permission_mode) || _permMode;
-  if (!mode) return;
-  _permMode = mode;
+  // v8.10e: 后端下发的 permission_mode 优先，其次本地记忆，兜底默认全权
+  if (_runtimeConfig && _runtimeConfig.permission_mode) _permMode = _runtimeConfig.permission_mode;
+  var mode = _permMode || 'auto_workspace';
+  var meta = _permMeta[mode] || _permMeta['auto_workspace'];
   var b = document.getElementById('permBadge');
-  if (b) { b.textContent = _permLabels[mode] || ('权限: ' + mode); b.className = 'perm-badge ' + mode; }
+  var ico = document.getElementById('permIco');
+  var nm = document.getElementById('permName');
+  if (ico) ico.textContent = meta.ico;
+  if (nm) nm.textContent = meta.name;
+  if (b) { b.className = 'perm-badge ' + mode; b.title = '权限模式（HITL）：' + meta.label + '，点击切换'; }
   var items = document.querySelectorAll('.perm-menu-item');
   for (var i = 0; i < items.length; i++) {
     items[i].className = 'perm-menu-item' + (items[i].getAttribute('data-mode') === mode ? ' active' : '');
@@ -1407,7 +1426,7 @@ document.addEventListener('click', function() {
   if (m) m.style.display = 'none';
 });
 function setPermMode(mode) {
-  if (!confirm('切换权限模式为「' + (_permLabels[mode] || mode) + '」？\nask 模式下写文件需在审批卡片中点击允许。')) return;
+  if (!confirm('切换权限模式为「' + ((_permMeta[mode] || {}).label || mode) + '」？\n询问模式下写文件需在审批卡片中点击允许。')) return;
   fetch('/api/v2/permission/mode', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ mode: mode }),
@@ -1590,10 +1609,24 @@ var _sessions = [];
 var _sessionsVisible = 20;   // v8.9: 默认只显示最近 20 个，加载更多展开
 
 function loadSessions() {
-  fetch('/api/v2/sessions').then(function (r) { return r.json(); }).then(function (d) {
+  return fetch('/api/v2/sessions').then(function (r) { return r.json(); }).then(function (d) {
     _sessions = (d && d.sessions) || [];
     renderSessions();
-  }).catch(function () {});
+    return true;
+  }).catch(function () { return false; });
+}
+
+/* v8.10e: 会话列表加载失败自动重试（网络抖动/服务重启竞态），最多 3 次后停止 */
+function loadSessionsWithRetry(retries) {
+  var n = retries === undefined ? 3 : retries;
+  return loadSessions().then(function (ok) {
+    if (!ok && n > 0) {
+      return new Promise(function (res) {
+        setTimeout(function () { res(loadSessionsWithRetry(n - 1)); }, 600);
+      });
+    }
+    return ok;
+  });
 }
 
 function fmtSessionTime(iso) {
@@ -1632,7 +1665,6 @@ function renderSessions() {
     var active = s.session_id === sessionId ? ' active' : '';
     var title = escapeHtml(s.title || '新会话');
     html += '<div class="session-item' + active + '">' +
-      '<span class="session-folder">📁</span>' +
       '<div class="session-title" onclick="switchSession(\'' + s.session_id + '\')" title="' + title + '">' + title + '</div>' +
       '<span class="session-time">' + fmtSessionTime(s.updated_at) + '</span>' +
       '<div class="session-ops">' +
@@ -2053,8 +2085,10 @@ async function newSession() {
     localStorage.setItem('citrus_session_id', sessionId);
     // v8.10: 静默清空旧会话界面（不弹"确定清空"确认——新建会话语义，勿误导用户）
     await clearSession(true);
-    // v8.10: 新建后展开会话面板，让用户看到会话列表更新
+    // v8.10e: 创建后强制刷新会话列表（await + 重试），并延迟二次刷新防后端时序
     applySidebar('session');
+    await loadSessionsWithRetry();
+    setTimeout(function () { loadSessions(); }, 300);
   } catch (e) { alert('创建新会话失败: ' + e.message); }
 }
 
