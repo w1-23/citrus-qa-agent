@@ -78,7 +78,7 @@ def _fast_guard_reply(query: str) -> str:
 async def lifespan(app: FastAPI):
     logger.info("[Lifespan] starting...")
     try:
-        from src.retrieval.init import eager_load_rag
+        from src.retrieval import eager_load_rag
         eager_load_rag()
         logger.info("[Lifespan] RAG engine warmed up")
     except Exception as e:

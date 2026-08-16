@@ -70,10 +70,11 @@ def test_light_read():
 def test_dead_code_removed():
     print("[职责] 死代码已删")
     init_src = open(os.path.join(BASE, 'src', 'tools', '__init__.py'), encoding='utf-8').read()
-    reg = open(os.path.join(BASE, 'src', 'core', 'registries.py'), encoding='utf-8').read()
     check("tools/__init__ 无 get_tools_for_mode", "get_tools_for_mode" not in init_src)
     check("tools/__init__ 无 get_all_tools", "get_all_tools" not in init_src)
-    check("registries 无 MODE_ALLOWED", "MODE_ALLOWED" not in reg)
+    # v8.10g: core/registries.py 整体删除（AGENT_REGISTRY 无任何引用）——断言不复活
+    check("core/registries.py 已删除",
+          not os.path.exists(os.path.join(BASE, 'src', 'core', 'registries.py')))
 
 
 def test_prompt_boundaries():
