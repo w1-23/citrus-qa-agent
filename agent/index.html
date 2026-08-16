@@ -136,7 +136,7 @@ header h1 { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
 .perm-badge.ask { color: #e8a33d; border-color: rgba(232,163,61,.5); background: rgba(232,163,61,.08); }
 .perm-badge.deny { color: var(--error); border-color: rgba(220,80,80,.5); background: rgba(220,80,80,.08); }
 .perm-menu {
-  position: absolute; top: 44px; right: 96px; z-index: 50;
+  position: absolute; bottom: 40px; left: 0; z-index: 50;
   min-width: 260px; background: var(--bg-surface);
   border: 1px solid var(--border-hairline); border-radius: 10px;
   box-shadow: 0 12px 32px rgba(0,0,0,.35); padding: 8px;
@@ -150,16 +150,6 @@ header h1 { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
 .perm-menu-item.active { color: var(--accent); background: var(--bg-elevated); }
 .perm-menu-note { font-size: 10px; color: var(--text-muted); padding: 6px 8px 2px; opacity: .8; }
 .header-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
-.header-btn {
-  padding: 5px 11px; border-radius: 6px; border: 1px solid var(--border-hairline);
-  background: transparent; color: var(--text-muted); cursor: pointer;
-  font-size: 11px; font-weight: 500; font-family: inherit;
-  transition: all 0.2s var(--ease-out-quint);
-  display: flex; align-items: center; gap: 4px;
-}
-.header-btn:hover { background: var(--bg-hover); color: var(--text-primary); border-color: var(--border-hover); }
-.header-btn.primary { background: var(--accent); color: #FFF; border-color: var(--accent); font-weight: 600; }
-.header-btn.primary:hover { background: var(--accent-hover); }
 .theme-btn {
   width: 30px; height: 30px; border-radius: 6px;
   border: 1px solid var(--border-hairline);
@@ -206,6 +196,10 @@ header h1 { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
 }
 .user .avatar { background: var(--accent-muted); color: var(--accent); }
 .bot .avatar { background: var(--success-glow); color: var(--success); }
+/* v8.10: 左右交替——用户气泡在右（头像右、内容靠右），回答气泡在左 */
+.message.user { flex-direction: row-reverse; }
+.message.user .content { flex: 0 1 auto; max-width: 72%; }
+.message.user .msg-feedback { margin-left: 2px; margin-right: 42px; }
 /* v8.6 用户反馈（书 §4.6 反馈循环）: 回答下方的 👍/👎 记录条
    v8.7: flex-basis 100% 换行到 content 下方 + 左缩进对齐 content（avatar 30 + gap 12）；
    v8.7: 点击后展开"哪里好/哪里不好"填写行 */
@@ -377,31 +371,35 @@ footer {
   justify-content: center;
   flex-shrink: 0;
 }
+/* v8.10: 输入框气泡化——3 倍高：上部两行输入区 + 底部栏（左权限 / 右发送·暂停） */
 .input-box {
-  display: flex; gap: 8px;
+  display: flex; flex-direction: column; gap: 6px;
   max-width: 900px; width: 100%;
-  /* v8.7: 发送/停止按钮复用同一位置（绝对定位右侧，运行中切换） */
   position: relative;
-}
-.input-box input {
-  flex: 1; padding: 10px 18px;
-  padding-right: 54px;   /* v8.7: 为右侧圆形按钮留位（34px 圆 + 同心间距） */
   background: var(--bg-elevated);
   border: 1px solid var(--border-hairline);
-  border-radius: 999px;  /* v8.7: 胶囊输入框——右端半圆与按钮同心 */
-  font-size: 14px; font-family: inherit;
-  color: var(--text-primary);
-  outline: none;
-  transition: all 0.2s var(--ease-out-quint);
+  border-radius: 18px;
+  padding: 10px 12px 8px;
+  transition: border-color 0.2s var(--ease-out-quint), box-shadow 0.2s var(--ease-out-quint);
 }
-.input-box input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
-.input-box input::placeholder { color: var(--text-muted); }
-/* v8.7: 发送与停止同一位置切换——小巧圆形按钮，圆心与胶囊输入框右端半圆同心 */
+.input-box:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+.input-box textarea {
+  width: 100%; resize: none;
+  background: transparent; border: none; outline: none;
+  font-size: 14px; font-family: inherit; line-height: 1.6;
+  color: var(--text-primary);
+  min-height: 62px; max-height: 140px;
+  display: block;
+}
+.input-box textarea::placeholder { color: var(--text-muted); }
+/* v8.10: 输入框底栏——左权限徽标，右发送/暂停 */
+.input-bottom {
+  display: flex; align-items: center; gap: 8px;
+}
+.input-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+/* v8.7: 发送与停止同位置切换——小巧圆形按钮（v8.10 起位于底栏右下角） */
 .send-btn, .stop-btn {
-  position: absolute;
-  right: 3px; top: 50%;
-  transform: translateY(-50%);
-  width: 34px; height: 34px;
+  width: 32px; height: 32px;
   padding: 0;
   display: flex; align-items: center; justify-content: center;
   border-radius: 50%;
@@ -416,7 +414,7 @@ footer {
   box-shadow: 0 1px 6px var(--accent-glow);
 }
 .send-btn:hover { background: var(--accent-hover); box-shadow: 0 0 12px var(--accent-glow); }
-.send-btn:active { transform: translateY(-50%) scale(0.94); }
+.send-btn:active { transform: scale(0.94); }
 /* v8.7: 运行中彻底隐藏发送按钮（display 由 JS 切换；此处兜底防残留重叠） */
 .send-btn:disabled { opacity: 0; pointer-events: none; }
 
@@ -428,7 +426,7 @@ footer {
   font-size: 13px;
 }
 .stop-btn:hover { background: var(--accent-glow); box-shadow: 0 0 10px var(--accent-glow); }
-.stop-btn:active { transform: translateY(-50%) scale(0.94); }
+.stop-btn:active { transform: scale(0.94); }
 
 /* v8.4.12 权限审批卡片：主题变量驱动（浅/深色一致），会话窗口上方居中弹出 */
 .perm-card {
@@ -846,7 +844,9 @@ footer {
 .ctx-circle-btn:hover { transform: scale(1.1); }
 .ctx-circle-btn svg { transform: rotate(-90deg); }
 .ctx-btn-bg { fill: none; stroke: var(--border-hairline); stroke-width: 2.5; }
-.ctx-btn-fg { fill: none; stroke: var(--accent); stroke-width: 2.5; stroke-linecap: round; transition: stroke-dashoffset 0.5s var(--ease-out-quint), stroke 0.5s var(--ease-out-quint); }
+/* v8.10: 默认空环 + 系统灰（未使用上下文时与其他图标一致）；进度由 JS 渲染 */
+.ctx-btn-fg { fill: none; stroke: var(--text-muted); stroke-width: 2.5; stroke-linecap: round; stroke-dasharray: 94.25 94.25; stroke-dashoffset: 94.25; transition: stroke-dashoffset 0.5s var(--ease-out-quint), stroke 0.5s var(--ease-out-quint); }
+.ctx-btn-fg.none { stroke: var(--text-muted); }
 .ctx-btn-fg.low { stroke: var(--success); }
 .ctx-btn-fg.mid { stroke: var(--accent); }
 .ctx-btn-fg.high { stroke: var(--warning); }
@@ -1107,15 +1107,6 @@ footer {
   <div class="logo-mark">C</div>
   <h1>Citrus QA Agent</h1>
   <span class="version-badge" id="versionBadge">v8.9.0</span>
-  <!-- v8.4.8 HITL 服务端化：权限模式徽标 + 切换菜单 -->
-  <span class="perm-badge" id="permBadge" onclick="togglePermMenu(event)" title="权限模式（HITL）：点击切换">权限: --</span>
-  <div class="perm-menu" id="permMenu" style="display:none">
-    <div class="perm-menu-title">权限模式（HITL）</div>
-    <div class="perm-menu-item" data-mode="auto_workspace" onclick="setPermMode('auto_workspace')">auto_workspace — 工作区写文件免询问（默认）</div>
-    <div class="perm-menu-item" data-mode="ask" onclick="setPermMode('ask')">ask — 危险操作弹卡片审批</div>
-    <div class="perm-menu-item" data-mode="deny" onclick="setPermMode('deny')">deny — 一律拒绝危险操作</div>
-    <div class="perm-menu-note">重启后回落到 config.yaml 配置值</div>
-  </div>
   <div class="header-actions">
     <button class="ctx-circle-btn" id="ctxCircleBtn" onclick="toggleCtxDrawer()" title="上下文用量">
       <svg viewBox="0 0 36 36" width="22" height="22">
@@ -1124,7 +1115,6 @@ footer {
       </svg>
     </button>
     <button class="theme-btn" id="themeBtn" onclick="toggleTheme()" title="切换主题">⊙</button>
-    <button class="header-btn" onclick="clearSession()">清空</button>
   </div>
 </header>
 
@@ -1156,13 +1146,27 @@ footer {
     </div>
 
     <footer>
+      <!-- v8.10: 输入气泡——上部两行输入（Enter 发送 / Shift+Enter 换行），
+           底栏左下权限徽标（点击弹菜单），右下发送/停止圆形按钮 -->
       <div class="input-box">
-        <!-- v8.7: Enter 发送改为 onkeydown + isComposing 守卫（中文输入法选词确认不再误触发） -->
-        <input type="text" id="user-input" placeholder="有什么想做的？" onkeydown="if(event.key==='Enter'&amp;&amp;!event.isComposing)sendMsg()">
-        <!-- v8.7: 小巧圆形图标按钮（与胶囊输入框右端同心）；运行中由 JS 隐藏本按钮、显示停止按钮 -->
-        <button class="send-btn" id="send-btn" onclick="sendMsg()" title="发送 (Enter)">↑</button>
-        <!-- v8.4.11 停止按钮：运行中显示；点击中断当前任务（修改问题后重新发送） -->
-        <button class="stop-btn" id="stop-btn" onclick="stopCurrentTask()" style="display:none" title="停止当前任务（输入有误时可停止后修改问题重新发送）">⏹</button>
+        <textarea id="user-input" rows="2" placeholder="有什么想做的？(Enter 发送 / Shift+Enter 换行)" onkeydown="if(event.key==='Enter'&amp;&amp;!event.shiftKey&amp;&amp;!event.isComposing)sendMsg()"></textarea>
+        <div class="input-bottom">
+          <!-- v8.4.8 HITL 服务端化：权限模式徽标 + 切换菜单（v8.10 迁入输入框左下角） -->
+          <span class="perm-badge" id="permBadge" onclick="togglePermMenu(event)" title="权限模式（HITL）：点击切换">权限: --</span>
+          <div class="perm-menu" id="permMenu" style="display:none">
+            <div class="perm-menu-title">权限模式（HITL）</div>
+            <div class="perm-menu-item" data-mode="auto_workspace" onclick="setPermMode('auto_workspace')">auto_workspace — 工作区写文件免询问（默认）</div>
+            <div class="perm-menu-item" data-mode="ask" onclick="setPermMode('ask')">ask — 危险操作弹卡片审批</div>
+            <div class="perm-menu-item" data-mode="deny" onclick="setPermMode('deny')">deny — 一律拒绝危险操作</div>
+            <div class="perm-menu-note">重启后回落到 config.yaml 配置值</div>
+          </div>
+          <div class="input-actions">
+            <!-- v8.7: 小巧圆形图标按钮；运行中由 JS 隐藏本按钮、显示停止按钮 -->
+            <button class="send-btn" id="send-btn" onclick="sendMsg()" title="发送 (Enter)">↑</button>
+            <!-- v8.4.11 停止按钮：运行中显示；点击中断当前任务（修改问题后重新发送） -->
+            <button class="stop-btn" id="stop-btn" onclick="stopCurrentTask()" style="display:none" title="停止当前任务（输入有误时可停止后修改问题重新发送）">⏹</button>
+          </div>
+        </div>
       </div>
     </footer>
   </div>
@@ -1734,12 +1738,12 @@ function _ctxLevelClass(pct) {
 }
 
 function _updateCtxBtnRing(pct) {
-  var lvl = _ctxLevelClass(pct);
+  // v8.10: pct<=0（未使用上下文）渲染系统灰空环，与其他图标一致；有进度才按分级色渲染
   var fg = document.getElementById('ctxBtnFg');
   var dash = CTX_BTN_CIRCUM * (1 - Math.min(pct, 1));
   fg.style.strokeDasharray = CTX_BTN_CIRCUM + ' ' + CTX_BTN_CIRCUM;
   fg.style.strokeDashoffset = dash;
-  fg.className = 'ctx-btn-fg ' + lvl;
+  fg.className = 'ctx-btn-fg ' + (pct <= 0 ? 'none' : _ctxLevelClass(pct));
 }
 
 function renderContextPanel(data) {
