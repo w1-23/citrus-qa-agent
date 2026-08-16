@@ -79,6 +79,9 @@ body {
   margin-left: auto;
   animation: pulse 1.5s infinite;
 }
+/* v8.10h: 工具执行完成摘要（保留可展开，与深度思考一致）——静态态，无脉冲动画 */
+.exec-status.done { color: var(--text-secondary); }
+.exec-status.done .tool-subtitle { animation: none; }
 @keyframes pulse { 50% { opacity: 0.4; } }
 .terminal-log {
   background: var(--bg-deep);
@@ -202,8 +205,8 @@ header h1 { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
   display: flex; align-items: center; justify-content: center;
   font-size: 13px; flex-shrink: 0; margin-top: 2px;
 }
-.user .avatar { background: var(--accent-muted); color: var(--accent); }
-.bot .avatar { background: var(--success-glow); color: var(--success); }
+/* v8.10h: 统一无色系——用户气泡系统灰、回答气泡系统白（主题背景）、头像同灰 */
+.user .avatar, .bot .avatar { background: var(--bg-elevated); color: var(--text-secondary); }
 /* v8.10: 左右交替——用户气泡在右（头像右、内容靠右），回答气泡在左 */
 .message.user { flex-direction: row-reverse; }
 .message.user .content { flex: 0 1 auto; max-width: 72%; }
@@ -252,8 +255,9 @@ header h1 { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
 .fb-submit:hover { background: var(--accent-glow); }
 .fb-cancel:hover { background: var(--bg-hover); }
 .content {
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-hairline);
+  /* v8.10h: 回答气泡不渲染色彩——系统白（主题背景）无边框，与对话区融为一体 */
+  background: transparent;
+  border: none;
   border-radius: 9px;
   padding: 13px 17px;
   line-height: 1.65;
@@ -266,8 +270,9 @@ header h1 { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
   transition: border-color 0.2s var(--ease-out-quint);
 }
 .user .content {
-  background: var(--accent-muted);
-  border-color: rgba(217,119,6,0.12);
+  /* v8.10h: 用户气泡——系统灰底 + 细分隔线 */
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-hairline);
 }
 .content p { margin: 0 0 7px 0; }
 .content p:last-child { margin-bottom: 0; }
@@ -2177,8 +2182,10 @@ async function sendMsg(isFollowUp) {
   var renderPending = false;
 
   var _icons = {thinking: '💭', tool: '⚙', agent: '◆', answer: '✍'};
+  var _toolCount = 0;   // v8.10h: 本轮工具执行次数（完成摘要保留用）
 
   function updateStatus(type, text) {
+    if (type === 'tool' || type === 'agent') _toolCount++;
     var icon = _icons[type] || '•';
     var safeText = escapeHtml(text);
     var subtitle = text.length > 30 ? ' <span class="tool-subtitle">' + safeText + '</span>' : '';
@@ -2199,6 +2206,16 @@ async function sendMsg(isFollowUp) {
   function clearStatus() {
     statusDiv.innerHTML = '';
     termLog.style.display = 'none';
+  }
+
+  /* v8.10h: 回答完成后工具执行记录不消失——保留为可展开摘要（与深度思考一致，
+     用户可随时展开查看本轮执行过的工具与日志，提高对回答的信心） */
+  function finishStatus() {
+    if (_toolCount > 0) {
+      statusDiv.innerHTML = '<div class="exec-status done" onclick="var t=document.getElementById(\'' + termId + '\'); if(t){t.style.display=t.style.display==\'none\'?\'block\':\'none\'}">⚙ 工具执行 ' + _toolCount + ' 项 · 点击展开详情<span class="tool-subtitle"></span></div>';
+    } else {
+      statusDiv.innerHTML = '';
+    }
   }
 
   function renderAnswer() {
@@ -2338,7 +2355,7 @@ async function sendMsg(isFollowUp) {
         }
         break;
       case 'done':
-        clearTimeout(spinnerTimeout); isCancelled=true; answerDiv.style.display=''; clearStatus();
+        clearTimeout(spinnerTimeout); isCancelled=true; answerDiv.style.display=''; finishStatus();
         // v8.3.7 M3: 引用无检索支撑 → 轻提示（不阻断回答）
         if (data.citation_unsupported) {
           showBanner('⚠ 回答包含文献引用，但本轮未检测到检索支撑（可能为模型记忆），请谨慎引用');
@@ -2373,6 +2390,7 @@ async function sendMsg(isFollowUp) {
     fullText = '';
     isAnswerStarted = false;
     renderPending = false;
+    _toolCount = 0;
     answerDiv.style.display = 'none';
     answerDiv.innerHTML = '';
     statusDiv.innerHTML = '';
