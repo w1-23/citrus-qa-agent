@@ -1,5 +1,5 @@
 """Agent / Skill registries — v8.3.1 simplified."""
-from typing import List, Dict
+from typing import Dict
 
 AGENT_REGISTRY: Dict = {
     "retrieve-agent": {
@@ -25,19 +25,7 @@ AGENT_REGISTRY: Dict = {
     },
 }
 
-SKILL_REGISTRY: Dict = {
-    "citrus-review-writer": {
-        "file": "src/prompts/skills/citrus-review-writer.md",
-        "description": "Citrus academic review writing standard with tables, structure, citations",
-        "trigger_keywords": ["综述", "review", "撰写", "进展", "研究现状"],
-        "requires_literature": True,
-    },
-}
 
-
-def get_agent_names() -> List[str]:
+def get_agent_names():
     return list(AGENT_REGISTRY.keys())
 
-
-def get_skill_names() -> List[str]:
-    return list(SKILL_REGISTRY.keys())

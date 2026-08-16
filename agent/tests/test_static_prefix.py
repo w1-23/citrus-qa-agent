@@ -68,9 +68,11 @@ def test_static_prefix_agent_prompt():
         a2 = assemble_agent_prompt("write-agent")
         check("skills 不进入子 Agent SystemMessage", a1 == a2)
 
+        # v8.10d: skills/*.md 按名读取——不存在时优雅降级（只透传 extra）；
+        # 生产路径 run_agent 不传 skills（写作技能经 skill_prompt/skill_map 注入）
         e = build_agent_extra_block(
             skills=["citrus-review-writer"], system_prompt_extra="EXTRA_INSTR")
-        check("skills+extra 进独立块", "EXTRA_INSTR" in e and "写作技能" in e)
+        check("skills 文件缺失时优雅降级（extra 仍透传）", "EXTRA_INSTR" in e)
     finally:
         settings.CONTEXT_STATIC_PREFIX = _orig
 
