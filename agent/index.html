@@ -371,10 +371,11 @@ footer {
   justify-content: center;
   flex-shrink: 0;
 }
-/* v8.10: 输入框气泡化——3 倍高：上部两行输入区 + 底部栏（左权限 / 右发送·暂停） */
+/* v8.10: 输入框气泡化——上部两行输入区 + 底部栏（左权限 / 右发送·暂停）
+   v8.10b: 宽度 900→720px 居中（不再与聊天区同宽），输入区严格两行，整体比例协调 */
 .input-box {
-  display: flex; flex-direction: column; gap: 6px;
-  max-width: 900px; width: 100%;
+  display: flex; flex-direction: column; gap: 8px;
+  max-width: 720px; width: 100%;
   position: relative;
   background: var(--bg-elevated);
   border: 1px solid var(--border-hairline);
@@ -388,7 +389,7 @@ footer {
   background: transparent; border: none; outline: none;
   font-size: 14px; font-family: inherit; line-height: 1.6;
   color: var(--text-primary);
-  min-height: 62px; max-height: 140px;
+  min-height: 46px; max-height: 140px;
   display: block;
 }
 .input-box textarea::placeholder { color: var(--text-muted); }
@@ -2022,8 +2023,9 @@ document.addEventListener('click', function (e) {
   });
 });
 
-async function clearSession() {
-  if (!confirm('确定清空当前会话？')) return;
+/* v8.10: silent=true 跳过确认（newSession 内部调用——新建会话不应弹"清空"提示） */
+async function clearSession(silent) {
+  if (!silent && !confirm('确定清空当前会话？')) return;
   try {
     await fetch('/api/v1/session/' + sessionId + '/clear', { method: 'POST' });
     chatContainer.innerHTML = '<div class="message bot"><div class="avatar">◆</div><div class="content">您好，我是 <span id="welcomeVersion">Citrus QA Agent v' + _appVersion() + '</span>。<br><span style="color:var(--text-muted);font-size:13px">本地 RAG 检索 · CrossRef 学术搜索 · 文献综述写作 · 实验设计 · 文件读写</span></div></div>';
@@ -2047,7 +2049,8 @@ async function newSession() {
     var data = await resp.json();
     sessionId = data.session_id;
     localStorage.setItem('citrus_session_id', sessionId);
-    await clearSession();
+    // v8.10: 静默清空旧会话界面（不弹"确定清空"确认——新建会话语义，勿误导用户）
+    await clearSession(true);
     // v8.10: 新建后展开会话面板，让用户看到会话列表更新
     applySidebar('session');
   } catch (e) { alert('创建新会话失败: ' + e.message); }
