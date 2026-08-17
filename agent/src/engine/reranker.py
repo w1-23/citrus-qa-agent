@@ -11,7 +11,7 @@ warnings.filterwarnings("ignore", message=".*mean pooling instead of CLS.*")
 from typing import List, Dict
 from optimum.onnxruntime import ORTModelForSequenceClassification
 from transformers import AutoTokenizer
-from src.config import settings
+from src.config import settings, PROJECT_ROOT
 from src.engine.hardware import get_ort_providers
 
 logger = logging.getLogger(__name__)
@@ -39,7 +39,10 @@ class Reranker:
         with self._singleton_lock:
             if getattr(self, "_loaded", False):
                 return
-            self._cache_dir = Path(".hf_cache/onnx_reranker")
+            # v8.11: ONNX 缓存锚定 PROJECT_ROOT 绝对路径——此前 Path(".hf_cache/...")
+            # 相对 CWD，从非 agent/ 目录启动会 miss 缓存 → 触发 HF Hub 下载 → 网络不通
+            # 时 init/rerank 永久挂起（排查实测复现）。与 DATA_DIR 同为绝对路径口径。
+            self._cache_dir = PROJECT_ROOT / ".hf_cache" / "onnx_reranker"
             self._force_cpu = False
             self._providers = None
             self._needs_lock = False

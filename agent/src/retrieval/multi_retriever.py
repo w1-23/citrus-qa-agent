@@ -6,6 +6,7 @@ import pickle
 import re
 import time
 import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -114,6 +115,13 @@ class MultiBatchRetriever:
                 self.backend = "lancedb" if has_lance else "qdrant"
                 logger.info(f"[Retriever] backend auto -> {self.backend}")
             self.global_chunks: List[Dict] = []
+            # v8.11 全文懒加载: 稳态只保留 chunk 元数据（无 text），
+            # 文本按 (chunks.jsonl 路径, 行起始字节偏移) 按需读取 + LRU 缓存——
+            # 内存从 O(全部chunk全文) 降到 O(元数据)，3 倍语料后稳态基本不涨
+            self._text_offsets: List[Tuple[Path, int]] = []   # global_idx -> (路径, 偏移)
+            self._text_cache: "OrderedDict[int, str]" = OrderedDict()
+            self._text_lock = threading.Lock()
+            self._TEXT_CACHE_MAX = 2048   # ~2048 条 × 1KB ≈ 2MB 常驻上限
             self.bm25 = BM25Plus()
             self._idx_map = {}
             self.last_empty_reason: str = ""   # v8.3.1: 空结果归因（threshold_blocked / no_match），供工具回传 LLM
@@ -162,6 +170,8 @@ class MultiBatchRetriever:
         self.lance_tables.clear()
         self.lance_db = None
         self.global_chunks.clear()
+        self._text_offsets.clear()
+        self._text_cache.clear()
         self._initialized = False
         logger.info("[MultiBatchRetriever] closed all vector backends")
 
@@ -209,12 +219,22 @@ class MultiBatchRetriever:
                 continue
             batch_name = batch_dir.name
             # 公共：chunks.jsonl → global_chunks（两种后端共用；Qdrant 锁冲突时仅此处可用）
-            with open(chunks_path, encoding="utf-8") as f:
-                for local_idx, line in enumerate(f):
-                    if not line.strip(): continue
-                    chunk = json.loads(line)
+            # v8.11: 二进制逐行扫描并记录每行起始字节偏移（文本模式 tell 返回
+            # opaque cookie 不可跨 open seek，必须二进制）——稳态剥离 text，
+            # 查询时按偏移懒加载单条文本（见 _load_chunk_text）
+            with open(chunks_path, "rb") as f:
+                while True:
+                    offset = f.tell()
+                    line = f.readline()
+                    if not line:
+                        break
+                    line = line.strip()
+                    if not line:
+                        continue
+                    chunk = json.loads(line.decode("utf-8"))
                     chunk["_batch"] = batch_name
                     chunk["_global_idx"] = len(self.global_chunks)
+                    self._text_offsets.append((chunks_path, offset))
                     self.global_chunks.append(chunk)
             if self.backend == "lancedb":
                 self._load_lance_batch(batch_name)
@@ -279,6 +299,13 @@ class MultiBatchRetriever:
                 for c in self.global_chunks
             }
             self._verify_idx_map()
+            # v8.11 懒加载收尾：元数据/BM25/idx_map 均已就绪，剥离全文只留元数据——
+            # 启动期峰值与旧版相同（enrich/fit 需要全文），稳态内存大幅下降
+            self.global_chunks = [
+                {k: v for k, v in c.items() if k != "text"} for c in self.global_chunks
+            ]
+            logger.info(f"[Retriever] 全文懒加载就绪: {len(self._text_offsets)} 条偏移 "
+                        f"| 稳态仅保留元数据（text 按需读取）")
 
     def _verify_idx_map(self):
         """AG-11: 映射完整性自检 — 抽样 qdrant 点，按 payload (paper_id, chunk_index) 匹配率告警。"""
@@ -406,6 +433,40 @@ class MultiBatchRetriever:
             self.failed_batches[batch_name] = str(e)[:120]
             logger.warning(f"Failed to load LanceDB table for {batch_name}: {e}")
 
+    # ========== v8.11 全文懒加载 ==========
+    def _read_chunk_text(self, global_idx: int) -> str:
+        """按偏移从 chunks.jsonl 读取单条 chunk 的 text（无锁磁盘读，单行 seek）。"""
+        path, offset = self._text_offsets[global_idx]
+        with open(path, "rb") as f:
+            f.seek(offset)
+            line = f.readline()
+        return json.loads(line.decode("utf-8")).get("text", "")
+
+    def _load_chunk_text(self, global_idx: int) -> str:
+        """LRU 文本缓存（线程安全；double-check：锁内查缓存，锁外读盘）。
+
+        查询只用到每轮 ~20 条候选文本（top_k_final*2），缓存 2048 条足够
+        覆盖多轮对话/同批文献复用；第二次起命中内存，额外延迟 ≈ 0。
+        """
+        with self._text_lock:
+            if global_idx in self._text_cache:
+                self._text_cache.move_to_end(global_idx)
+                return self._text_cache[global_idx]
+        text = self._read_chunk_text(global_idx)
+        with self._text_lock:
+            self._text_cache[global_idx] = text
+            self._text_cache.move_to_end(global_idx)
+            while len(self._text_cache) > self._TEXT_CACHE_MAX:
+                self._text_cache.popitem(last=False)
+        return text
+
+    def _chunk_full(self, global_idx: int) -> Dict:
+        """懒加载组装完整 chunk（元数据 + 文本），供 rerank/下游使用——
+        返回字段集与懒加载前 global_chunks 元素完全一致。"""
+        c = dict(self.global_chunks[global_idx])
+        c["text"] = self._load_chunk_text(global_idx)
+        return c
+
     def _vector_search(self, batch_name: str, query_vec: List[float],
                        limit: int) -> List[Tuple[int, float]]:
         """按后端分派向量检索（v8.9）。返回 [(global_idx, score)]，score 越大越相关。"""
@@ -503,7 +564,7 @@ class MultiBatchRetriever:
                 getattr(settings, 'RRF_WEIGHT_BM25', 1.0),
             ],
         )
-        candidates = [self.global_chunks[idx] for idx, _ in fused[:settings.TOP_K_FINAL * 2]]
+        candidates = [self._chunk_full(idx) for idx, _ in fused[:settings.TOP_K_FINAL * 2]]
         primary_query = queries[0]
         t_rerank = time.time()
         reranked = self.reranker.rerank(primary_query, candidates, top_k=settings.TOP_K_FINAL)
@@ -597,7 +658,7 @@ class MultiBatchRetriever:
 
         fused = rrf_fuse(u_orig, u_hyde, u_bm25, k=settings.RRF_K,
                          weights=[w_orig, w_hyde, w_bm25])
-        candidates = [self.global_chunks[idx] for idx, _ in fused[:settings.TOP_K_FINAL * 2]]
+        candidates = [self._chunk_full(idx) for idx, _ in fused[:settings.TOP_K_FINAL * 2]]
         _emit(f"Cross-Encoder 重排序 ({len(candidates)} 篇候选文献)...")
 
         reranked = self.reranker.rerank(original_query, candidates, top_k=settings.TOP_K_FINAL)
