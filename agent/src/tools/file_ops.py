@@ -35,14 +35,17 @@ def write_local_file(path: str, content: str, mode: Literal["write", "append"] =
         mode: 'write' 覆盖写入（默认）；'append' 尾部追加。写长篇综述时用 append 分块。
     """
     try:
+        # normalized 仅用于返回消息展示（用户友好的相对路径）
         normalized = Path(path).as_posix()
         for prefix in ("workspace/output/", "output/"):
             if normalized.startswith(prefix):
                 normalized = normalized[len(prefix):]
-        target_path = (_WORKSPACE_ROOT / normalized).resolve()
-        # v8.13: startswith 前缀判定有路径边界漏洞（output_evil 同前缀可绕过）
-        # → is_relative_to 严格判定（与 readfile v8.4.14 修复对称）
-        if not target_path.is_relative_to(_WORKSPACE_ROOT):
+        # v8.13: 路径解析与越界校验收敛到 core.path_policy.resolve_write
+        # （统一 is_relative_to，杜绝 startswith 同前缀绕过）
+        from src.core.path_policy import resolve_write
+        try:
+            target_path = resolve_write(path)
+        except PermissionError:
             return f"Error: Access denied. Path '{path}' is outside workspace/output/."
 
         target_path.parent.mkdir(parents=True, exist_ok=True)

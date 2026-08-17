@@ -18,46 +18,24 @@ _WORKSPACE_ROOT = PROJECT_ROOT / settings.WORKSPACE_DIR
 
 
 def _is_path_allowed(full: Path) -> bool:
-    """v8.3.3/v8.4.14 路径白名单: 项目根目录 + 配置的额外读取根目录。
-
-    v8.4.14: 修复 commonpath 同盘前缀漏洞（E:\anywhere 与 E:\agent 同盘前缀
-    会被误放行）→ is_relative_to 严格判定。
-    """
-    try:
-        if full.is_relative_to(PROJECT_ROOT.resolve()):
-            return True
-    except ValueError:
-        pass
-    for root in getattr(settings, "FILE_READ_EXTRA_ROOTS", None) or []:
-        try:
-            if full.is_relative_to(Path(root).resolve()):
-                return True
-        except ValueError:
-            continue
-    return False
+    """路径白名单判定（v8.13 收敛到 core.path_policy.is_within）。"""
+    from src.core.path_policy import is_within, read_roots
+    return is_within(full, read_roots())
 
 
 def _resolve_read_path(path: str) -> Path:
-    p = Path(path)
-    if p.is_absolute():
-        full = p.resolve()
-        # v8.3.3 安全: 绝对路径仅允许项目根目录内（防 LLM 读取系统任意文件，
-        # 与 write_local_file/pdf_read 的 workspace 校验对称）
-        if not _is_path_allowed(full):
-            raise PermissionError(f"拒绝读取项目目录外的文件: {full}")
-    else:
-        full = (_WORKSPACE_ROOT / p).resolve()
-        if not full.exists():
-            full = Path.cwd() / p
-            full = full.resolve()
-        # v8.13: 相对路径同样走白名单校验——此前仅绝对路径分支校验，
-        # 相对路径 + .. 组合可逃逸到项目目录外读取任意文件
-        if not _is_path_allowed(full):
-            raise PermissionError(f"拒绝读取项目目录外的文件: {full}")
+    """路径解析（v8.13 收敛到 core.path_policy.resolve_read）。
 
+    绝对路径仅允许项目根+额外根；相对路径锚定 workspace/（不再 Path.cwd()
+    兜底，杜绝相对 + .. 逃逸）。越界抛 PermissionError（fail-closed）。
+    """
+    from src.core.path_policy import resolve_read
+    try:
+        full = resolve_read(path)
+    except PermissionError:
+        raise PermissionError(f"拒绝读取项目目录外的文件: {path}")
     if not full.exists():
         raise FileNotFoundError(f"文件不存在: {full}")
-
     return full
 
 
@@ -158,11 +136,16 @@ def _read_text(path: Path) -> str:
 
 
 @tool
-async def read_local_file(path: str, max_chars: int = 0) -> str:
+def read_local_file(path: str, max_chars: int = 0) -> str:
     """读取本地文件。PDF 默认读全文（max_chars<=0 不截断；传正数可限制字符数）。
 
     绝对路径：仅允许项目根目录内的文件。
-    相对路径：从 workspace/ 或当前工作目录查找。
+    相对路径：从 workspace/ 查找。
+
+    v8.13 第四批: async def → def（A-06）——函数体全为同步 CPU/IO
+    （fitz/pdfplumber/openpyxl/pandas），此前声明 async 导致 registry 直接
+    `await tool.ainvoke` 挂在事件循环，50MB PDF 解析期间冻结所有会话。
+    改为 sync 工具后统一经 executor 执行，不再阻塞事件循环。
 
     Args:
         path: 文件的绝对路径或相对路径

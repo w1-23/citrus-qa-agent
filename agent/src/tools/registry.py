@@ -12,12 +12,13 @@ from uuid import uuid4
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool
 
-from src.config import settings
+from src.config import PROJECT_ROOT, settings
 
 logger = logging.getLogger(__name__)
 
 AUTO_OFFLOAD_THRESHOLD = 15000
-OFFLOAD_DIR = Path(settings.WORKSPACE_DIR) / "tmp"
+# v8.13: 锚定 PROJECT_ROOT（此前 CWD 相对——从非仓库根启动时 offload 写入错误位置）
+OFFLOAD_DIR = (PROJECT_ROOT / settings.WORKSPACE_DIR / "tmp").resolve()
 
 _offload_created_files: list[Path] = []
 
@@ -131,20 +132,13 @@ _READONLY_TOOLS = frozenset({
 
 
 def _is_workspace_output_path(path: str) -> bool:
-    """write_local_file 路径是否落在 workspace/output 内（auto_workspace 免询问依据）。"""
-    from pathlib import Path
-    from src.config import PROJECT_ROOT
-    try:
-        if not path:
-            return False
-        normalized = str(path).replace("\\", "/")
-        while normalized.startswith("output/") or normalized.startswith("./output/"):
-            normalized = normalized[len("output/"):]
-        target = (PROJECT_ROOT / "workspace" / "output" / normalized).resolve()
-        root = (PROJECT_ROOT / "workspace" / "output").resolve()
-        return str(target).startswith(str(root))
-    except Exception:
-        return False
+    """write_local_file 路径是否落在 workspace/output 内（auto_workspace 免询问依据）。
+
+    v8.13: 收敛到 core.path_policy.is_output_path（统一 is_relative_to，原
+    startswith 同前缀漏洞 registry 侧残留一并消除）。
+    """
+    from src.core.path_policy import is_output_path
+    return is_output_path(path)
 
 
 async def _check_tool_sandbox(tool_name: str, args: dict) -> Optional[str]:
@@ -313,6 +307,51 @@ async def _run_single_tool(tool: BaseTool, tool_call: dict) -> ToolMessage:
             result.content = _offload_large_result(result.content, tool_name)
 
         return result
+
+
+async def run_tool_checked(tool: BaseTool, args: dict) -> str:
+    """v8.13 第四批: 工具执行统一出口——供图内联/流水线直调复用。
+
+    此前 write_pipeline 直调 write_local_file.func、expert_graph 内联
+    read/pdf/write 绕过 _check_tool_sandbox 与超时/offload（ask 审批模式对
+    这些路径形同虚设，且大文件阻塞事件循环）。统一经此出口：
+    - 沙箱/权限检查（fail-closed）
+    - 超时中断（TOOL_EXEC_TIMEOUT_SEC）
+    - 大结果 offload + 错误分类
+    Returns: content 字符串。以 [ERR_* 或 "Error:" 前缀判失败。
+    """
+    tool_name = tool.name
+    reject_reason = await _check_tool_sandbox(tool_name, args)
+    if reject_reason:
+        return reject_reason
+
+    exec_timeout = getattr(settings, "TOOL_EXEC_TIMEOUT_SEC", 60) or 60
+    ctx = contextvars.copy_context()
+    raw_func = getattr(tool, "func", None)
+    response_format = getattr(tool, "response_format", None)
+
+    try:
+        if response_format == "content_and_artifact" and raw_func is not None:
+            content, _artifact = await asyncio.wait_for(
+                asyncio.get_running_loop().run_in_executor(
+                    None, lambda: ctx.run(lambda: raw_func(**args))),
+                timeout=exec_timeout)
+            return content if isinstance(content, str) else str(content)
+        result = await asyncio.wait_for(_invoke_tool_with_ctx(ctx, tool, args),
+                                        timeout=exec_timeout)
+        if isinstance(result, ToolMessage):
+            content = result.content
+        elif isinstance(result, str):
+            content = result
+        elif isinstance(result, tuple) and len(result) == 2:
+            content = result[0]
+        else:
+            content = str(result)
+        return content if isinstance(content, str) else str(content)
+    except asyncio.TimeoutError:
+        return f"[ERR_TIMEOUT] 工具 {tool_name} 执行超过 {exec_timeout}s，已中断。"
+    except Exception as e:
+        return _classify_error(e)
 
 
 class PartitionedToolNode:

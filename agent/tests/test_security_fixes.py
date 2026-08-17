@@ -24,10 +24,9 @@ def check(name, cond, detail=""):
 
 def test_readfile_relative_escape():
     print("[SEC-1] read_local_file 相对路径逃逸拦截")
-    import asyncio
     from src.tools.readfile import read_local_file
-    # 从 workspace 向上 3 级 → 项目根之外；文件不存在也应先被路径校验拦截
-    r = asyncio.run(read_local_file.ainvoke({"path": "../../../outside_secret.txt"}))
+    # v8.13 第四批: read_local_file 已改 sync 工具，.invoke 同步调用
+    r = read_local_file.invoke({"path": "../../../outside_secret.txt"})
     check("相对路径逃逸被拒", "拒绝" in r or "ERR_PARSE" in r, r[:80])
 
 

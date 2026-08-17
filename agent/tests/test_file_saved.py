@@ -41,7 +41,8 @@ def test_supervisor_direct_write():
     check("_AGENT_TOOLS 含 write_local_file", '"name": "write_local_file"' in schemas)
     check("处理分支存在", 'tc_dict["name"] == "write_local_file"' in expert)
     check("描述含'原样保存/verbatim'", "verbatim" in schemas and "call_write_agent instead" in schemas)
-    check("write_local_file 分支执行写盘", "write_local_file.func, path, content, mode" in expert)
+    check("write_local_file 分支执行写盘",
+          "run_tool_checked(write_local_file, args)" in expert)
 
 
 def test_retrieve_turns():

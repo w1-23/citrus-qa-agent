@@ -336,21 +336,24 @@ async def _react_fallback_write(llm, goal: str, plan_text: str, material_pack: l
                 "missing_sections": [], "truncated_sections": [], "material_gap": gap}
 
     from src.tools.file_ops import write_local_file
+    from src.tools.registry import run_tool_checked
     max_per_section = int(settings.PIPELINE_SECTION_MAX_TOKENS / 1.2 * 0.9)
     blocks = [b.strip() for b in SECTION_SPLIT_RE.split(content) if b.strip()]
     total = 0
     draft = _draft_path(output_path)
     try:
         if len(content) <= max_per_section or len(blocks) <= 1:
-            msg = write_local_file.func(draft, content, "write")
-            if msg.startswith("Error"):
+            msg = await run_tool_checked(write_local_file,
+                                         {"path": draft, "content": content, "mode": "write"})
+            if msg.startswith("Error") or msg.startswith("[ERR"):
                 raise RuntimeError(msg[:200])
             total = len(content)
         else:
             for i, b in enumerate(blocks):
                 mode = "write" if i == 0 else "append"
-                msg = write_local_file.func(draft, b, mode)
-                if msg.startswith("Error"):
+                msg = await run_tool_checked(write_local_file,
+                                             {"path": draft, "content": b, "mode": mode})
+                if msg.startswith("Error") or msg.startswith("[ERR"):
                     raise RuntimeError(msg[:200])
                 total += len(b)
     except Exception as e:
@@ -880,6 +883,7 @@ async def run_stage2_execute(llm, plan: dict, material_pack: list[dict],
 
     from src.core.progress_bus import emit_encoded
     from src.tools.file_ops import write_local_file
+    from src.tools.registry import run_tool_checked
     from src.core.write_pipeline_state import mark_section_done
 
     # v8.6: 渐进式披露——模型声明的技能全文（未声明 → 旧行为全量注入，零回归）
@@ -1007,9 +1011,11 @@ async def run_stage2_execute(llm, plan: dict, material_pack: list[dict],
                       f"## 关键词\n{', '.join(plan.get('keywords', []) or [])}\n\n")
             body = header + body
         try:
-            msg = write_local_file.func(draft, body, mode)
-            if msg.startswith("Error"):
-                # write_local_file 失败时返回错误字符串而非抛异常，必须显式检测
+            # v8.13 第四批: 统一工具执行出口（沙箱/超时/offload 一致）
+            msg = await run_tool_checked(write_local_file,
+                                         {"path": draft, "content": body, "mode": mode})
+            if msg.startswith("Error") or msg.startswith("[ERR"):
+                # 失败返回错误字符串而非抛异常，必须显式检测
                 logger.error(f"[WritePipeline] write failed section {idx+1}: {msg[:200]}")
                 missing.append(section.get("heading", f"第{idx+1}章"))
                 continue
@@ -1108,6 +1114,7 @@ async def modify_document(llm, output_path: str, target_section: str, user_goal:
                           material_pack: list[dict]) -> dict:
     """modify 分支: 章节重写 / 追加新章节。返回 {action, result}。"""
     from src.tools.file_ops import write_local_file
+    from src.tools.registry import run_tool_checked
     target = (PROJECT_ROOT / "workspace" / "output" / output_path).resolve()
     if not target.exists():
         return {"action": "error", "result": f"[ERR_FILE_NOT_FOUND] 文件不存在: {output_path}"}
@@ -1125,7 +1132,11 @@ async def modify_document(llm, output_path: str, target_section: str, user_goal:
         body, _ = extract_summary((resp.content or "").strip())
         if not SECTION_HEADING_RE.search(body):
             body = f"## {target_section or '补充章节'}\n\n{body}"
-        write_local_file.func(output_path, body, "append")
+        # v8.13 A15: 检查写结果（此前吞错误，写失败也报"成功"）
+        msg = await run_tool_checked(write_local_file,
+                                     {"path": output_path, "content": body, "mode": "append"})
+        if msg.startswith("Error") or msg.startswith("[ERR"):
+            return {"action": "error", "result": msg[:200]}
         return {"action": "append_section", "result": f"已追加章节: {target_section or '补充章节'}"}
 
     if idx < 0:
@@ -1152,7 +1163,11 @@ async def modify_document(llm, output_path: str, target_section: str, user_goal:
             (new_body if i == idx else s["body"]) for i, s in enumerate(sections)
         )
         new_text = rebuilt
-    write_local_file.func(output_path, new_text, "write")
+    # v8.13 A15: 检查写结果（此前吞错误，写失败也报"成功"）
+    msg = await run_tool_checked(write_local_file,
+                                 {"path": output_path, "content": new_text, "mode": "write"})
+    if msg.startswith("Error") or msg.startswith("[ERR"):
+        return {"action": "error", "result": msg[:200]}
     return {"action": "rewrite_section",
             "result": f"已重写章节: {sections[idx]['heading']}"}
 

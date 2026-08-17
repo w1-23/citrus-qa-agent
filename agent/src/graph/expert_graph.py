@@ -288,14 +288,14 @@ async def _execute_tool_call(tc: dict, tc_id: str = "", material_pack: list | No
                 and await _classify_document(context)):
             logger.info(f"[ExpertGraph] direct write: context_head={context[:120]!r} ...")
             from src.tools.file_ops import write_local_file
+            from src.tools.registry import run_tool_checked
             save_path = task["output_path"]
-            # v8.4.5: 直写快捷路径同样经过沙箱/权限判定（deny/ask 语义一致）
-            from src.tools.registry import _check_tool_sandbox
-            reject = await _check_tool_sandbox("write_local_file", {"path": save_path})
-            if reject:
-                return {"agent": "write-agent", "result": reject, "artifacts": {},
+            # v8.13 第四批: 统一工具出口（沙箱/超时/offload 一致，且不再同步阻塞事件循环）
+            save_msg = await run_tool_checked(write_local_file,
+                                              {"path": save_path, "content": context, "mode": "write"})
+            if save_msg.startswith("Error") or save_msg.startswith("[ERR"):
+                return {"agent": "write-agent", "result": save_msg[:200], "artifacts": {},
                         "tools_called": 0}
-            save_msg = write_local_file.func(save_path, context, "write")
             logger.info(f"[ExpertGraph] direct write (context={len(context)}chars): {save_msg}")
             result = {"agent": "write-agent", "result": f"已保存到 {save_path}", "artifacts": {},
                       "tools_called": 0}
@@ -828,7 +828,9 @@ async def supervisor_node(state: AgentState) -> dict:
                     except Exception:
                         pass
                     from src.tools.readfile import read_local_file
-                    content = await read_local_file.ainvoke(tc_dict["args"])
+                    from src.tools.registry import run_tool_checked
+                    # v8.13 第四批: 统一工具出口（sync 工具经 executor，大文件不阻塞事件循环）
+                    content = await run_tool_checked(read_local_file, tc_dict["args"])
                     sub_result = {"agent": "read_local_file", "result": content or "", "artifacts": {}}
                     try:
                         emit_tool_result("read_local_file", str(content)[:100000], tc_id,
@@ -855,21 +857,13 @@ async def supervisor_node(state: AgentState) -> dict:
                     except Exception:
                         pass
                     from src.tools.file_ops import write_local_file
+                    from src.tools.registry import run_tool_checked
                     args = tc_dict.get("args", {})
-                    path = str(args.get("path", "")).strip()
                     content = str(args.get("content", ""))
-                    mode = str(args.get("mode", "write") or "write")
-                    from src.tools.registry import _check_tool_sandbox
-                    reject = await _check_tool_sandbox("write_local_file", args)
-                    if reject:
-                        sub_result = {"agent": "write_local_file", "result": reject,
-                                      "artifacts": {}}
-                    else:
-                        save_msg = await asyncio.to_thread(
-                            write_local_file.func, path, content, mode,
-                        )
-                        sub_result = {"agent": "write_local_file", "result": save_msg,
-                                      "artifacts": {}}
+                    # v8.13 第四批: 统一工具出口（沙箱/超时/offload 一致，去掉手写沙箱分支）
+                    save_msg = await run_tool_checked(write_local_file, args)
+                    sub_result = {"agent": "write_local_file", "result": save_msg,
+                                  "artifacts": {}}
                     try:
                         emit_tool_result("write_local_file", str(sub_result.get("result", ""))[:100000],
                                          tc_id,
