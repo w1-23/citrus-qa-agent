@@ -40,6 +40,12 @@ def extract_usage(response) -> dict | None:
         um = getattr(response, "usage_metadata", None) or {}
         rm = getattr(response, "response_metadata", {}) or {}
         raw = rm.get("token_usage") or rm.get("usage") or {}
+        # v8.12: DeepSeek cache 字段位置适配——旧版 prompt_cache_hit/miss_tokens
+        # 在 usage 顶层；新版（OpenAI 兼容）在 input_token_details 的
+        # cache_read_tokens / cache_creation_input_tokens。多候选兜底读取。
+        input_details = um.get("input_token_details") or raw.get("input_token_details") or {}
+        if not isinstance(input_details, dict):
+            input_details = {}
         merged: dict = {}
         # v8.4.4: DeepSeek raw usage 用 prompt_tokens/completion_tokens 命名，
         # usage_metadata 用 input/output_tokens——两者都要读
@@ -50,10 +56,18 @@ def extract_usage(response) -> dict | None:
             merged[key] = int(val or 0)
         merged["cache_hit"] = int(
             raw.get("prompt_cache_hit_tokens")
-            or um.get("prompt_cache_hit_tokens") or 0)
+            or um.get("prompt_cache_hit_tokens")
+            or input_details.get("cache_read_tokens")
+            or input_details.get("cached_tokens")
+            or input_details.get("cache_read")
+            or 0)
         merged["cache_miss"] = int(
             raw.get("prompt_cache_miss_tokens")
-            or um.get("prompt_cache_miss_tokens") or 0)
+            or um.get("prompt_cache_miss_tokens")
+            or input_details.get("cache_creation_input_tokens")
+            or input_details.get("cache_creation_tokens")
+            or input_details.get("cache_miss")
+            or 0)
         if not merged["total_tokens"]:
             return None
         # v8.4.4: 首次样本输出 usage 键集合（诊断用，不改变正常路径）
@@ -63,6 +77,7 @@ def extract_usage(response) -> dict | None:
             logger.info(
                 f"[CacheMetrics] usage 样本#{_usage_samples_logged}: "
                 f"usage_metadata_keys={sorted(um.keys())} "
+                f"input_token_details_keys={sorted(input_details.keys())} "
                 f"raw_keys={sorted(raw.keys())} "
                 f"cache_hit={merged['cache_hit']} cache_miss={merged['cache_miss']}"
             )

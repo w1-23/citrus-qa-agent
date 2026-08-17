@@ -304,6 +304,7 @@ async def _execute_tool_call(tc: dict, tc_id: str = "", material_pack: list | No
                     task, pack, session_id=session_id,
                     skill_prompt=skill_prompt,
                     skill_map=skill_map if skill_map else None,
+                    cls=cls,  # v8.12: 复用本函数上方已分类结果，避免重复 classify
                 )
                 result["agent"] = "write-agent"
             else:

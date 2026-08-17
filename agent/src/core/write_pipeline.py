@@ -124,6 +124,13 @@ def classify_write_task(goal: str, context: str, file_exists: bool,
     elif not out.get("target_chars"):
         out["target_chars"] = 0
 
+    # v8.12: 综述/长文档（plan_execute）不应被过小的目标字数约束——"300字"这类
+    # 对一篇综述明显失真，会连带 validate 阈值、单章容量判据全部偏小（实测
+    # target_chars=300 vs 实际产出 7341 字，差 24 倍）。< 800 视为未指定，
+    # 转自主模式（篇幅由材料丰富度决定，validate 用 1500 下限口径）。
+    if out["mode"] == "plan_execute" and out["target_chars"] and out["target_chars"] < 800:
+        out["target_chars"] = 0
+
     logger.info(f"[WritePipeline] classify -> {out['mode']} (target_chars={out['target_chars']}, "
                 f"section={out['target_section'] or 'none'}, file_exists={file_exists})")
     return out
@@ -149,7 +156,16 @@ def _build_plan_prompt(material_pack: list[dict], target_chars: int, retry_info:
         extra = f"\n\n【上次大纲未通过校验，失败项: {retry_info}】请修正后重新输出完整 JSON。"
     # v8.6 (书 §2.5/4.8.2): 渐进式披露目录——Plan 阶段只见技能目录，全文按需加载
     catalog = f"\n\n{skill_catalog}" if skill_catalog else ""
-    return (f"{prompt_file}\n\n---\n{size_line}\n"
+    # v8.12: skills_used 声明引导前置到材料之前——此前引导只在目录末尾，被长
+    # 材料列表淹没，模型常忽略 → 全量回退注入（渐进式披露失效，白费上下文）
+    skill_declare = ""
+    if skill_catalog:
+        skill_declare = (
+            "\n\n【重要】下方【可用写作技能】列出的技能若与本次写作相关，请务必在大纲 JSON 中声明"
+            ' "skills_used": ["<技能id>", ...]（只列你真正会用到的技能 id）；确定不需要则声明空数组 []。'
+            "未声明会默认注入可能不相关的技能全文，浪费上下文。"
+        )
+    return (f"{prompt_file}\n\n---\n{size_line}{skill_declare}\n"
             f"检索材料:\n{material_text}{catalog}{extra}")
 
 
@@ -584,6 +600,75 @@ def _unify_references(output_path: str) -> dict:
         return {"unified": 0, "chapters": len(chapters), "dropped": [str(e)]}
 
 
+def _prune_unreferenced_refs(output_path: str) -> dict:
+    """v8.12: 裁剪文末参考文献中未被正文引用的条目，并重排为连续编号。
+
+    在 _unify_references 之后运行，保证"参考文献列表 == 正文实际引用集合"，
+    消除 verify_reference_integrity 报出的"文献[n] 未被正文引用"僵尸引用
+    （此前只告警不处理，正式发布文件里残留未引用条目）。
+    纯规则、无 LLM 调用；正文 [n] 重写复用 _CITE_MARKER_RE 正则。
+    Returns: {"pruned": int, "before": int, "after": int}
+    """
+    target = (_WORKSPACE_ROOT / output_path).resolve()
+    try:
+        content = target.read_text(encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"[WritePipeline] prune refs read failed: {e}")
+        return {"pruned": 0, "before": 0, "after": 0}
+
+    refs_m = re.search(r"(?:^|\n)#{1,3}\s*参考文献\s*", content)
+    if not refs_m:
+        return {"pruned": 0, "before": 0, "after": 0}
+    head = content[:refs_m.start()]
+    refs_tail = content[refs_m.start():]
+
+    # 正文引用的编号集合
+    cited = {int(n) for n in re.findall(r"\[(\d{1,3})\]", head)}
+
+    # 解析参考文献区条目（复用 _REF_ENTRY_RE 的条目行解析）
+    entries: list[tuple[int, str]] = []
+    cur_num: int | None = None
+    cur_text: list[str] = []
+    for line in refs_tail.split("\n"):
+        m = _REF_ENTRY_RE.match(line)
+        if m and (m.group(1) or m.group(2)):
+            if cur_num is not None:
+                entries.append((cur_num, "\n".join(cur_text).strip()))
+            cur_num = int(m.group(1) or m.group(2))
+            cur_text = [m.group(3)]
+        elif cur_num is not None:
+            cur_text.append(line)
+    if cur_num is not None:
+        entries.append((cur_num, "\n".join(cur_text).strip()))
+
+    if not entries:
+        return {"pruned": 0, "before": 0, "after": 0}
+
+    kept = [(n, t) for n, t in entries if n in cited]
+    pruned = len(entries) - len(kept)
+    if pruned == 0:
+        return {"pruned": 0, "before": len(entries), "after": len(kept)}
+
+    # old -> new 连续编号映射（未引用条目被删除后，后续编号前移）
+    remap = {n: i + 1 for i, (n, _t) in enumerate(kept)}
+
+    def _rewrite_cite(m: re.Match) -> str:
+        nums = [int(x) for x in re.split(r"[,，\s]+", m.group(1)) if x.strip()]
+        mapped = [str(remap.get(n, n)) for n in nums]
+        return "[" + ",".join(mapped) + "]"
+
+    new_head = _CITE_MARKER_RE.sub(_rewrite_cite, head)
+    kept_block = "\n\n".join(f"[{i + 1}] {t}" for i, (_n, t) in enumerate(kept))
+    new_content = new_head.rstrip() + "\n\n## 参考文献\n\n" + kept_block + "\n"
+
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(new_content, encoding="utf-8")
+    os.replace(tmp, target)
+    logger.info(f"[WritePipeline] 引用裁剪: 删除 {pruned} 条未引用文献 "
+                f"({len(entries)} -> {len(kept)})")
+    return {"pruned": pruned, "before": len(entries), "after": len(kept)}
+
+
 def _extract_material_subsets(plan_section: dict, material_pack: list[dict]) -> str:
     """按 refs 从材料包抽取子集（DOI 精确 → 标题模糊 fallback），累计 ≤8000 字符。
 
@@ -801,10 +886,16 @@ async def run_stage2_execute(llm, plan: dict, material_pack: list[dict],
                 logger.warning(f"[WritePipeline] section {idx+1} {len(body)} chars > "
                                f"{max_per_section}, condensed retry")
                 try:
-                    condensed_prompt = prompt + (
-                        f"\n\n【上一版输出 {len(body)} 字，超过安全容量 {max_per_section} 字（API 会截断）。"
-                        f"请压缩到 {max_per_section} 字以内：保留核心内容与要点、删除冗余修饰与重复表述，"
-                        f"并照常输出 <summary> 标签。】")
+                    # v8.12: 把上一版正文喂进压缩 prompt——此前只挂一句"请压缩"，
+                    # 模型看不到待压内容 → 等于重新生成一遍，长度不受控（实测
+                    # section 3442→3420 几乎无效）。喂回原文才能真正压缩。
+                    condensed_prompt = (
+                        f"下面是本章已生成的正文（{len(body)} 字符），超出安全容量 {max_per_section} 字符。"
+                        f"请将它压缩到 {max_per_section} 字符以内：保留核心观点、关键数据、"
+                        "所有引用编号 [n] 与本章结论，删除冗余修饰与重复表述，并在末尾照常输出 "
+                        '<summary>摘要</summary> 标签。\n\n'
+                        f"=== 待压缩正文 ===\n{body}\n=== 结束 ==="
+                    )
                     resp = await asyncio.wait_for(
                         _call_llm(llm, condensed_prompt),
                         timeout=settings.PIPELINE_SECTION_TIMEOUT)
@@ -1002,7 +1093,8 @@ async def modify_document(llm, output_path: str, target_section: str, user_goal:
 async def run_write_pipeline(task: dict, material_pack: list[dict],
                              llm_factory=None, session_id: str = "",
                              skill_prompt: str = "",
-                             skill_map: Optional[dict] = None) -> dict:
+                             skill_map: Optional[dict] = None,
+                             cls: Optional[dict] = None) -> dict:
     """Plan-Execute 流水线总入口。
 
     Args:
@@ -1012,6 +1104,8 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
         skill_prompt: v8.4.3 写作 skill 内容（追加到单章 prompt，不影响静态缓存）
         skill_map: v8.6 渐进式披露 {skill_id: {name, content}}——Plan 阶段只注入
             目录，模型在 skills_used 中声明后再注入全文（未声明兜底 top-1）
+        cls: v8.12 调用方已分类结果（expert_graph 路由时已调 classify），传入则
+            跳过重复分类；None 时内部补一次（向后兼容测试/独立调用）
     Returns:
         {"result": str, "mode": str, "chapters": int, "total_chars": int,
          "missing_sections": list, "truncated_sections": list,
@@ -1040,7 +1134,10 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
                     f"{settings.PIPELINE_MATERIAL_MIN_COUNT}")
 
     file_exists = bool(output_path) and (_WORKSPACE_ROOT / output_path).resolve().exists()
-    cls = classify_write_task(goal, "", file_exists, llm=llm)
+    # v8.12: 复用调用方已分类结果（expert_graph 路由时已调过一次 classify），避免
+    # 重复分类——LLM 兜底场景下会多一次 LLM 调用 + 延迟（正则快筛命中时仅日志重复）
+    if cls is None:
+        cls = classify_write_task(goal, "", file_exists, llm=llm)
 
     if cls["mode"] == "direct_write":
         return {"result": "[direct_write] 现成内容应由 supervisor 直写，不应进入流水线",
@@ -1164,6 +1261,13 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
             unify_info = _unify_references(draft)
         except Exception as e:
             logger.warning(f"[WritePipeline] unify refs failed: {e}")
+        # v8.12: 统一引用后裁剪未引用条目（僵尸引用）并重排编号，保证文末参考
+        # 文献列表 == 正文实际引用集合（此前 verify 只告警不拦截，正式文件里
+        # 残留"文献[n] 未被正文引用"条目；裁剪后 verify 无引用问题 → 正常发布）
+        try:
+            _prune_unreferenced_refs(draft)
+        except Exception as e:
+            logger.warning(f"[WritePipeline] prune refs failed: {e}")
     try:
         from src.core.business_logger import blog
         blog("pipeline_done", chapters=exec_result["chapters"],
