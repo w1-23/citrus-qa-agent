@@ -75,13 +75,18 @@ def start_task(session_id: str, output_path: str, plan: dict,
 
 
 def find_resumable_task(session_id: str, output_path: str) -> Optional[dict]:
-    """查找可续传任务（同 session+路径且未完成）。"""
+    """查找可续传任务（同 session+路径且未完成）。
+
+    v8.13: 放宽到 running/resumed/partial 三态——此前只查 running，导致
+    claim 置 resumed 后崩溃（无 aborted 兜底）或 partial 缺章任务永远不可续。
+    """
     try:
         with _connect() as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 "SELECT * FROM pipeline_tasks WHERE session_id=? AND output_path=? "
-                "AND status='running' ORDER BY updated_at DESC LIMIT 1",
+                "AND status IN ('running','resumed','partial') "
+                "ORDER BY updated_at DESC LIMIT 1",
                 (session_id, output_path),
             ).fetchone()
         if row is None:
@@ -103,20 +108,45 @@ def find_resumable_task(session_id: str, output_path: str) -> Optional[dict]:
         return None
 
 
+# v8.13: resumed 状态陈旧阈值——claim 置 resumed 后若进程崩溃/取消（无
+# aborted 兜底到达），超过该时长视为孤儿任务可被重新领取（续传恢复而非卡死）
+RESUME_STALE_SECONDS = 600
+
+
+def _age_seconds(iso_ts: str) -> float:
+    try:
+        return (datetime.now() - datetime.fromisoformat(iso_ts)).total_seconds()
+    except Exception:
+        return 0.0
+
+
 def claim_resumable_task(session_id: str, output_path: str) -> Optional[dict]:
-    """v8.10r: 原子领取可续传任务——BEGIN IMMEDIATE 内查 running → 置 'resumed'，
+    """v8.10r: 原子领取可续传任务——BEGIN IMMEDIATE 内查可续状态 → 置 'resumed'，
     防同 session+path 双请求并发续传同一任务双写草稿文件。
+
+    v8.13: 状态放宽到 running/resumed/partial——
+      - running: 新任务，直接领取；
+      - partial: 上次缺章未写完，可续写补齐（此前只能整篇重来）；
+      - resumed: 他人续传中；updated_at 超过 RESUME_STALE_SECONDS 视为孤儿
+        （崩溃/取消未回收）可重新领取，否则跳过该条看下一条。
     返回与 find_resumable_task 同构（仅成功领取者拿到）。
     """
     try:
         with _connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.row_factory = sqlite3.Row
-            row = conn.execute(
+            rows = conn.execute(
                 "SELECT * FROM pipeline_tasks WHERE session_id=? AND output_path=? "
-                "AND status='running' ORDER BY updated_at DESC LIMIT 1",
+                "AND status IN ('running','resumed','partial') "
+                "ORDER BY updated_at DESC LIMIT 3",
                 (session_id, output_path),
-            ).fetchone()
+            ).fetchall()
+            row = None
+            for r in rows:
+                if r["status"] == "resumed" and _age_seconds(r["updated_at"]) < RESUME_STALE_SECONDS:
+                    continue  # 他人正在续传且未陈旧 → 看下一条
+                row = r
+                break
             if row is None:
                 conn.rollback()
                 return None
@@ -181,13 +211,18 @@ def finish_task(task_id: str, status: str = "done") -> None:
 
 
 def cleanup_stale_tasks(days: int = 7) -> int:
-    """清理 N 天前仍未完成的过期任务记录（仅 running 状态）。"""
+    """清理 N 天前仍未完成的过期任务记录。
+
+    v8.13: 状态放宽到 running/resumed/partial 三态——此前只删 running，
+    resumed 死态（崩溃/取消未回收）与 partial 残留永远积累。
+    """
     try:
         from datetime import timedelta
         cutoff = (datetime.now() - timedelta(days=days)).isoformat()
         with _connect() as conn:
             cur = conn.execute(
-                "DELETE FROM pipeline_tasks WHERE status='running' AND updated_at < ?",
+                "DELETE FROM pipeline_tasks "
+                "WHERE status IN ('running','resumed','partial') AND updated_at < ?",
                 (cutoff,))
             conn.commit()
             return cur.rowcount

@@ -968,14 +968,19 @@ async def supervisor_node(state: AgentState) -> dict:
                 # v8.3.5 轻量熔断 (规范 1.2.2 Correct): 连续工具失败 ≥3 → 强制收尾
                 # v8.4.5: [ERR_HITL_REJECT] 是权限待授权而非工具失败，不计入熔断计数
                 # v8.4.6 B8: 优先读结构化 status 字段（子代理回执），自由文本仅兜底
+                # v8.13 F5: 兜底统一识别全部 [ERR_*] 标签——此前只认 [Error 前缀+
+                # ERR_TIMEOUT/ERR_NETWORK/AgentError，registry 主标签（FILE_NOT_FOUND/
+                # PERMISSION/PARSE/UNKNOWN_TOOL）连续失败永不触发熔断
                 rtext = sub_result.get("result", "") or ""
                 _st = sub_result.get("status")
                 if _st is not None:
                     is_fail = (_st == "error")
                 else:
                     is_fail = (rtext.startswith("[Error")
-                               or "[ERR_TIMEOUT]" in rtext or "[ERR_NETWORK]" in rtext
+                               or rtext.startswith("[ERR_")
                                or "[AgentError]" in rtext)
+                    if is_fail and "[ERR_HITL_REJECT]" in rtext:
+                        is_fail = False  # 权限待授权 ≠ 工具失败
                 consecutive_failures = consecutive_failures + 1 if is_fail else 0
                 if consecutive_failures >= 3:
                     logger.error(f"[ExpertGraph:supervisor] 连续 {consecutive_failures} 次工具失败，"

@@ -18,6 +18,29 @@ from typing import Dict, List, Optional, Set, Tuple
 logger = logging.getLogger(__name__)
 
 
+def _connect_db(db_path: str):
+    """v8.13 SQL-1: 统一 SQLite 连接工厂——WAL + busy_timeout=30s。
+
+    与 session/manager._connect_db 同口径：此前裸连接默认 busy_timeout≈5s，
+    与多模块并发共用 sessions.db 时锁冲突被宽 except 吞掉 → 记忆静默丢失。
+    journal_mode 切换以 2s 快失败（库已是 WAL 时查询即返回、零开销）。
+    """
+    conn = sqlite3.connect(db_path, timeout=30)
+    conn.execute("PRAGMA busy_timeout=30000")
+    try:
+        cur_mode = (conn.execute("PRAGMA journal_mode").fetchone() or ("",))[0]
+        if cur_mode and str(cur_mode).lower() != "wal":
+            conn.execute("PRAGMA busy_timeout=2000")
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError:
+                pass
+            conn.execute("PRAGMA busy_timeout=30000")
+    except Exception:
+        pass
+    return conn
+
+
 class MemoryStore:
     _instance = None
     _lock = threading.Lock()
@@ -27,7 +50,9 @@ class MemoryStore:
             with cls._lock:
                 if cls._instance is None:
                     cls._instance = super().__new__(cls)
-                    cls._instance._mem_lock = threading.Lock()
+                    # v8.13 SQL-2: RLock 可重入——set_preference 持锁后内部再经
+                    # _save_store 等路径写库不会自死锁
+                    cls._instance._mem_lock = threading.RLock()
         return cls._instance
 
     def __init__(self):
@@ -215,7 +240,7 @@ class MemoryStore:
             db_path = Path(self.db_path)
             if not db_path.exists():
                 return ""
-            with sqlite3.connect(str(db_path)) as conn:
+            with _connect_db(str(db_path)) as conn:
                 conn.row_factory = sqlite3.Row
                 self._ensure_resident_schema(conn)
                 if session_id:
@@ -264,7 +289,7 @@ class MemoryStore:
                 from pathlib import Path
                 db_path = Path(self.db_path)
                 db_path.parent.mkdir(parents=True, exist_ok=True)
-                with sqlite3.connect(str(db_path)) as conn:
+                with _connect_db(str(db_path)) as conn:
                     self._ensure_ltm_schema(conn)
                     conn.execute(
                         """INSERT INTO ltm_facts
@@ -329,7 +354,7 @@ class MemoryStore:
         db_path = Path(self.db_path)
         if not db_path.exists():
             return ""
-        with sqlite3.connect(str(db_path)) as conn:
+        with _connect_db(str(db_path)) as conn:
             self._ensure_ltm_schema(conn)
             rows = self._fetch_ltm_rows(conn, owner_session=owner_session)
         if not rows:
@@ -404,7 +429,7 @@ class MemoryStore:
             db_path = Path(self.db_path)
             if not db_path.exists():
                 return ""
-            with sqlite3.connect(str(db_path)) as conn:
+            with _connect_db(str(db_path)) as conn:
                 self._ensure_ltm_schema(conn)
                 rows = self._fetch_ltm_rows(conn, limit=200, owner_session=owner_session)
             query_tokens = set(re.findall(r'[\w\u4e00-\u9fff]{2,}', query.lower()))
@@ -498,7 +523,7 @@ class MemoryStore:
             db_path = Path(self.db_path)
             if not db_path.exists():
                 return {}
-            with sqlite3.connect(str(db_path)) as conn:
+            with _connect_db(str(db_path)) as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute(
                     "SELECT value FROM memory_store WHERE session_id = ? AND key = ?",
@@ -513,12 +538,13 @@ class MemoryStore:
             return {}
 
     def _save_store(self, session_id: str, store_name: str, data: dict) -> None:
+        # 注: 调用方 set_preference 已持 _mem_lock（RLock 可重入），此处不重复加锁
         try:
             import sqlite3
             from pathlib import Path
             from src.config import PROJECT_ROOT
             db_path = Path(self.db_path)
-            with sqlite3.connect(str(db_path)) as conn:
+            with _connect_db(str(db_path)) as conn:
                 conn.execute(
                     "CREATE TABLE IF NOT EXISTS memory_store ("
                     "session_id TEXT NOT NULL, "
@@ -543,7 +569,7 @@ class MemoryStore:
             from pathlib import Path
             from src.config import PROJECT_ROOT
             db_path = Path(self.db_path)
-            with sqlite3.connect(str(db_path)) as conn:
+            with _connect_db(str(db_path)) as conn:
                 conn.execute(
                     "CREATE TABLE IF NOT EXISTS memory_store ("
                     "session_id TEXT NOT NULL, "

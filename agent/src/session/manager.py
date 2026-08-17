@@ -50,6 +50,35 @@ def _get_session_lock(session_id: str) -> threading.Lock:
         return lock
 
 
+def _connect_db(db_path: str):
+    """v8.13 SQL-1: 统一 SQLite 连接工厂——WAL + busy_timeout=30s。
+
+    此前各处裸连接默认 busy_timeout≈5s 且无 WAL：并发写（多请求/多模块
+    共用 sessions.db）锁冲突抛 OperationalError，被宽 except 吞掉 →
+    save_messages/set_checkpoint 静默失败（消息丢失）。统一口径后由 SQLite
+    自身在 30s 窗口内等待锁释放，静默丢失路径关闭。
+
+    journal_mode 切换只在 DELETE→WAL 迁移时需要（持久属性）；库已是 WAL
+    时查询即返回、零开销。需切换时以 2s 快失败（其他连接占用时切换会
+    busy——保持当前模式继续，busy_timeout 已兜底业务写锁）。
+    """
+    import sqlite3
+    conn = sqlite3.connect(db_path, timeout=30)
+    conn.execute("PRAGMA busy_timeout=30000")
+    try:
+        cur_mode = (conn.execute("PRAGMA journal_mode").fetchone() or ("",))[0]
+        if cur_mode and str(cur_mode).lower() != "wal":
+            conn.execute("PRAGMA busy_timeout=2000")
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError:
+                pass
+            conn.execute("PRAGMA busy_timeout=30000")
+    except Exception:
+        pass
+    return conn
+
+
 def compute_idempotency_key(session_id: str, query: str,
                             client_request_id: str = "") -> str:
     """幂等键（v8.3.7）：优先客户端稳定 ID（重试复用）；无则服务端 30s 时间桶兜底。"""
@@ -103,7 +132,7 @@ class SessionManager:
 
     def _init_db_sync(self):
         import sqlite3
-        with sqlite3.connect(self.db_path) as conn:
+        with _connect_db(self.db_path) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS sessions (
                     session_id TEXT PRIMARY KEY,
@@ -147,7 +176,7 @@ class SessionManager:
         # v8.7: 存量 msg_type 归一化——v8.4.13 流式化阶段写入的 "AIMessageChunk"
         # 统一改为 "ai"（加载端兼容 + 数据一致性；幂等，无则跳过）
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with _connect_db(self.db_path) as conn:
                 cur = conn.execute(
                     "UPDATE messages SET msg_type='ai' WHERE msg_type='AIMessageChunk'")
                 if cur.rowcount:
@@ -161,7 +190,7 @@ class SessionManager:
         """Add columns if missing from older schemas."""
         import sqlite3
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with _connect_db(self.db_path) as conn:
                 cur = conn.execute("PRAGMA table_info(messages)")
                 existing = {row[1] for row in cur.fetchall()}
                 for col, col_type in [
@@ -209,7 +238,7 @@ class SessionManager:
         """
         import sqlite3
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with _connect_db(self.db_path) as conn:
                 conn.execute(
                     """CREATE TABLE IF NOT EXISTS memory_store (
                         session_id TEXT NOT NULL,
@@ -257,7 +286,7 @@ class SessionManager:
         """记录授权（once/session/workspace）。once 由 consume 消费删除。"""
         import sqlite3
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with _connect_db(self.db_path) as conn:
                 self._ensure_permission_schema(conn)
                 conn.execute(
                     "INSERT INTO permission_grants "
@@ -284,7 +313,7 @@ class SessionManager:
                 in_workspace = _is_workspace_output_path(str(path or ""))
             except Exception:
                 in_workspace = False
-            with sqlite3.connect(self.db_path) as conn:
+            with _connect_db(self.db_path) as conn:
                 self._ensure_permission_schema(conn)
                 rows = conn.execute(
                     "SELECT id, session_id, scope FROM permission_grants "
@@ -310,7 +339,7 @@ class SessionManager:
         """幂等唯一索引（v8.3.7 M1）：数据库层兜底，防多进程/竞态重复写。"""
         import sqlite3
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with _connect_db(self.db_path) as conn:
                 conn.execute(
                     "CREATE UNIQUE INDEX IF NOT EXISTS idx_msg_idempotency "
                     "ON messages(session_id, idempotency_key) "
@@ -332,7 +361,7 @@ class SessionManager:
 
     def _create_session_sync(self, session_id: str):
         import sqlite3
-        with sqlite3.connect(self.db_path) as conn:
+        with _connect_db(self.db_path) as conn:
             conn.execute(
                 "INSERT OR IGNORE INTO sessions (session_id) VALUES (?)",
                 (session_id,),
@@ -341,7 +370,7 @@ class SessionManager:
 
     def _check_session_exists(self, session_id: str) -> bool:
         import sqlite3
-        with sqlite3.connect(self.db_path) as conn:
+        with _connect_db(self.db_path) as conn:
             cur = conn.execute(
                 "SELECT 1 FROM sessions WHERE session_id = ?", (session_id,)
             )
@@ -356,7 +385,7 @@ class SessionManager:
         import sqlite3
         messages: List[BaseMessage] = []
         row_ids: List[int] = []
-        with sqlite3.connect(self.db_path) as conn:
+        with _connect_db(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.execute(
                 "SELECT id, msg_type, content, tool_call_id, tool_calls_json, name, reasoning "
@@ -440,7 +469,7 @@ class SessionManager:
         """返回 {"msg_id": int, "summary": str}；无则 msg_id=0。"""
         import sqlite3
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with _connect_db(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 row = conn.execute(
                     "SELECT checkpoint_msg_id, checkpoint_summary "
@@ -460,7 +489,7 @@ class SessionManager:
         try:
             lock = _get_session_lock(session_id)
             with lock:
-                with sqlite3.connect(self.db_path) as conn:
+                with _connect_db(self.db_path) as conn:
                     conn.execute(
                         "UPDATE sessions SET checkpoint_msg_id=?, "
                         "checkpoint_summary=?, checkpoint_updated_at=? "
@@ -469,7 +498,8 @@ class SessionManager:
                          datetime.now().isoformat(), session_id))
                     conn.commit()
         except Exception as e:
-            logger.warning(f"[SessionManager] set_checkpoint failed: {e}")
+            # v8.13 SQL-1: 失败可见——此前 warning 级被淹没，checkpoint 静默不落库
+            logger.error(f"[SessionManager] set_checkpoint failed: {e}")
 
     async def save_messages(self, session_id: str, messages: List[BaseMessage],
                             idempotency_key: str = "") -> bool:
@@ -546,7 +576,7 @@ class SessionManager:
         # v8.3.7: 会话级写锁串行化所有历史写入（save/replace 同一入口）
         lock = _get_session_lock(session_id)
         with lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with _connect_db(self.db_path) as conn:
                 if idempotency_key:
                     dup = conn.execute(
                         "SELECT 1 FROM messages WHERE session_id=? AND idempotency_key=? LIMIT 1",
@@ -597,7 +627,7 @@ class SessionManager:
         import sqlite3
         lock = _get_session_lock(session_id)
         with lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with _connect_db(self.db_path) as conn:
                 conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
                 for msg in messages:
                     conn.execute(
@@ -617,15 +647,18 @@ class SessionManager:
 
     def _clear_session_sync(self, session_id: str):
         import sqlite3
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-            conn.execute("DELETE FROM session_evidence WHERE session_id = ?", (session_id,))
-            conn.execute(
-                "UPDATE sessions SET updated_at = ?, checkpoint_msg_id = 0, "
-                "checkpoint_summary = '' WHERE session_id = ?",
-                (datetime.now().isoformat(), session_id),
-            )
-            conn.commit()
+        # v8.13 SQL-2: 清会话与历史写入同锁——此前无锁，与并发 save_messages 交错
+        lock = _get_session_lock(session_id)
+        with lock:
+            with _connect_db(self.db_path) as conn:
+                conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+                conn.execute("DELETE FROM session_evidence WHERE session_id = ?", (session_id,))
+                conn.execute(
+                    "UPDATE sessions SET updated_at = ?, checkpoint_msg_id = 0, "
+                    "checkpoint_summary = '' WHERE session_id = ?",
+                    (datetime.now().isoformat(), session_id),
+                )
+                conn.commit()
 
     # ── v8.9 会话管理（列表 / 首问自动命名 / 重命名 / 软删除）──
 
@@ -645,16 +678,19 @@ class SessionManager:
         title = text[:30]
         try:
             import sqlite3
-            with sqlite3.connect(self.db_path) as conn:
-                row = conn.execute(
-                    "SELECT title FROM sessions WHERE session_id=?", (session_id,)
-                ).fetchone()
-                if row is None or (row[0] or "").strip():
-                    return
-                conn.execute(
-                    "UPDATE sessions SET title=?, updated_at=? WHERE session_id=?",
-                    (title, datetime.now().isoformat(), session_id))
-                conn.commit()
+            # v8.13 SQL-2: 标题写入与历史写入同锁（防与首条消息保存交错）
+            lock = _get_session_lock(session_id)
+            with lock:
+                with _connect_db(self.db_path) as conn:
+                    row = conn.execute(
+                        "SELECT title FROM sessions WHERE session_id=?", (session_id,)
+                    ).fetchone()
+                    if row is None or (row[0] or "").strip():
+                        return
+                    conn.execute(
+                        "UPDATE sessions SET title=?, updated_at=? WHERE session_id=?",
+                        (title, datetime.now().isoformat(), session_id))
+                    conn.commit()
         except Exception as e:
             logger.debug(f"[SessionManager] ensure title failed: {e}")
 
@@ -662,7 +698,7 @@ class SessionManager:
         """会话列表（排除软删除，按最近更新倒序），含消息数与标题。"""
         try:
             import sqlite3
-            with sqlite3.connect(self.db_path) as conn:
+            with _connect_db(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 rows = conn.execute(
                     """SELECT s.session_id, s.title, s.created_at, s.updated_at,
@@ -689,7 +725,7 @@ class SessionManager:
     def rename_session(self, session_id: str, title: str) -> bool:
         try:
             import sqlite3
-            with sqlite3.connect(self.db_path) as conn:
+            with _connect_db(self.db_path) as conn:
                 conn.execute(
                     "UPDATE sessions SET title=?, updated_at=? WHERE session_id=?",
                     (str(title or "").strip()[:60], datetime.now().isoformat(), session_id))
@@ -704,7 +740,7 @@ class SessionManager:
         （LTM 为跨会话资产，不能级联删），仅从列表隐藏。"""
         try:
             import sqlite3
-            with sqlite3.connect(self.db_path) as conn:
+            with _connect_db(self.db_path) as conn:
                 conn.execute(
                     "UPDATE sessions SET deleted_at=?, updated_at=? WHERE session_id=?",
                     (datetime.now().isoformat(), datetime.now().isoformat(), session_id))
@@ -733,7 +769,7 @@ class SessionManager:
         import sqlite3
         lock = _get_session_lock(session_id)
         with lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with _connect_db(self.db_path) as conn:
                 cur = conn.execute(
                     "SELECT COUNT(*) FROM session_evidence WHERE session_id=?",
                     (session_id,))
@@ -759,7 +795,7 @@ class SessionManager:
         """渲染最近 N 轮检索证据块（跨轮复用；下一轮上下文注入）。"""
         import sqlite3
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with _connect_db(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 rows = conn.execute(
                     "SELECT turn_seq, query, evidence_json, report_text "
@@ -792,7 +828,7 @@ class SessionManager:
         """v8.4.3 工单5: 会话证据库条目总数（假完成检测器证据感知用）。"""
         import sqlite3
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with _connect_db(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 rows = conn.execute(
                     "SELECT evidence_json FROM session_evidence "
@@ -818,7 +854,7 @@ class SessionManager:
         """
         import sqlite3
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with _connect_db(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 rows = conn.execute(
                     "SELECT evidence_json FROM session_evidence "
@@ -866,7 +902,7 @@ class SessionManager:
         """
         import sqlite3
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with _connect_db(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 rows = conn.execute(
                     "SELECT evidence_json FROM session_evidence "
@@ -915,7 +951,7 @@ class SessionManager:
         """
         try:
             import sqlite3
-            with sqlite3.connect(self.db_path) as conn:
+            with _connect_db(self.db_path) as conn:
                 conn.execute(
                     """CREATE TABLE IF NOT EXISTS feedback (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -959,7 +995,7 @@ class SessionManager:
         """反馈统计（正向/负向计数），供运营查看与测试断言。"""
         try:
             import sqlite3
-            with sqlite3.connect(self.db_path) as conn:
+            with _connect_db(self.db_path) as conn:
                 pos = conn.execute(
                     "SELECT COUNT(*) FROM feedback WHERE rating=1").fetchone()[0]
                 neg = conn.execute(

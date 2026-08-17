@@ -318,6 +318,102 @@ def test_pipeline_state():
           and cleanup_stale_tasks(0) >= 0)
 
 
+def test_resume_state_v813():
+    import sqlite3
+    from datetime import datetime, timedelta
+    from src.core.write_pipeline_state import (
+        start_task, find_resumable_task, claim_resumable_task,
+        finish_task, cleanup_stale_tasks, RESUME_STALE_SECONDS, _DB_PATH)
+    print("[state] v8.13 续传状态机: partial 可领 / resumed 陈旧可重领 / cleanup 放宽")
+    plan_obj = {"title": "T", "sections": [{"heading": "a"}]}
+    sid = f"rs-{uuid.uuid4().hex[:6]}"
+    op = f"test_rs_{uuid.uuid4().hex[:6]}.md"
+
+    # 1) partial（缺章）可领取续写
+    tid = start_task(sid, op, plan_obj)
+    finish_task(tid, "partial")
+    r = claim_resumable_task(sid, op)
+    check("partial 任务可领取", r is not None and r["task_id"] == tid, str(r))
+    # 2) 新 resumed（他人在续传）不重复领取
+    r2 = claim_resumable_task(sid, op)
+    check("新 resumed 不重复领取", r2 is None)
+    # 3) 陈旧 resumed（崩溃/取消未回收）可重新领取
+    with sqlite3.connect(str(_DB_PATH)) as conn:
+        conn.execute("UPDATE pipeline_tasks SET updated_at=? WHERE task_id=?",
+                     ((datetime.now() - timedelta(seconds=RESUME_STALE_SECONDS + 60)).isoformat(),
+                      tid))
+        conn.commit()
+    r3 = claim_resumable_task(sid, op)
+    check("陈旧 resumed 可重新领取", r3 is not None and r3["task_id"] == tid)
+    finish_task(tid, "done")
+    check("done 后不可续", find_resumable_task(sid, op) is None)
+
+    # 4) cleanup 覆盖陈旧 partial（此前只删 running，partial 残留永不回收）
+    tid2 = start_task(sid, op, plan_obj)
+    finish_task(tid2, "partial")
+    with sqlite3.connect(str(_DB_PATH)) as conn:
+        conn.execute("UPDATE pipeline_tasks SET updated_at=? WHERE task_id=?",
+                     ((datetime.now() - timedelta(days=8)).isoformat(), tid2))
+        conn.commit()
+    n = cleanup_stale_tasks(7)
+    check("cleanup 删除陈旧 partial", n >= 1 and find_resumable_task(sid, op) is None,
+          f"n={n}")
+
+
+def test_full_resume_publishes():
+    print("[续传] v8.13 A3: 全量续传（chapters=0）仍走发布")
+    import json as _json
+    from src.core.write_pipeline_state import start_task, mark_section_done
+    fname = f"test_fullresume_{uuid.uuid4().hex[:6]}.md"
+    plan_obj = {"title": "T", "abstract_draft": "A", "keywords": ["k"],
+                "total_target_chars": 0,
+                "sections": [{"heading": "s1", "points": ["p"], "target_chars": 800,
+                              "refs": ["DOI:1"]},
+                             {"heading": "s2", "points": ["p"], "target_chars": 800,
+                              "refs": ["DOI:1"]}]}
+    sid = f"fr-{uuid.uuid4().hex[:6]}"
+    tid = start_task(sid, fname, plan_obj)
+    mark_section_done(tid, 0)
+    mark_section_done(tid, 1)
+    # 预写完整草稿（模拟上一轮已写完、本次全量续传）
+    draft = wp._WORKSPACE_ROOT / (fname + ".draft.md")
+    draft.write_text("# T\n\n## 摘要\nA\n\n## s1\n第一章内容。\n\n## s2\n第二章内容。\n",
+                     encoding="utf-8")
+    llm = FakeLLM([])  # 无待生成章节，不应调用 LLM
+    r = run(wp.run_write_pipeline({"goal": "写一篇综述", "output_path": fname},
+                                  [{"doi": "1", "title": "X"}],
+                                  llm_factory=lambda: llm, session_id=sid))
+    target = PROJECT_ROOT / "workspace" / "output" / fname
+    check("全量续传发布正式文件", target.exists(), f"result={r['result'][:120]}")
+    check("发布成功 → status ok", r["status"] == "ok",
+          f"status={r['status']} issues={r.get('reference_issues')}")
+    check("未调用 LLM", llm.calls == 0, f"calls={llm.calls}")
+    target.unlink(missing_ok=True)
+    draft.unlink(missing_ok=True)
+
+
+def test_unify_dangling_ref_removed():
+    print("[引用] v8.13 A1: 悬空引用（正文[n]无条目）删除标记")
+    out_path = f"unify_dangle_{uuid.uuid4().hex[:6]}.md"
+    target = wp._WORKSPACE_ROOT / out_path
+    sample = (
+        "# 测试\n\n## 1 章\n\n正文引用 [1] 和悬空 [9]。\n\n"
+        "本章参考文献\n\n[1] Real paper. DOI: 10.1000/real\n"
+    )
+    target.write_text(sample, encoding="utf-8")
+    try:
+        r = wp._unify_references(out_path)
+        final = target.read_text(encoding="utf-8")
+        body = final.split("## 参考文献")[0]
+        check("统一成功", r["unified"] == 1, f"unified={r['unified']}")
+        check("悬空 [9] 标记已删除", "[9]" not in body, body[:200])
+        check("正常引用保留", "[1]" in body)
+        check("dropped 记录悬空删除", any("无条目" in d for d in r["dropped"]),
+              str(r["dropped"]))
+    finally:
+        target.unlink(missing_ok=True)
+
+
 def test_verify_functions():
     print("[校验] read-back + 引用完整性")
     fname = f"test_verify_{uuid.uuid4().hex[:6]}.md"
@@ -552,6 +648,9 @@ if __name__ == "__main__":
     test_entry_pipeline()
     test_runtime_capacity()
     test_pipeline_state()
+    test_resume_state_v813()
+    test_full_resume_publishes()
+    test_unify_dangling_ref_removed()
     test_verify_functions()
     test_react_fallback()
     test_publish_gate_dangling_ref()

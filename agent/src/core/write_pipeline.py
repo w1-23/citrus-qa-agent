@@ -568,9 +568,11 @@ def _unify_references(output_path: str) -> dict:
                 return local_map[local]
             entry = entries.get(local)
             if not entry:
-                dropped.append(f"{ch['heading'][:30]}: 引用[{local}] 无条目，保留原编号")
-                local_map[local] = local
-                return local
+                # v8.13 A1 配套: 悬空引用（正文 [n] 无条目）删除标记而非保留原编号——
+                # 保留会把悬空编号写回正文，与全局重排后的合法编号撞号（语义漂移）
+                dropped.append(f"{ch['heading'][:30]}: 引用[{local}] 无条目，已删除")
+                local_map[local] = 0  # 0 = 删除哨兵
+                return 0
             doi_m = _DOI_RE.search(entry)
             doi = doi_m.group(0).rstrip(".,;。，；") if doi_m else ""
             norm = re.sub(r"\s+", " ", entry)[:120]
@@ -592,6 +594,9 @@ def _unify_references(output_path: str) -> dict:
         def _rewrite(m: re.Match) -> str:
             nums = [int(x) for x in re.split(r"[,，\s]+", m.group(1)) if x.strip()]
             mapped = [str(_assign(n)) for n in nums]
+            mapped = [s for s in mapped if s != "0"]  # 悬空引用删除标记
+            if not mapped:
+                return ""
             return "[" + ",".join(mapped) + "]"
 
         new_body = _CITE_MARKER_RE.sub(_rewrite, body_text)
@@ -685,7 +690,11 @@ def _prune_unreferenced_refs(output_path: str) -> dict:
 
     def _rewrite_cite(m: re.Match) -> str:
         nums = [int(x) for x in re.split(r"[,，\s]+", m.group(1)) if x.strip()]
-        mapped = [str(remap.get(n, n)) for n in nums]
+        # v8.13 A1 配套: 正文引用了但文献区无条目的悬空编号一并删除标记
+        # （remap.get(n,n) 保留原编号会撞上重排后的合法编号）
+        mapped = [str(remap[n]) for n in nums if n in remap]
+        if not mapped:
+            return ""
         return "[" + ",".join(mapped) + "]"
 
     new_head = _CITE_MARKER_RE.sub(_rewrite_cite, head)
@@ -695,8 +704,11 @@ def _prune_unreferenced_refs(output_path: str) -> dict:
     tmp = target.with_suffix(target.suffix + ".tmp")
     tmp.write_text(new_content, encoding="utf-8")
     os.replace(tmp, target)
+    # v8.13: 悬空引用同步计数（dangling = 正文引用但无条目，随重排一并删除）
+    dangling = sum(1 for n in re.findall(r"\[(\d{1,3})\]", head)
+                   if int(n) not in remap)
     logger.info(f"[WritePipeline] 引用裁剪: 删除 {pruned} 条未引用文献 "
-                f"({len(entries)} -> {len(kept)})")
+                f"({len(entries)} -> {len(kept)}), 悬空引用删除 {dangling} 处")
     # v8.13: 结构化诊断事件（引用裁剪快照——追踪"僵尸引用"发生率）
     try:
         from src.core.diag import diag
@@ -1256,8 +1268,18 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
     if plan is None:
         # v8.6: 渐进式披露——Plan 阶段只注入技能目录（≤800 字符）
         catalog = _build_skill_catalog(skill_map) if skill_map else ""
-        plan, plan_text = await run_stage1_plan(
-            llm, material_pack, target_chars, skill_catalog=catalog)
+        # v8.13 A3: 续传任务在 plan 阶段被取消同样置 aborted（task_id 来自 claim）
+        try:
+            plan, plan_text = await run_stage1_plan(
+                llm, material_pack, target_chars, skill_catalog=catalog)
+        except BaseException:
+            if task_id:
+                try:
+                    from src.core.write_pipeline_state import finish_task
+                    finish_task(task_id, "aborted")
+                except Exception:
+                    pass
+            raise
     else:
         plan_text = ""
     if plan is None:
@@ -1315,15 +1337,30 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
         skills_used = _resolve_skills_used(plan, plan_text, skill_map)
         logger.info(f"[WritePipeline] skills_used={skills_used or ['<未声明: 全量(旧行为)>']}")
 
-    exec_result = await run_stage2_execute(llm, plan, material_pack, output_path,
-                                           task_id=task_id, resume_completed=resume_completed,
-                                           skill_prompt=skill_prompt,
-                                           skill_map=skill_map, skills_used=skills_used)
+    # v8.13 A3: 执行阶段兜底——用户取消/进程中断（CancelledError 等）时置 aborted，
+    # 配合 state 层"陈旧 resumed 可重领"，续传不再永久卡死
+    try:
+        exec_result = await run_stage2_execute(llm, plan, material_pack, output_path,
+                                               task_id=task_id, resume_completed=resume_completed,
+                                               skill_prompt=skill_prompt,
+                                               skill_map=skill_map, skills_used=skills_used)
+    except BaseException:
+        try:
+            from src.core.write_pipeline_state import finish_task
+            finish_task(task_id, "aborted")
+        except Exception:
+            pass
+        raise
     # v8.4.1: 分章写作后统一引用——各章"本章参考文献"提取合并为文末全局引用
     # v8.4.6 F7: 统一引用与完整性校验作用于草稿，通过后原子发布正式文件
     draft = _draft_path(output_path)
+    # v8.13 A3: 全量续传（全部章节已完成）时 chapters=0 但草稿完整——unify/
+    # verify/publish 仍应作用于草稿（此前跳过 → "未产生可保存内容"且草稿永不发布）
+    has_draft = bool(output_path) and (_WORKSPACE_ROOT / draft).resolve().exists()
+    content_ready = (exec_result["chapters"] > 0
+                     or (has_draft and not exec_result["missing_sections"]))
     unify_info = {"unified": 0}
-    if exec_result["chapters"] > 0 and output_path:
+    if content_ready and output_path:
         try:
             unify_info = _unify_references(draft)
         except Exception as e:
@@ -1351,7 +1388,7 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
         pass
     # v8.3.3 写后引用完整性校验（正文 [n] vs 参考文献列表；统一引用后再校验）
     ref_issues = []
-    if exec_result["chapters"] > 0 and output_path:
+    if content_ready and output_path:
         ref_issues = verify_reference_integrity(draft)
         for issue in ref_issues[:5]:
             logger.warning(f"[WritePipeline] ref integrity: {issue}")
@@ -1368,7 +1405,7 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
     # 不阻断；"未引用条目"已由引用裁剪消除），保留草稿供补写/人工核对。
     published = False
     _dangling = [i for i in ref_issues if "无对应文献条目" in i]
-    if (exec_result["chapters"] > 0
+    if (content_ready
             and not exec_result["missing_sections"]
             and not _dangling):
         published = _publish_draft(output_path)
@@ -1383,7 +1420,7 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
         pass
     if published:
         location = f"已保存到 {output_path}"
-    elif exec_result["chapters"] > 0:
+    elif content_ready:
         location = f"草稿已保存到 {draft}（存在缺章/未发布，可续写或手动核对）"
     else:
         location = f"未产生可保存内容（{output_path}）"
@@ -1422,4 +1459,6 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
             "truncated_sections": exec_result.get("truncated_sections", []),
             "reference_issues": ref_issues, "material_gap": gap,
             # v8.4.6 B8: 结构化状态（缺章/引用问题 → partial）
-            "status": "ok" if (not exec_result["missing_sections"] and not ref_issues) else "partial"}
+            # v8.13: 改为发布结果驱动——全量续传等"发布成功但含提示级引用问题"
+            # （如未写参考文献区）的场景 status 与发布结果一致，不再矛盾
+            "status": "ok" if published else "partial"}
