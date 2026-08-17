@@ -582,6 +582,19 @@ class MultiBatchRetriever:
             return []
         total_ms = (time.time() - _t0) * 1000
         logger.info(f"[Retriever] rerank={dt_rerank:.0f}ms total={total_ms:.0f}ms | top_score={top_score:.4f} threshold={final_threshold:.4f} | passed={len(passed)}/{len(reranked)}")
+        # v8.13: 结构化诊断事件（检索分阶段耗时——此前 dt_embed/dt_qdrant/dt_bm25
+        # 计算后从未使用，加 timer 忘了接日志的半成品补丁）
+        try:
+            from src.core.diag import diag
+            diag("retrieval_stages", mode="search_multi", queries=len(queries),
+                 embed_ms=round(dt_embed, 1), vector_ms=round(dt_qdrant, 1),
+                 bm25_ms=round(dt_bm25, 1), rerank_ms=round(dt_rerank, 1),
+                 total_ms=round(total_ms, 1),
+                 unique_v=len(unique_v), unique_b=len(unique_b),
+                 candidates=len(candidates), passed=len(passed),
+                 top_score=round(top_score, 4), threshold=round(final_threshold, 4))
+        except Exception:
+            pass
         # v8.7: 统一检索过滤日志（合并 retrieval/ 与 debug_filter/——原 debug_filter
         # 的 filtered 参数恒为空，被拦截明细从未记录；现在真实计算并记录）
         from src.logger import log_retrieval

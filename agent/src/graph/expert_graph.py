@@ -152,6 +152,28 @@ def _has_retrieval_markers(text: str) -> bool:
     return any(m in text for m in ["检索结果:", "以下是相关文献:", "=== 检索结果 ==="])
 
 
+_sync_cls_llm = None
+
+
+def _get_sync_cls_llm():
+    """classify_write_task 的 LLM 兜底用同步客户端（进程级复用，不每请求新建）。
+
+    v8.13: v8.12 传 cls 去重时漏传 llm，导致 classify 的 LLM 结构化分类兜底
+    （正则快筛不命中的目标）在生产路径变成死代码——此处补回。
+    """
+    global _sync_cls_llm
+    if _sync_cls_llm is None:
+        from langchain_openai import ChatOpenAI
+        _sync_cls_llm = ChatOpenAI(
+            model=settings.MAIN_MODEL,
+            api_key=settings.RESOLVED_MAIN_API_KEY,
+            base_url=settings.MAIN_BASE_URL,
+            temperature=0,
+            timeout=30,
+        )
+    return _sync_cls_llm
+
+
 async def _classify_document(text: str) -> bool:
     """LLM 语义判断 context 是否为已成文文档（v8.3.1 替代关键词启发式）。
 
@@ -293,8 +315,20 @@ async def _execute_tool_call(tc: dict, tc_id: str = "", material_pack: list | No
                 if task["output_path"] else None
             file_exists = bool(target and target.exists())
             # v8.4.5: LLM 分类走线程池，避免同步 invoke 阻塞事件循环
+            # v8.13: 补传同步 llm（进程级复用）——v8.12 传 cls 去重时漏传，
+            # classify 的 LLM 兜底在生产路径变成死代码
             cls = await asyncio.to_thread(
-                classify_write_task, task.get("goal", ""), context, file_exists)
+                classify_write_task, task.get("goal", ""), context, file_exists,
+                _get_sync_cls_llm())
+            # v8.13: 结构化诊断事件（写作任务路由决策快照——为什么走哪条路）
+            try:
+                from src.core.diag import diag
+                diag("write_route", mode=cls.get("mode"),
+                     target_chars=cls.get("target_chars", 0),
+                     target_section=cls.get("target_section") or "",
+                     pack=len(pack), file_exists=file_exists)
+            except Exception:
+                pass
             if cls["mode"] == "plan_execute" and len(pack) >= 1:
                 # v8.4.3: 写作 skill 注入流水线（此前只进 ReAct 回退路径——
                 # plan_execute 主路径"匹配了但没用上"）
@@ -1058,20 +1092,6 @@ async def supervisor_node(state: AgentState) -> dict:
         f"{elapsed:.0f}ms"
     )
 
-    # v8.4.1: 业务日志——supervisor 完成（回答长度/工具/证据量，排查"回答太短"类问题）
-    # v8.4.6: 附加 evidence_avail/cited 指标（输出画像与后续评估的度量基础）
-    try:
-        from src.core.business_logger import blog
-        blog("supervisor_done", answer_chars=len(answer),
-             tools=tool_call_count,
-             tool_names=",".join(tool_names_called[:8]) or "-",
-             main_results=len(deduped_main), web_results=len(all_web_results),
-             evidence_avail=len(deduped_main),
-             cited=citation_info.get("citation_count", 0),
-             ms=int(elapsed))
-    except Exception:
-        pass
-
     # v8.3.7 M3: 假完成检测——回答含 [n] 引用但无检索支撑 → 标记（不强制改写）
     # v8.4.3 工单5: 证据感知——引用支撑 = 本轮检索 ∪ 会话证据库 ∪ LTM
     _evidence_count = 0
@@ -1090,6 +1110,31 @@ async def supervisor_node(state: AgentState) -> dict:
         "call_retrieve_agent" in tool_names_called,
         evidence_count=_evidence_count,
         ltm_chars=_ltm_chars)
+
+    # v8.4.1: 业务日志——supervisor 完成（回答长度/工具/证据量，排查"回答太短"类问题）
+    # v8.4.6: 附加 evidence_avail/cited 指标（输出画像与后续评估的度量基础）
+    # v8.13: citation_info 计算上移——此前 blog 引用后置变量恒 NameError，
+    # 被 except 吞掉导致 supervisor_done 事件从未成功写出
+    try:
+        from src.core.business_logger import blog
+        blog("supervisor_done", answer_chars=len(answer),
+             tools=tool_call_count,
+             tool_names=",".join(tool_names_called[:8]) or "-",
+             main_results=len(deduped_main), web_results=len(all_web_results),
+             evidence_avail=len(deduped_main),
+             cited=citation_info.get("citation_count", 0),
+             ms=int(elapsed))
+    except Exception:
+        pass
+    # v8.13: 结构化诊断事件（supervisor 完成快照）
+    try:
+        from src.core.diag import diag
+        diag("supervisor_done", answer_chars=len(answer),
+             tools=tool_call_count, ms=int(elapsed),
+             cited=citation_info.get("citation_count", 0),
+             unsupported=citation_info.get("citation_unsupported", False))
+    except Exception:
+        pass
     if citation_info["citation_unsupported"]:
         logger.warning(
             f"[ExpertGraph:supervisor] 假完成风险: 回答含 {citation_info['citation_count']} 个引用"

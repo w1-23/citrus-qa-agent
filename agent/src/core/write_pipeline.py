@@ -133,6 +133,13 @@ def classify_write_task(goal: str, context: str, file_exists: bool,
 
     logger.info(f"[WritePipeline] classify -> {out['mode']} (target_chars={out['target_chars']}, "
                 f"section={out['target_section'] or 'none'}, file_exists={file_exists})")
+    # v8.13: 结构化诊断事件（分类决策快照）
+    try:
+        from src.core.diag import diag
+        diag("classify", mode=out["mode"], target_chars=out.get("target_chars", 0),
+             target_section=out.get("target_section") or "", file_exists=file_exists)
+    except Exception:
+        pass
     return out
 
 
@@ -269,12 +276,29 @@ async def run_stage1_plan(llm, material_pack: list[dict], target_chars: int,
         if ok:
             logger.info(f"[WritePipeline] plan ok: {len(plan.get('sections', []))} sections, "
                         f"total={sum(int(s.get('target_chars') or 0) for s in plan.get('sections', []))}")
+            # v8.13: 结构化诊断事件（大纲决策快照）
+            try:
+                from src.core.diag import diag
+                diag("plan", ok=True, attempt=attempt,
+                     sections=len(plan.get("sections", [])),
+                     total=sum(int(s.get("target_chars") or 0) for s in plan.get("sections", [])),
+                     target_chars=target_chars,
+                     skills_used=str(plan.get("skills_used", []))[:200])
+            except Exception:
+                pass
             return plan, plan_text
         logger.warning(f"[WritePipeline] plan validation failed: {failed}")
         if attempt < retries:
             prompt = _build_plan_prompt(material_pack, target_chars,
                                         retry_info=json.dumps(failed, ensure_ascii=False),
                                         skill_catalog=skill_catalog)
+    # v8.13: 结构化诊断事件（大纲失败快照——供定位 validate 卡点）
+    try:
+        from src.core.diag import diag
+        diag("plan", ok=False, target_chars=target_chars,
+             failed=str(locals().get("failed", "unknown"))[:300])
+    except Exception:
+        pass
     return None, plan_text
 
 
@@ -593,6 +617,13 @@ def _unify_references(output_path: str) -> dict:
         logger.info(
             f"[WritePipeline] 引用统一: {len(global_entries)} 条全局引用, "
             f"{len(chapters)} 章合并, dropped={len(dropped)}")
+        # v8.13: 结构化诊断事件（引用统一快照）
+        try:
+            from src.core.diag import diag
+            diag("unify", unified=len(global_entries), chapters=len(chapters),
+                 dropped=len(dropped))
+        except Exception:
+            pass
         return {"unified": len(global_entries), "chapters": len(chapters),
                 "dropped": dropped}
     except Exception as e:
@@ -666,6 +697,12 @@ def _prune_unreferenced_refs(output_path: str) -> dict:
     os.replace(tmp, target)
     logger.info(f"[WritePipeline] 引用裁剪: 删除 {pruned} 条未引用文献 "
                 f"({len(entries)} -> {len(kept)})")
+    # v8.13: 结构化诊断事件（引用裁剪快照——追踪"僵尸引用"发生率）
+    try:
+        from src.core.diag import diag
+        diag("prune", pruned=pruned, before=len(entries), after=len(kept))
+    except Exception:
+        pass
     return {"pruned": pruned, "before": len(entries), "after": len(kept)}
 
 
@@ -901,9 +938,23 @@ async def run_stage2_execute(llm, plan: dict, material_pack: list[dict],
                         timeout=settings.PIPELINE_SECTION_TIMEOUT)
                     condensed, summary2 = extract_summary((resp.content or "").strip())
                     if condensed and len(condensed) <= max_per_section:
+                        # v8.13: 结构化诊断事件（压缩前后长度——评估压缩有效性）
+                        try:
+                            from src.core.diag import diag
+                            diag("section_condensed", idx=idx + 1,
+                                 before=len(body), after=len(condensed))
+                        except Exception:
+                            pass
                         body, summary = condensed, summary2 or summary
                         logger.info(f"[WritePipeline] section {idx+1} condensed ok: {len(body)} chars")
                     else:
+                        # v8.13: 结构化诊断事件（压缩失败——仍超容量）
+                        try:
+                            from src.core.diag import diag
+                            diag("section_condensed", idx=idx + 1,
+                                 before=len(body), after=len(condensed), ok=False)
+                        except Exception:
+                            pass
                         logger.warning(f"[WritePipeline] section {idx+1} still {len(condensed)} chars "
                                        f"after condensed retry, writing as-is")
                         truncated.append(section.get("heading", f"第{idx+1}章"))
@@ -982,6 +1033,14 @@ async def run_stage2_execute(llm, plan: dict, material_pack: list[dict],
             blog("section_done", idx=idx + 1, total=len(sections),
                  heading=str(section.get("heading", ""))[:40],
                  chars=len(body))
+        except Exception:
+            pass
+        # v8.13: 结构化诊断事件（单章完成快照——443s 耗时问题的分解入口）
+        try:
+            from src.core.diag import diag
+            diag("section", idx=idx + 1, total=len(sections),
+                 heading=str(section.get("heading", ""))[:40],
+                 chars=len(body), target=section.get("target_chars", 0))
         except Exception:
             pass
 
@@ -1138,6 +1197,14 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
     # 重复分类——LLM 兜底场景下会多一次 LLM 调用 + 延迟（正则快筛命中时仅日志重复）
     if cls is None:
         cls = classify_write_task(goal, "", file_exists, llm=llm)
+    # v8.13: 结构化诊断事件（流水线入口快照）
+    try:
+        from src.core.diag import diag
+        diag("pipeline_start", mode=cls.get("mode", ""),
+             target_chars=cls.get("target_chars", 0),
+             pack=len(material_pack), gap=gap)
+    except Exception:
+        pass
 
     if cls["mode"] == "direct_write":
         return {"result": "[direct_write] 现成内容应由 supervisor 直写，不应进入流水线",
@@ -1288,10 +1355,32 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
         ref_issues = verify_reference_integrity(draft)
         for issue in ref_issues[:5]:
             logger.warning(f"[WritePipeline] ref integrity: {issue}")
+        # v8.13: 结构化诊断事件（引用完整性快照——裁剪后正常应为 0）
+        try:
+            from src.core.diag import diag
+            diag("ref_verify", issues=len(ref_issues),
+                 sample="; ".join(ref_issues[:3])[:300])
+        except Exception:
+            pass
     # v8.4.6 F7: 校验通过 → 原子发布；缺章/失败 → 保留草稿并明确告知
+    # v8.13: 悬空引用同样拦截发布——此前只拦缺章，"正文引用[n] 无对应文献条目"
+    # 会发布进正式文件。仅拦截悬空引用类 issue（"未找到参考文献区"是质量提示
+    # 不阻断；"未引用条目"已由引用裁剪消除），保留草稿供补写/人工核对。
     published = False
-    if exec_result["chapters"] > 0 and not exec_result["missing_sections"]:
+    _dangling = [i for i in ref_issues if "无对应文献条目" in i]
+    if (exec_result["chapters"] > 0
+            and not exec_result["missing_sections"]
+            and not _dangling):
         published = _publish_draft(output_path)
+    # v8.13: 结构化诊断事件（发布决策快照）
+    try:
+        from src.core.diag import diag
+        diag("publish", published=published, chapters=exec_result["chapters"],
+             total_chars=exec_result["total_chars"],
+             missing=len(exec_result["missing_sections"]),
+             ref_issues=len(ref_issues))
+    except Exception:
+        pass
     if published:
         location = f"已保存到 {output_path}"
     elif exec_result["chapters"] > 0:

@@ -360,6 +360,35 @@ def test_react_fallback():
     check("全部失败 → 提示文本", r2["mode"] == "react_fallback" and "回退" in r2["result"])
 
 
+def test_publish_gate_dangling_ref():
+    print("[发布门] v8.13 A1: 悬空引用（正文[n]无条目）拦截发布")
+    import json
+    fname = f"test_dangle_{uuid.uuid4().hex[:6]}.md"
+    plan_obj = {"title": "T", "abstract_draft": "A", "keywords": ["k"],
+                "total_target_chars": 0,
+                "sections": [{"heading": "s1", "points": ["p"], "target_chars": 800,
+                              "refs": ["DOI:1"]},
+                             {"heading": "s2", "points": ["p"], "target_chars": 800,
+                              "refs": ["DOI:1"]}]}
+    plan_json = json.dumps(plan_obj, ensure_ascii=False)
+    # 第一章正文引用 [9] 但全文档无参考文献条目 → 悬空引用（unify 保留原编号、无条目）
+    llm = FakeLLM([plan_json,
+                   "## s1\n正文引用了[9]文献。<summary>s1</summary>",
+                   "## s2\n第二章内容。<summary>s2</summary>"])
+    r = run(wp.run_write_pipeline({"goal": "写一篇综述", "output_path": fname},
+                                  [{"doi": "1", "title": "X"}],
+                                  llm_factory=lambda: llm))
+    check("悬空引用 → partial 不发布", r["status"] == "partial",
+          f"status={r['status']} issues={r.get('reference_issues')}")
+    check("结果提示引用完整性", "引用完整性" in r["result"], r["result"][:200])
+    target = PROJECT_ROOT / "workspace" / "output" / fname
+    draft = target.with_name(target.name + ".draft.md")
+    check("正式文件未发布", not target.exists())
+    check("草稿保留供核对", draft.exists())
+    target.unlink(missing_ok=True)
+    draft.unlink(missing_ok=True)
+
+
 def test_output_path_fallback():
     import json
     print("[入口] output_path 缺失 → 默认路径兜底（复测发现 P1）")
@@ -525,6 +554,7 @@ if __name__ == "__main__":
     test_pipeline_state()
     test_verify_functions()
     test_react_fallback()
+    test_publish_gate_dangling_ref()
     test_output_path_fallback()
     test_evidence_fidelity()
     test_unify_references()

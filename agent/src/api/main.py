@@ -184,6 +184,12 @@ async def chat_v2(req: ChatRequest):
              query=query[:120], idem=idem_key[:16])
     except Exception:
         pass
+    # v8.13: 结构化诊断事件（JSONL）
+    try:
+        from src.core.diag import diag
+        diag("request_start", mode=mode, query_chars=len(query))
+    except Exception:
+        pass
 
     from src.graph.graph import build_graph
     from src.graph.state import AgentState
@@ -329,6 +335,15 @@ async def chat_v2(req: ChatRequest):
                                          job=job_id[:12])
                                 except Exception:
                                     pass
+                                # v8.13: 结构化诊断事件（请求成功快照）
+                                try:
+                                    from src.core.diag import diag
+                                    diag("request_done", node=node_name,
+                                         answer_chars=len(ans),
+                                         tools=output.get("tools_called", 0),
+                                         ms=int((time.perf_counter() - t0) * 1000))
+                                except Exception:
+                                    pass
                         elif node_name not in ("light_retrieve",):
                             ans = output.get("answer", "")
                             if ans:
@@ -352,6 +367,12 @@ async def chat_v2(req: ChatRequest):
                 try:
                     from src.core.business_logger import blog
                     blog("request_error", err=str(e)[:200])
+                except Exception:
+                    pass
+                # v8.13: 结构化诊断事件（请求失败快照）
+                try:
+                    from src.core.diag import diag
+                    diag("request_error", err=type(e).__name__, msg=str(e)[:200])
                 except Exception:
                     pass
                 try:

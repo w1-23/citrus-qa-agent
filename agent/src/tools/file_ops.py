@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Literal
 from langchain_core.tools import tool
 
-from src.config import PROJECT_ROOT
+from src.config import PROJECT_ROOT, settings
 
 _WORKSPACE_ROOT = (PROJECT_ROOT / "workspace" / "output").resolve()
 _WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
@@ -40,7 +40,9 @@ def write_local_file(path: str, content: str, mode: Literal["write", "append"] =
             if normalized.startswith(prefix):
                 normalized = normalized[len(prefix):]
         target_path = (_WORKSPACE_ROOT / normalized).resolve()
-        if not str(target_path).startswith(str(_WORKSPACE_ROOT)):
+        # v8.13: startswith 前缀判定有路径边界漏洞（output_evil 同前缀可绕过）
+        # → is_relative_to 严格判定（与 readfile v8.4.14 修复对称）
+        if not target_path.is_relative_to(_WORKSPACE_ROOT):
             return f"Error: Access denied. Path '{path}' is outside workspace/output/."
 
         target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -56,6 +58,13 @@ def write_local_file(path: str, content: str, mode: Literal["write", "append"] =
                 actual_mode = "append"
             else:
                 actual_mode = "write"
+
+            # v8.13: 写入大小上限——FILE_WRITE_MAX_SIZE_MB 此前为死配置（定义无消费）。
+            # append 按合并后总长判定，防 LLM 一次写入超限内容撑爆磁盘。
+            max_bytes = int(settings.FILE_WRITE_MAX_SIZE_MB * 1024 * 1024)
+            if len(content.encode("utf-8")) > max_bytes:
+                return (f"Error: 写入内容超限（{len(content)} 字符 > "
+                        f"{settings.FILE_WRITE_MAX_SIZE_MB}MB），请分块写入。")
 
             # 原子写: 先写临时文件再 os.replace，避免崩溃产生半截文件
             tmp_path = target_path.with_suffix(target_path.suffix + ".tmp")

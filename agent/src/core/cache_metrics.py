@@ -138,5 +138,13 @@ def emit_usage_from_response(session_id: str, source: str, response) -> None:
             cache_miss=merged.get("cache_miss", 0),
         )
         _record(source, merged.get("cache_hit", 0), merged.get("cache_miss", 0))
+        # v8.13: 结构化诊断事件（llm_usage）——一次调用一行 JSONL，覆盖所有 LLM 调用点
+        from src.core.diag import diag
+        diag("llm_usage", source=source,
+             input_tokens=merged.get("input_tokens", 0),
+             output_tokens=merged.get("output_tokens", 0),
+             total_tokens=merged.get("total_tokens", 0),
+             cache_hit=merged.get("cache_hit", 0),
+             cache_miss=merged.get("cache_miss", 0))
     except Exception:
         pass

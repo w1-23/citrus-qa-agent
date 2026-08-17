@@ -371,6 +371,13 @@ async def run_agent(
             break
 
         dt_llm = (time.perf_counter() - t_llm) * 1000
+        # v8.13: 结构化诊断事件（LLM 调用延迟——443s 类问题的时间分解主力）
+        try:
+            from src.core.diag import diag
+            diag("llm_call", agent=agent_name, turn=turn + 1,
+                 ms=round(dt_llm, 1), attempts=attempt + 1)
+        except Exception:
+            pass
         messages.append(response)
         # v8.3.3: 子 Agent 真实 token 增量推送（前端上下文面板实时刷新，避免累计值重复计数）
         # 阶段0: 统一经 cache_metrics 提取（含 prompt_cache 命中字段）
@@ -578,8 +585,16 @@ async def run_agent(
             # v8.4.5: 收尾用未绑工具客户端 llm_base（与 expert/light 一致，杜绝
             # 收尾再发 tool_calls 导致空回执）；空答兜底取最后 AIMessage.content
             try:
+                t_final = time.perf_counter()
                 final_resp = await llm_base.ainvoke(
                     messages + [HumanMessage(content=final_prompt)])
+                # v8.13: 结构化诊断事件（收尾 LLM 调用）
+                try:
+                    from src.core.diag import diag
+                    diag("llm_call", agent=agent_name, turn="final",
+                         ms=round((time.perf_counter() - t_final) * 1000, 1), attempts=1)
+                except Exception:
+                    pass
                 if final_resp is not None and getattr(final_resp, "content", None):
                     result_content = final_resp.content
                 if not result_content:
@@ -638,6 +653,15 @@ async def run_agent(
         blog("agent_done", agent=agent_name,
              turns=turns_taken, tools=tool_count,
              chars=len(result_content),
+             docs=len(unique_dois), ms=int(total_time),
+             rag_searches=rag_search_count)
+    except Exception:
+        pass
+    # v8.13: 结构化诊断事件（子 Agent 完成快照——总耗时/轮数/检索次数）
+    try:
+        from src.core.diag import diag
+        diag("agent_done", agent=agent_name, turns=turns_taken,
+             tools=tool_count, chars=len(result_content),
              docs=len(unique_dois), ms=int(total_time),
              rag_searches=rag_search_count)
     except Exception:

@@ -285,6 +285,16 @@ def citrus_rag_search(query: str) -> tuple[str, dict]:
 
         elapsed = (time.perf_counter() - t0) * 1000
 
+        # v8.13: 结构化诊断事件（检索快照——延迟分解 + 空结果归因）
+        try:
+            from src.core.diag import diag
+            diag("retrieval", query_chars=len(query), hyde=bool(hyde_answer),
+                 hits=len(results) if results else 0,
+                 empty_reason=getattr(rag, "last_empty_reason", ""),
+                 ms=round(elapsed, 1))
+        except Exception:
+            pass
+
         if not results:
             # v8.3.1 统一回传协议: 空结果附归因 + 建议，让 LLM 对症下药而非盲目换词
             reason = getattr(rag, "last_empty_reason", "no_match")
@@ -544,12 +554,15 @@ def pdf_read(file_path: str, cross_reference: bool = True) -> tuple[str, dict]:
     import fitz
 
     resolved_path = file_path
+    workspace_root = (PROJECT_ROOT / "workspace").resolve()
     if not os.path.isabs(file_path):
-        candidate = PROJECT_ROOT / "workspace" / file_path
-        if candidate.exists():
-            resolved_path = str(candidate)
+        # v8.13: 相对路径一律先锚定 workspace/ 再 resolve 校验——此前
+        # 仅当 workspace 内文件存在时才锚定，否则落回 CWD 解析，
+        # 相对路径 + .. 可逃逸读取任意位置 PDF
+        resolved_path = str((workspace_root / file_path).resolve())
+        if not Path(resolved_path).is_relative_to(workspace_root):
+            return f"Access denied: 路径不在 workspace/ 内: {file_path}", {"pdf_data": None}
     else:
-        workspace_root = (PROJECT_ROOT / "workspace").resolve()
         abs_path = str(Path(file_path).resolve())
         # v8.4.14: startswith 前缀无路径边界（workspace_evil 可绕过）→ is_relative_to
         if not Path(abs_path).is_relative_to(workspace_root):

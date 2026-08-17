@@ -50,6 +50,10 @@ def _resolve_read_path(path: str) -> Path:
         if not full.exists():
             full = Path.cwd() / p
             full = full.resolve()
+        # v8.13: 相对路径同样走白名单校验——此前仅绝对路径分支校验，
+        # 相对路径 + .. 组合可逃逸到项目目录外读取任意文件
+        if not _is_path_allowed(full):
+            raise PermissionError(f"拒绝读取项目目录外的文件: {full}")
 
     if not full.exists():
         raise FileNotFoundError(f"文件不存在: {full}")
