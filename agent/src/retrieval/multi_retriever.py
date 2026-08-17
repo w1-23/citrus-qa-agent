@@ -524,8 +524,92 @@ class MultiBatchRetriever:
             logger.error(f"Qdrant search failed for {batch_name}: {e}")
             return []
 
+    # ========== v8.13-b4b 检索后段单一出口（D-4 双管道收敛点）==========
+    # search_multi / search_hyde 只生成命中流（embedding/vector/BM25），RRF 权重、
+    # 去重、动态阈值、候选预算与三级日志（diag/retrieval/business）统一在此——
+    # 此前两管道各写一遍已漂移过一次（v8.10r 注释自证：config rrf_weights.*
+    # 一度对 search_multi 无感）。
+    def _fuse_rerank_select(self, *, streams: List[List[Tuple[int, float]]],
+                            weights: List[float], stream_labels: List[str],
+                            rerank_query: str, mode: str, t0: float,
+                            stage_ms: Dict[str, float], n_queries: int = 1,
+                            fallback_query: Optional[str] = None) -> List[Dict]:
+        """去重 → RRF → 候选全文 → rerank → 动态阈值 → 空归因 → 日志，返回 passed 证据。"""
+        # 每流独立「分数降序 → 按 global_idx 去重（保留最高分）」
+        deduped: List[List[Tuple[int, float]]] = []
+        for hits in streams:
+            hits = sorted(hits, key=lambda x: x[1], reverse=True)
+            seen: set = set()
+            deduped.append([
+                (idx, s) for idx, s in hits
+                if not (idx in seen or seen.add(idx))
+            ])
+
+        fused = rrf_fuse(*deduped, k=settings.RRF_K, weights=weights)
+        candidates = [self._chunk_full(idx)
+                      for idx, _ in fused[:settings.TOP_K_FINAL * 2]]
+
+        t_rerank = time.time()
+        reranked = self.reranker.rerank(rerank_query, candidates,
+                                        top_k=settings.TOP_K_FINAL)
+        dt_rerank = (time.time() - t_rerank) * 1000
+
+        if not reranked:
+            logger.info(f"[Retriever] {mode}: no reranked results")
+            self.last_empty_reason = "no_match"
+            if fallback_query is not None:
+                return self.search(fallback_query)
+            return []
+
+        top_score = reranked[0].get("rerank_score", 0)
+        dynamic_thresh = top_score * settings.DYNAMIC_THRESHOLD_RATIO
+        final_threshold = max(settings.RERANK_THRESHOLD, dynamic_thresh)
+        passed = [c for c in reranked if c.get("rerank_score", 0) >= final_threshold]
+        if not passed:
+            logger.warning(f"[Retriever] {mode}: 动态阈值 {final_threshold:.4f} 拦截所有结果")
+            self.last_empty_reason = "threshold_blocked"
+            if fallback_query is not None:
+                return self.search(fallback_query)
+            return []
+
+        total_ms = (time.time() - t0) * 1000
+        scores = sorted(c.get("rerank_score", 0) for c in reranked)
+        p50 = scores[len(scores) // 2] if scores else 0
+        p90 = scores[int(len(scores) * 0.9)] if scores else 0
+        logger.info(
+            f"[Retriever] {mode}: rerank={dt_rerank:.0f}ms total={total_ms:.0f}ms "
+            f"| top={top_score:.4f} p50={p50:.4f} p90={p90:.4f} n={len(scores)} "
+            f"| threshold={final_threshold:.4f} passed={len(passed)}/{len(reranked)}"
+        )
+        try:
+            from src.core.diag import diag
+            diag("retrieval_stages", mode=mode, queries=n_queries,
+                 embed_ms=round(stage_ms.get("embed", 0.0), 1),
+                 vector_ms=round(stage_ms.get("vector", 0.0), 1),
+                 bm25_ms=round(stage_ms.get("bm25", 0.0), 1),
+                 rerank_ms=round(dt_rerank, 1),
+                 total_ms=round(total_ms, 1),
+                 **{label: len(s) for label, s in zip(stream_labels, deduped)},
+                 candidates=len(candidates), passed=len(passed),
+                 top_score=round(top_score, 4), threshold=round(final_threshold, 4))
+        except Exception:
+            pass
+        # v8.7: 统一检索过滤日志（合并 retrieval/ 与 debug_filter/——真实计算被拦截明细）
+        from src.logger import log_retrieval
+        filtered = [c for c in reranked if c.get("rerank_score", 0) < final_threshold]
+        log_retrieval(rerank_query, reranked, final_threshold, passed, filtered,
+                      elapsed=time.time() - t0, extra={"mode": mode})
+        try:
+            from src.core.business_logger import blog
+            blog("retrieval_done", mode=mode, queries=n_queries,
+                 docs=len(passed), filtered=len(filtered), ms=int(total_ms))
+        except Exception:
+            pass
+        return passed
+
     def search_multi(self, queries: List[str]) -> List[Dict]:
-        if not queries: return []
+        if not queries:
+            return []
         _t0 = time.time()
         logger.info(f"[Retriever] 启动多路并发检索 | 总 Query 数: {len(queries)}")
 
@@ -533,88 +617,48 @@ class MultiBatchRetriever:
         query_vecs = self.embedder.embed_docs(queries)
         dt_embed = (time.time() - t_embed) * 1000
 
-        all_vector_hits = []
         if not self.batches and not self.lance_tables:
             logger.warning("[Retriever] 无可用向量后端，降级为 BM25 纯文本检索")
-        t_qdrant = time.time()
+        t_vector = time.time()
         batch_names = list(self.lance_tables.keys()) if self.backend == "lancedb" \
             else list(self.batches.keys())
+        all_vector_hits: List[Tuple[int, float]] = []
         workers = max(1, len(batch_names) * len(queries))
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futures = [ex.submit(self._vector_search, name, vec, settings.TOP_K_VECTOR)
                        for vec in query_vecs for name in batch_names]
-            for f in as_completed(futures): all_vector_hits.extend(f.result())
-        dt_qdrant = (time.time() - t_qdrant) * 1000
+            for f in as_completed(futures):
+                all_vector_hits.extend(f.result())
+        dt_vector = (time.time() - t_vector) * 1000
 
         t_bm25 = time.time()
-        all_bm25_hits = [hit for q in queries for hit in self.bm25.top_k(q, k=settings.TOP_K_BM25)]
+        all_bm25_hits = [hit for q in queries
+                         for hit in self.bm25.top_k(q, k=settings.TOP_K_BM25)]
         dt_bm25 = (time.time() - t_bm25) * 1000
 
-        all_vector_hits.sort(key=lambda x: x[1], reverse=True)
-        all_bm25_hits.sort(key=lambda x: x[1], reverse=True)
-        v_seen, b_seen = set(), set()
-        unique_v = [(idx, s) for idx, s in all_vector_hits if not (idx in v_seen or v_seen.add(idx))]
-        unique_b = [(idx, s) for idx, s in all_bm25_hits if not (idx in b_seen or b_seen.add(idx))]
-        # v8.10r: 主检索路径同样应用 RRF 权重（此前只有 HyDE 路径生效——
-        # config rrf_weights.* 对 search_multi 无感）
-        fused = rrf_fuse(
-            unique_v, unique_b, k=settings.RRF_K,
+        return self._fuse_rerank_select(
+            streams=[all_vector_hits, all_bm25_hits],
             weights=[
                 getattr(settings, 'RRF_WEIGHT_ORIG_DENSE', 1.0),
                 getattr(settings, 'RRF_WEIGHT_BM25', 1.0),
             ],
+            stream_labels=["unique_v", "unique_b"],
+            rerank_query=queries[0],
+            mode="search_multi",
+            t0=_t0,
+            stage_ms={"embed": dt_embed, "vector": dt_vector, "bm25": dt_bm25},
+            n_queries=len(queries),
         )
-        candidates = [self._chunk_full(idx) for idx, _ in fused[:settings.TOP_K_FINAL * 2]]
-        primary_query = queries[0]
-        t_rerank = time.time()
-        reranked = self.reranker.rerank(primary_query, candidates, top_k=settings.TOP_K_FINAL)
-        dt_rerank = (time.time() - t_rerank) * 1000
-        if not reranked:
-            self.last_empty_reason = "no_match"
-            return []
-        top_score = reranked[0].get("rerank_score", 0)
-        dynamic_thresh = top_score * settings.DYNAMIC_THRESHOLD_RATIO
-        final_threshold = max(settings.RERANK_THRESHOLD, dynamic_thresh)
-        passed = [c for c in reranked if c.get("rerank_score", 0) >= final_threshold]
-        if not passed:
-            logger.warning(f"动态阈值 {final_threshold:.4f} 拦截所有结果，触发模型知识兜底")
-            self.last_empty_reason = "threshold_blocked"
-            return []
-        total_ms = (time.time() - _t0) * 1000
-        logger.info(f"[Retriever] rerank={dt_rerank:.0f}ms total={total_ms:.0f}ms | top_score={top_score:.4f} threshold={final_threshold:.4f} | passed={len(passed)}/{len(reranked)}")
-        # v8.13: 结构化诊断事件（检索分阶段耗时——此前 dt_embed/dt_qdrant/dt_bm25
-        # 计算后从未使用，加 timer 忘了接日志的半成品补丁）
-        try:
-            from src.core.diag import diag
-            diag("retrieval_stages", mode="search_multi", queries=len(queries),
-                 embed_ms=round(dt_embed, 1), vector_ms=round(dt_qdrant, 1),
-                 bm25_ms=round(dt_bm25, 1), rerank_ms=round(dt_rerank, 1),
-                 total_ms=round(total_ms, 1),
-                 unique_v=len(unique_v), unique_b=len(unique_b),
-                 candidates=len(candidates), passed=len(passed),
-                 top_score=round(top_score, 4), threshold=round(final_threshold, 4))
-        except Exception:
-            pass
-        # v8.7: 统一检索过滤日志（合并 retrieval/ 与 debug_filter/——原 debug_filter
-        # 的 filtered 参数恒为空，被拦截明细从未记录；现在真实计算并记录）
-        from src.logger import log_retrieval
-        filtered = [c for c in reranked if c.get("rerank_score", 0) < final_threshold]
-        log_retrieval(primary_query, reranked, final_threshold, passed, filtered,
-                      elapsed=time.time() - _t0, extra={"mode": "search_multi"})
-        # v8.7: 执行过程日志（business.log）补检索事件——此前检索完成无业务事件线
-        try:
-            from src.core.business_logger import blog
-            blog("retrieval_done", mode="search_multi", queries=len(queries),
-                 docs=len(passed), filtered=len(filtered), ms=int(total_ms))
-        except Exception:
-            pass
-        return passed
 
     def search(self, query: str) -> List[Dict]:
         return self.search_multi([query])
 
     def search_hyde(self, original_query: str, hyde_answer: str) -> List[Dict]:
-        """HyDE hybrid search: dual dense (original + hyde) + BM25 + RRF + Reranker(original_query)."""
+        """HyDE hybrid search: dual dense (original + hyde) + BM25 + RRF + Reranker(original_query).
+
+        v8.13-b4b: 仅保留命中流生成（原/假想双 dense + BM25），RRF 融合/去重/阈值/
+        日志统一走 _fuse_rerank_select；阈值拦截或无 rerank 结果时回退基础检索。
+        """
         _t0 = time.time()
         logger.info(f"[Retriever] HyDE hybrid search | query_len={len(original_query)} hyde_len={len(hyde_answer)}")
 
@@ -622,17 +666,21 @@ class MultiBatchRetriever:
             try:
                 from src.core.progress_bus import emit_progress
                 emit_progress("tool_progress", {"message": msg, "tool_call_id": ""})
-            except Exception: pass
+            except Exception:
+                pass
 
         _emit("向量化查询...")
+        t_embed = time.time()
         orig_vec = self.embedder.embed_query(original_query)
         hyde_vec = self.embedder.embed_query(hyde_answer)
+        dt_embed = (time.time() - t_embed) * 1000
 
-        _emit(f"并发检索向量后端 ({len(self.batches) + len(self.lance_tables)} 批次)...")
-        orig_v_hits: list[tuple[int, float]] = []
-        hyde_v_hits: list[tuple[int, float]] = []
         batch_names = list(self.lance_tables.keys()) if self.backend == "lancedb" \
             else list(self.batches.keys())
+        _emit(f"并发检索向量后端 ({len(batch_names)} 批次)...")
+        t_vector = time.time()
+        orig_v_hits: List[Tuple[int, float]] = []
+        hyde_v_hits: List[Tuple[int, float]] = []
         if batch_names:
             workers = max(1, len(batch_names) * 2)
             with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -647,67 +695,25 @@ class MultiBatchRetriever:
                     orig_v_hits.extend(f.result())
                 for f in as_completed(futures_hyde):
                     hyde_v_hits.extend(f.result())
+        dt_vector = (time.time() - t_vector) * 1000
 
+        t_bm25 = time.time()
         bm25_hits = self.bm25.top_k(original_query, k=settings.TOP_K_BM25)
+        dt_bm25 = (time.time() - t_bm25) * 1000
         _emit(f"BM25 词法检索完成, 共 {len(orig_v_hits)+len(hyde_v_hits)} 个向量命中 + {len(bm25_hits)} 个词法命中")
 
-        orig_v_hits.sort(key=lambda x: x[1], reverse=True)
-        hyde_v_hits.sort(key=lambda x: x[1], reverse=True)
-        bm25_hits.sort(key=lambda x: x[1], reverse=True)
-
-        # Dedup each list independently
-        def _dedup_hits(hits):
-            seen = set()
-            return [(idx, s) for idx, s in hits if not (idx in seen or seen.add(idx))]
-
-        u_orig = _dedup_hits(orig_v_hits)
-        u_hyde = _dedup_hits(hyde_v_hits)
-        u_bm25 = _dedup_hits(bm25_hits)
-
-        # Weighted RRF: weights from config
-        w_orig = getattr(settings, 'RRF_WEIGHT_ORIG_DENSE', 1.0)
-        w_hyde = getattr(settings, 'RRF_WEIGHT_HYDE_DENSE', 1.0)
-        w_bm25 = getattr(settings, 'RRF_WEIGHT_BM25', 1.0)
-
-        fused = rrf_fuse(u_orig, u_hyde, u_bm25, k=settings.RRF_K,
-                         weights=[w_orig, w_hyde, w_bm25])
-        candidates = [self._chunk_full(idx) for idx, _ in fused[:settings.TOP_K_FINAL * 2]]
-        _emit(f"Cross-Encoder 重排序 ({len(candidates)} 篇候选文献)...")
-
-        reranked = self.reranker.rerank(original_query, candidates, top_k=settings.TOP_K_FINAL)
-        if not reranked:
-            logger.info("[Retriever] HyDE: no reranked results, falling back to original search")
-            return self.search(original_query)
-
-        # v8.4.3: 分数分布日志（校准用）；阈值与 RAG 基础路保持一致
-        # （0.25 地板 + 动态阈值 max(0.25, top*ratio)）
-        scores = sorted(c.get("rerank_score", 0) for c in reranked)
-        p50 = scores[len(scores) // 2] if scores else 0
-        p90 = scores[int(len(scores) * 0.9)] if scores else 0
-        logger.info(
-            f"[Retriever] HyDE rerank scores: top={scores[-1] if scores else 0:.4f} "
-            f"p50={p50:.4f} p90={p90:.4f} n={len(scores)}")
-
-        top_score = reranked[0].get("rerank_score", 0)
-        dynamic_thresh = top_score * settings.DYNAMIC_THRESHOLD_RATIO
-        final_threshold = max(settings.RERANK_THRESHOLD, dynamic_thresh)
-        passed = [c for c in reranked if c.get("rerank_score", 0) >= final_threshold]
-        if not passed:
-            logger.warning(f"[Retriever] HyDE: threshold {final_threshold:.4f} blocked all, falling back")
-            return self.search(original_query)
-
-        total_ms = (time.time() - _t0) * 1000
-        logger.info(f"[Retriever] HyDE done: {len(passed)}/{len(reranked)} passed | {total_ms:.0f}ms")
-        # v8.7: HyDE 路径补记统一检索过滤日志（此前该路径只记通过结果、无过滤明细）
-        from src.logger import log_retrieval
-        filtered = [c for c in reranked if c.get("rerank_score", 0) < final_threshold]
-        log_retrieval(original_query, reranked, final_threshold, passed, filtered,
-                      elapsed=time.time() - _t0, extra={"mode": "hyde"})
-        # v8.7: 执行过程日志补检索事件（HyDE 路径）
-        try:
-            from src.core.business_logger import blog
-            blog("retrieval_done", mode="hyde", queries=1,
-                 docs=len(passed), filtered=len(filtered), ms=int(total_ms))
-        except Exception:
-            pass
-        return passed
+        return self._fuse_rerank_select(
+            streams=[orig_v_hits, hyde_v_hits, bm25_hits],
+            weights=[
+                getattr(settings, 'RRF_WEIGHT_ORIG_DENSE', 1.0),
+                getattr(settings, 'RRF_WEIGHT_HYDE_DENSE', 1.0),
+                getattr(settings, 'RRF_WEIGHT_BM25', 1.0),
+            ],
+            stream_labels=["unique_orig", "unique_hyde", "unique_bm25"],
+            rerank_query=original_query,
+            mode="hyde",
+            t0=_t0,
+            stage_ms={"embed": dt_embed, "vector": dt_vector, "bm25": dt_bm25},
+            n_queries=1,
+            fallback_query=original_query,
+        )
