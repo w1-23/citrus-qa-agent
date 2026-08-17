@@ -658,10 +658,13 @@ async def serve_frontend():
 
 
 # v8.9 工作区静态服务（会话侧栏"工作区"文件可点击打开；只读）
-_workspace_static = (PROJECT_ROOT / "workspace")
+# v8.13: 暴露面从整个 workspace/ 收窄到 workspace/output/——前端仅引用
+# /workspace/output/（写作成果预览），其余目录（input/临时文件等）不再 HTTP 可达
+_workspace_static = (PROJECT_ROOT / "workspace" / "output")
 if _workspace_static.exists():
     from fastapi.staticfiles import StaticFiles
-    app.mount("/workspace", StaticFiles(directory=str(_workspace_static)), name="workspace")
+    app.mount("/workspace/output", StaticFiles(directory=str(_workspace_static)),
+              name="workspace")
 
 
 @app.get("/health")
@@ -752,8 +755,9 @@ async def session_workspace_files(session_id: str):
                 continue
             seen.add(rel)
             p = (out_root / rel).resolve()
-            # 路径安全：必须落在 workspace/output 内
-            if not str(p).startswith(str(out_root)):
+            # 路径安全：必须落在 workspace/output 内（v8.13: startswith 有同前缀
+            # 边界漏洞——output_evil 兄弟目录可绕过 → is_relative_to 严格判定）
+            if not p.is_relative_to(out_root):
                 continue
             if not p.exists() or not p.is_file():
                 continue
