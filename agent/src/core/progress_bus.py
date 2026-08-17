@@ -17,7 +17,6 @@ logger = logging.getLogger(__name__)
 
 # 全局兜底队列（非 SSE 上下文，如 CLI/测试）；SSE 请求使用 per-request 队列
 _progress_queue: asyncio.Queue | None = None
-_log_queue: asyncio.Queue | None = None
 
 # 请求级队列: 每个 SSE 请求 set_request_queue() 绑定自己的队列，emit 只进本请求
 _current_queue: contextvars.ContextVar = contextvars.ContextVar(
@@ -41,13 +40,6 @@ def set_request_queue(queue: asyncio.Queue) -> None:
 
 def clear_request_queue() -> None:
     _current_queue.set(None)
-
-
-def get_log_queue() -> asyncio.Queue:
-    global _log_queue
-    if _log_queue is None:
-        _log_queue = asyncio.Queue(maxsize=500)
-    return _log_queue
 
 
 def _encode_event(event_type: str, data: dict) -> dict:
@@ -98,15 +90,20 @@ def emit_usage_delta(session_id: str, source: str, input_tokens: int = 0,
         return  # 同值重复（如调用未消耗新 token），不发零增量
     _usage_last[key] = total
     cache_denom = cache_hit + cache_miss
+    # v8.13: 语义分家——此前单次调用绝对值与 session 累计值平铺混在一起
+    # （input_tokens 是单次、total 是累计、cache 又是单次），消费端无法区分。
+    # 改为: call.* = 本次调用绝对值；total/delta = session+source 累计与增量。
     emit_encoded("context_usage", {
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
+        "call": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_hit": cache_hit,
+            "cache_miss": cache_miss,
+            "cache_ratio": round(cache_hit / cache_denom, 4) if cache_denom else 0,
+        },
         "total": total,
         "delta": delta,
         "source": source,
-        "cache_hit": cache_hit,
-        "cache_miss": cache_miss,
-        "cache_ratio": round(cache_hit / cache_denom, 4) if cache_denom else 0,
     })
 
 
@@ -221,30 +218,3 @@ def emit_status(stage: str, **kwargs) -> None:
     payload = {"stage": stage}
     payload.update(kwargs)
     emit_encoded("status", payload)
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# SSELogHandler — forwards Python log lines to SSE log queue
-# ═══════════════════════════════════════════════════════════════════════
-
-
-class SSELogHandler(logging.Handler):
-    """Custom logging handler that emits log lines to the SSE log queue."""
-
-    def __init__(self):
-        super().__init__(logging.INFO)
-        self._start_time = time.perf_counter()
-
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            elapsed = time.perf_counter() - self._start_time
-            line = (
-                f"[{elapsed:.1f}s] {record.levelname[:1]} "
-                f"{record.name.split('.')[-1]}: {record.getMessage()}"
-            )
-            q = get_log_queue()
-            q.put_nowait(
-                _encode_event("log_line", {"line": line, "level": record.levelname})
-            )
-        except Exception:
-            pass

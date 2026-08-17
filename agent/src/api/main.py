@@ -212,7 +212,7 @@ async def chat_v2(req: ChatRequest):
 
     async def event_generator():
         from src.core.progress_bus import (
-            get_progress_queue, get_log_queue,
+            get_progress_queue,
             set_request_queue, clear_request_queue,
             _encode_event, log_sse_frame,
             get_running_tools, get_tool_elapsed, clear_tool_timers,
@@ -222,25 +222,12 @@ async def chat_v2(req: ChatRequest):
         request_queue: asyncio.Queue = asyncio.Queue()
         set_request_queue(request_queue)
         clear_tool_timers()
-        log_queue = get_log_queue()
         event_queue: asyncio.Queue = asyncio.Queue()
 
         async def bridge_progress():
             while True:
                 try:
                     evt = await asyncio.wait_for(request_queue.get(), timeout=0.3)
-                    await event_queue.put(evt)
-                except asyncio.TimeoutError:
-                    continue
-                except asyncio.CancelledError:
-                    break
-                except Exception:
-                    break
-
-        async def bridge_logs():
-            while True:
-                try:
-                    evt = await asyncio.wait_for(log_queue.get(), timeout=0.3)
                     await event_queue.put(evt)
                 except asyncio.TimeoutError:
                     continue
@@ -270,7 +257,6 @@ async def chat_v2(req: ChatRequest):
                 pass
 
         progress_task = asyncio.create_task(bridge_progress())
-        log_task = asyncio.create_task(bridge_logs())
         heartbeat_task = asyncio.create_task(tool_heartbeat())
 
         # v8.3.7 M2: 观察者标志——write 类任务断连保活后丢弃后续事件（防队列堆积）
@@ -385,9 +371,9 @@ async def chat_v2(req: ChatRequest):
             finally:
                 # v8.4.11: 注销运行任务（正常/取消/异常路径统一清理）
                 _running_graph_tasks.pop(job_id, None)
-                # Drain pending bridge/log events before sending sentinel
+                # Drain pending bridge events before sending sentinel
                 for _ in range(10):
-                    if request_queue.empty() and log_queue.empty():
+                    if request_queue.empty():
                         break
                     await asyncio.sleep(0.1)
                 heartbeat_task.cancel()
@@ -437,8 +423,6 @@ async def chat_v2(req: ChatRequest):
                     graph_task.cancel()
             if not progress_task.done():
                 progress_task.cancel()
-            if not log_task.done():
-                log_task.cancel()
             if not heartbeat_task.done():
                 heartbeat_task.cancel()
             clear_request_queue()
