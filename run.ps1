@@ -177,30 +177,42 @@ if (Test-Gpu) {
 # v8.13.0: 模型走 HuggingFace 国内镜像（hf-mirror.com）自动下载，无需手动配置；
 # 如需官方源，注释下一行即可
 $env:HF_ENDPOINT = 'https://hf-mirror.com'
+# v8.13-b5f: 输出实时写入 agent\logs\last_run.log（PS5.1 兼容：局部放开 EAP + stderr 规范化，杜绝 2>&1 触发终止）
+$LogDir = Join-Path $AgentDir 'logs'
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+$LogFile = Join-Path $LogDir 'last_run.log'
 Write-Host "[5/6] 检查模型（首次自动从镜像下载向量编码/重排模型，约 5-15 分钟；之后秒级启动）..." -ForegroundColor Cyan
 Push-Location $AgentDir
+$oldEap = $ErrorActionPreference
 try {
-    & $VenvPy prepare_models.py
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "    模型准备未完全成功，可继续启动（部分功能降级）" -ForegroundColor Yellow
-    }
+    $ErrorActionPreference = 'Continue'
+    & $VenvPy prepare_models.py 2>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { $_ } } | Tee-Object -FilePath $LogFile
+    $rc = $LASTEXITCODE
 } finally {
     Pop-Location
+    $ErrorActionPreference = $oldEap
+}
+if ($rc -ne 0) {
+    Write-Host "    模型准备未完全成功（完整输出见 agent\logs\last_run.log），可继续启动（部分功能降级）" -ForegroundColor Yellow
 }
 
 # ── [6/6] 启动 ──
 Write-Host "[6/6] 启动服务，浏览器将自动打开 http://localhost:8000 ..." -ForegroundColor Cyan
-Write-Host "      （关闭本窗口即停止服务；Key 首次在页面内填写，保存于本机）" -ForegroundColor DarkGray
+Write-Host "      （关闭本窗口即停止服务；Key 首次在页面内填写，保存于本机；运行日志实时写入 agent\logs\last_run.log）" -ForegroundColor DarkGray
 try { Start-Process 'http://localhost:8000' } catch { }
 Push-Location $AgentDir
+$oldEap2 = $ErrorActionPreference
 try {
-    & $VenvPy -m uvicorn src.api.main:app --host 127.0.0.1 --port 8000
+    $ErrorActionPreference = 'Continue'
+    & $VenvPy -m uvicorn src.api.main:app --host 127.0.0.1 --port 8000 2>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { $_ } } | Tee-Object -FilePath $LogFile
+    $rc = $LASTEXITCODE
 } finally {
     Pop-Location
+    $ErrorActionPreference = $oldEap2
 }
-if ($LASTEXITCODE -ne 0) {
+if ($rc -ne 0) {
     Write-Host ""
-    Write-Host "  ⚠ 服务未能正常启动（上面红色 Traceback 就是具体原因）" -ForegroundColor Red
+    Write-Host "  ⚠ 服务未能正常启动（原因见上方红字，完整日志在 agent\logs\last_run.log）" -ForegroundColor Red
     Write-Host "    常见原因：依赖没装全 / 数据或模型没放对位置 / 端口 8000 被占用" -ForegroundColor Yellow
-    Read-Host "    按回车键关闭窗口（可先截图或复制上方错误发我）"
+    Read-Host "    按回车键关闭窗口（把 agent\logs\last_run.log 整个文件发我即可）"
 }
