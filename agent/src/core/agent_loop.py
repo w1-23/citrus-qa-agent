@@ -48,6 +48,22 @@ def count_unique_docs(main_results: list) -> int:
     return n
 
 
+def dedup_by_doi(rows) -> list:
+    """按 DOI 去重文献列表（保留首次出现顺序；无 DOI 条目原样保留）。
+
+    与 count_unique_docs 的差异：此处不做 lower（贴合 expert/light 收尾去重原行为）。
+    """
+    seen = set()
+    out = []
+    for r in rows:
+        doi = (r.get("doi") or "").strip()
+        if doi and doi in seen:
+            continue
+        seen.add(doi)
+        out.append(r)
+    return out
+
+
 def last_message_content(messages: list, mode: str = "aimessage") -> str:
     """收尾空答兜底：从历史消息取最后一段可用文本。
 
@@ -118,3 +134,15 @@ async def force_final_answer(messages: list, *, stream_call, label: str = "",
     if getattr(resp, "content", None):
         return resp.content
     return last_message_content(messages, mode=fallback_mode)
+
+
+def emit_llm_usage(session_id: str, source: str, response) -> None:
+    """推送真实 token 增量（统一经 cache_metrics 提取，含 prompt_cache 命中字段）。
+
+    三层（expert/light/agent_runner）LLM 调用后各复制一份 try/except 上报，收敛为此。
+    """
+    try:
+        from src.core.cache_metrics import emit_usage_from_response
+        emit_usage_from_response(session_id, source, response)
+    except Exception:
+        pass

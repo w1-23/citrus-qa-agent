@@ -7,8 +7,8 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from src.core.agent_loop import (
-    tc_id, count_unique_docs, last_message_content,
-    invoke_llm_with_retry, force_final_answer, FINAL_ANSWER_PROMPT,
+    tc_id, count_unique_docs, dedup_by_doi, last_message_content,
+    invoke_llm_with_retry, force_final_answer, FINAL_ANSWER_PROMPT, emit_llm_usage,
 )
 
 
@@ -50,6 +50,23 @@ def test_count_unique_docs():
     ]
     assert count_unique_docs(rows) == 3
     assert count_unique_docs([]) == 0
+
+
+def test_dedup_by_doi():
+    rows = [
+        {"doi": "10.1/AAA"},
+        {"doi": "10.1/AAA"},       # 相同 DOI 去重
+        {"doi": "10.2/BBB"},
+        {"title": "no doi"},        # 无 DOI 原样保留
+    ]
+    out = dedup_by_doi(rows)
+    assert len(out) == 3
+    assert out[0]["doi"] == "10.1/AAA"
+    assert out[1]["doi"] == "10.2/BBB"
+    assert out[2].get("title") == "no doi"
+    # 原行为 strip 但不 lower（与 count_unique_docs 不同，勿"顺手"改）
+    assert len(dedup_by_doi([{"doi": "10.1/AAA"}, {"doi": "10.1/aaa"}])) == 2
+    assert dedup_by_doi([]) == []
 
 
 def test_last_message_content():
@@ -136,3 +153,19 @@ def test_force_final_empty_content_fallback():
 
 def test_final_prompt_non_empty():
     assert "不要提及工具或轮次限制" in FINAL_ANSWER_PROMPT
+
+
+def test_emit_llm_usage(monkeypatch):
+    import src.core.cache_metrics as cm
+    calls = []
+
+    def fake_emit(sid, src, resp):
+        calls.append((sid, src, resp.content))
+    monkeypatch.setattr(cm, "emit_usage_from_response", fake_emit)
+    emit_llm_usage("s1", "expert", _Resp("hello"))
+    assert calls == [("s1", "expert", "hello")]
+
+    def boom(sid, src, resp):
+        raise RuntimeError("metrics down")
+    monkeypatch.setattr(cm, "emit_usage_from_response", boom)
+    emit_llm_usage("s1", "expert", _Resp("x"))   # 异常吞掉，不向上抛

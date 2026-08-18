@@ -19,8 +19,8 @@ from src.graph.state import AgentState
 from src.config import settings, get_deepseek_model, PROJECT_ROOT
 from src.core.evidence import render_evidence, EVIDENCE_SNIPPET_MAX_CHARS
 from src.core.agent_loop import (
-    tc_id as extract_tc_id, count_unique_docs, FINAL_ANSWER_PROMPT,
-    invoke_llm_with_retry, force_final_answer,
+    tc_id as extract_tc_id, count_unique_docs, dedup_by_doi, emit_llm_usage,
+    FINAL_ANSWER_PROMPT, invoke_llm_with_retry, force_final_answer,
 )
 from src.prompts.loader import assemble_system_prompt
 
@@ -676,12 +676,7 @@ async def supervisor_node(state: AgentState) -> dict:
             dt_llm = (time.perf_counter() - t_llm) * 1000
             messages.append(response)
             # v8.3.3: 推送真实 token 增量（前端面板实时刷新，避免累计值重复计数）
-            # 阶段0: 统一经 cache_metrics 提取（含 prompt_cache 命中字段）
-            try:
-                from src.core.cache_metrics import emit_usage_from_response
-                emit_usage_from_response(session_id, "supervisor", response)
-            except Exception:
-                pass
+            emit_llm_usage(session_id, "supervisor", response)
 
             if not getattr(response, "tool_calls", None):
                 answer = response.content or ""
@@ -978,14 +973,7 @@ async def supervisor_node(state: AgentState) -> dict:
 
     elapsed = (time.perf_counter() - t0) * 1000
 
-    seen_doi = set()
-    deduped_main = []
-    for r in all_main_results:
-        doi = (r.get("doi") or "").strip()
-        if doi and doi in seen_doi:
-            continue
-        seen_doi.add(doi)
-        deduped_main.append(r)
+    deduped_main = dedup_by_doi(all_main_results)
 
     cited_refs = []
     for i, r in enumerate(deduped_main[:20]):

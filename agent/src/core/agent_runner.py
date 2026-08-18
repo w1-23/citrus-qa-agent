@@ -20,7 +20,7 @@ from langchain_openai import ChatOpenAI
 
 from src.config import settings, get_deepseek_model
 from src.core.evidence import render_evidence, EVIDENCE_RENDER_MAX_CHARS
-from src.core.agent_loop import tc_id as extract_tc_id, last_message_content, invoke_llm_with_retry
+from src.core.agent_loop import tc_id as extract_tc_id, last_message_content, invoke_llm_with_retry, emit_llm_usage
 from src.prompts.loader import assemble_agent_prompt
 from src.tools import _TOOL_REGISTRY_BY_NAME
 from src.tools.registry import PartitionedToolNode
@@ -345,12 +345,7 @@ async def run_agent(
             pass
         messages.append(response)
         # v8.3.3: 子 Agent 真实 token 增量推送（前端上下文面板实时刷新，避免累计值重复计数）
-        # 阶段0: 统一经 cache_metrics 提取（含 prompt_cache 命中字段）
-        try:
-            from src.core.cache_metrics import emit_usage_from_response
-            emit_usage_from_response(session_id, agent_name, response)
-        except Exception:
-            pass
+        emit_llm_usage(session_id, agent_name, response)
 
         if hasattr(response, "content") and response.content:
             logger.debug(
