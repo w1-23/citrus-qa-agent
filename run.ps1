@@ -158,7 +158,13 @@ if (Test-Gpu) {
         & $VenvPip uninstall -y onnxruntime 2>$null | Out-Null
         & $VenvPip install onnxruntime-directml
         if ($LASTEXITCODE -ne 0) {
-            Write-Host "    ⚠ DirectML 安装失败，将使用 CPU 运行（不影响功能，仅嵌入/重排稍慢）" -ForegroundColor Yellow
+            Write-Host "    ⚠ DirectML 安装失败，自动恢复 CPU 版 onnxruntime（避免启动时找不到运行库崩掉）..." -ForegroundColor Yellow
+            & $VenvPip install onnxruntime
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "    ⚠ onnxruntime 恢复失败，请检查网络后重新运行（否则服务将无法启动）" -ForegroundColor Red
+                Read-Host "    按回车键关闭窗口"; exit 1
+            }
+            Write-Host "    已恢复 CPU 版（不影响功能，仅嵌入/重排稍慢）" -ForegroundColor Green
         } else {
             Write-Host "[4b/6] DirectML 安装完成 ✅" -ForegroundColor Green
         }
