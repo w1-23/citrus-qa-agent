@@ -14,7 +14,7 @@ sse-starlette>=2.0
 requests>=2.31.0
 
 # Data science
-numpy>=1.24.0
+numpy==2.4.6
 pandas>=2.0.0
 scipy>=1.11.0
 statsmodels>=0.14.0
@@ -29,13 +29,14 @@ pdfplumber>=0.10.0
 PyMuPDF>=1.23.0
 qdrant-client>=1.9.0
 # v8.9: 嵌入式向量库（百万级/热更新/无锁；与 Qdrant 并存，backend=auto 自动选择）
+# v8.13-b5g: 以下版本与源机 citrus-agent 环境钉死——保证拷贝的 .hf_cache 模型缓存格式与运行时库完全匹配
 lancedb==0.37.1
-fastembed>=0.3.0
+fastembed==0.8.0
 onnxruntime>=1.16.0
 
 # Reranker (BAAI/bge-reranker-v2-m3, ONNX 导出需要)
-optimum>=1.16.0
-transformers>=4.36.0
+optimum==2.1.0
+transformers==4.57.6
 
 # Utilities
 rich>=13.7.0

@@ -20,6 +20,17 @@ $VenvDir = Join-Path $AgentDir '.venv'
 $VenvPy = Join-Path $VenvDir 'Scripts\python.exe'
 $VenvPip = Join-Path $VenvDir 'Scripts\pip.exe'
 
+# v8.13-b5g: 中文/非 ASCII 路径守卫——Windows 下 onnxruntime / HF 缓存 / GBK 控制台在中文路径会报莫名 Traceback
+$badChar = $Root.ToCharArray() | Where-Object { [int]$_ -gt 127 } | Select-Object -First 1
+if ($badChar) {
+    Write-Host ""
+    Write-Host "  ⚠ 项目目录路径包含中文字符（当前: $Root）" -ForegroundColor Red
+    Write-Host "    Windows 下 Python 组件（模型加载/检索库）在中文路径下会报莫名 Traceback" -ForegroundColor Yellow
+    Write-Host "    解决: 关闭本窗口，把整个文件夹改名到纯英文路径（如 E:\citrus），数据再放回 agent\ 下后重新运行" -ForegroundColor Yellow
+    Read-Host "    按回车键关闭窗口"
+    exit 1
+}
+
 function Find-Python {
     # v8.13-b5d: 优先 py 启动器的 3.11/3.12/3.10（避免拿到 3.13+ 装不上依赖），
     #  再退回 PATH 上的 python.exe（版本仍会在 [2/6] 严格校验）
