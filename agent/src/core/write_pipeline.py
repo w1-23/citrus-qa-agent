@@ -26,6 +26,7 @@ from typing import Optional
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from src.config import settings, PROJECT_ROOT
+from src.core.evidence import render_evidence, EVIDENCE_RENDER_MAX_CHARS
 from src.prompts.loader import _read_prompt
 
 logger = logging.getLogger(__name__)
@@ -177,17 +178,13 @@ def _build_plan_prompt(material_pack: list[dict], target_chars: int, retry_info:
 
 
 # v8.3.8: 证据保真——chunk 最大 1992 字符，3000 为安全阀（当前语料零截断）；
-# 总量由条数与累计预算控制，不砍单条正文
-MATERIAL_EVIDENCE_MAX_CHARS = 3000
+# 总量由条数与累计预算控制，不砍单条正文。v8.13-b4c: 单条渲染统一走 render_evidence。
 MATERIAL_TOTAL_MAX_CHARS = 60000
 
 
 def _material_evidence(r: dict) -> str:
-    """取材料证据文本：chunk 正文（text）优先（含机制/数字细节），摘要次之。"""
-    text = str(r.get("text", "") or "").strip()
-    if text:
-        return text[:MATERIAL_EVIDENCE_MAX_CHARS]
-    return str(r.get("abstract", r.get("snippet", "")))[:MATERIAL_EVIDENCE_MAX_CHARS]
+    """取材料证据文本：单一渲染（chunk 正文 text 优先，摘要次之；EVIDENCE_RENDER_MAX_CHARS 安全阀）。"""
+    return render_evidence(r, max_chars=EVIDENCE_RENDER_MAX_CHARS)
 
 
 def _format_material_pack(material_pack: list[dict], max_entries: int = 25) -> str:

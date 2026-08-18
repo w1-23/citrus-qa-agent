@@ -18,6 +18,7 @@ from langgraph.graph import StateGraph, END
 
 from src.graph.state import AgentState
 from src.config import settings, get_deepseek_model, PROJECT_ROOT
+from src.core.evidence import render_evidence, EVIDENCE_SNIPPET_MAX_CHARS
 from src.prompts.loader import assemble_system_prompt
 
 logger = logging.getLogger(__name__)
@@ -1209,9 +1210,8 @@ async def expert_save_node(state: AgentState) -> dict:
                     "title": str(r.get("title", ""))[:150],
                     "score": r.get("score", r.get("rerank_score", 0)) or 0,
                     "year": str(r.get("year", "")),
-                    # v8.4.6: 账本片段升级（500→2000 字符）——追问时
-                    # 可回查的"其它有关信息"更完整（全量在 evidence_id 暂存文件）
-                    "snippet": str(r.get("text", "") or r.get("abstract", ""))[:2000],
+                    # v8.13-b4c: 账本片段经 render_evidence 单一渲染（2000 安全阀）
+                    "snippet": render_evidence(r, max_chars=EVIDENCE_SNIPPET_MAX_CHARS),
                 }
                 for r in main_results[:30]
             ]

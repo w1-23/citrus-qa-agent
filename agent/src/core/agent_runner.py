@@ -20,6 +20,7 @@ from langchain_core.messages import (
 from langchain_openai import ChatOpenAI
 
 from src.config import settings, get_deepseek_model
+from src.core.evidence import render_evidence, EVIDENCE_RENDER_MAX_CHARS
 from src.prompts.loader import assemble_agent_prompt
 from src.tools import _TOOL_REGISTRY_BY_NAME
 from src.tools.registry import PartitionedToolNode
@@ -178,10 +179,8 @@ def build_evidence_report(collected_artifacts: dict, query: str,
     if not main and not web:
         lines.append("未检索到相关文献。")
     for i, r in enumerate(main[:15], 1):
-        text = str(r.get("text") or r.get("abstract") or r.get("snippet") or "").strip()
-        # chunk 语料单条 ≤~2000 字符，3000 为安全阀（语料零截断）
-        if len(text) > 3000:
-            text = text[:3000] + " …[超长片段截断]"
+        # v8.13-b4c: 全文经 render_evidence 单一渲染（chunk ≤~2000 字符，3000 安全阀）
+        text = render_evidence(r, max_chars=EVIDENCE_RENDER_MAX_CHARS)
         lines.append(
             f"[{i}] {r.get('title', r.get('name', 'Untitled'))} | "
             f"{r.get('year', 'N/A')} | DOI: {r.get('doi', 'N/A')} | "

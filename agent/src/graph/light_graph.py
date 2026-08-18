@@ -12,6 +12,7 @@ from langgraph.graph import StateGraph, END
 
 from src.graph.state import AgentState
 from src.config import settings, get_deepseek_model
+from src.core.evidence import render_evidence, EVIDENCE_SNIPPET_MAX_CHARS
 from src.prompts.loader import assemble_system_prompt
 
 logger = logging.getLogger(__name__)
@@ -450,7 +451,7 @@ async def save_context_node(state: AgentState) -> dict:
                  "title": str(r.get("title", ""))[:150],
                  "score": r.get("score", r.get("rerank_score", 0)) or 0,
                  "year": str(r.get("year", "")),
-                 "snippet": str(r.get("text", "") or r.get("abstract", ""))[:2000]}
+                 "snippet": render_evidence(r, max_chars=EVIDENCE_SNIPPET_MAX_CHARS)}
                 for r in main_results[:30]
             ]
             spawn(session_manager.save_evidence(
