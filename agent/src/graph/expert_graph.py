@@ -533,6 +533,79 @@ def _extract_write_receipt(result_text: str, hint_path: str = "") -> str:
     return ""
 
 
+# v8.13-b5a: expert supervisor 循环骨架·状态栏构建 + 预算前移守卫（原闭包提取为命名子过程）
+def _build_status_message(*, turn, max_turns, tool_call_count, max_tools_per_turn,
+                          all_main_results, used_queries, consecutive_failures,
+                          tool_names_called, format_hint, ratio=None):
+    """按轮构建注入给 LLM 的状态栏 HumanMessage（含输出画像），纯函数无副作用。"""
+    content = (
+        _build_status_content(
+            turn=turn + 1,
+            max_turns=max_turns,
+            tool_call_count=tool_call_count,
+            max_tools_per_turn=max_tools_per_turn,
+            unique_docs=count_unique_docs(all_main_results),
+            used_queries=used_queries,
+            consecutive_failures=consecutive_failures,
+            tool_names_called=tool_names_called,
+            budget_ratio=ratio,
+        )
+        + "\n\n以上为系统注入的运行时状态摘要，请据此决策，不要重复已完成步骤。"
+    )
+    profile = _build_output_profile(count_unique_docs(all_main_results), format_hint)
+    if profile:
+        content += "\n\n" + profile
+    return HumanMessage(content=content)
+
+
+def _guard_supervisor_budget(supervisor_budget, messages, *, turn, max_turns,
+                             tool_call_count, max_tools_per_turn, all_main_results,
+                             used_queries, consecutive_failures,
+                             tool_names_called, format_hint):
+    """预算前移守卫：构建状态栏 call_messages 并检查硬/软阈值。
+
+    返回 (call_messages, force_reason)：force_reason 为 "budget" 时调用方须就地
+    强制收尾；否则 call_messages（含预算占用率 + 软阈值收敛提示）可直接供 LLM。
+    """
+    status_msg = _build_status_message(
+        turn=turn, max_turns=max_turns, tool_call_count=tool_call_count,
+        max_tools_per_turn=max_tools_per_turn, all_main_results=all_main_results,
+        used_queries=used_queries, consecutive_failures=consecutive_failures,
+        tool_names_called=tool_names_called, format_hint=format_hint,
+    )
+    call_messages = list(messages) + [status_msg]
+    if supervisor_budget is None:
+        return call_messages, None
+    try:
+        est = supervisor_budget.estimate_tokens(call_messages)
+        ratio = est / supervisor_budget.config.max_tokens
+        if ratio >= supervisor_budget.config.hard_threshold:
+            logger.warning(
+                f"[ExpertGraph:supervisor] 上下文占用 {ratio:.1%} ≥ "
+                f"硬阈值 {supervisor_budget.config.hard_threshold:.0%}，强制收尾")
+            return call_messages, "budget"
+        status_msg = _build_status_message(
+            turn=turn, max_turns=max_turns, tool_call_count=tool_call_count,
+            max_tools_per_turn=max_tools_per_turn, all_main_results=all_main_results,
+            used_queries=used_queries, consecutive_failures=consecutive_failures,
+            tool_names_called=tool_names_called, format_hint=format_hint, ratio=ratio,
+        )
+        call_messages = list(messages) + [status_msg]
+        if ratio >= supervisor_budget.config.soft_threshold:
+            logger.warning(
+                f"[ExpertGraph:supervisor] 上下文占用 {ratio:.1%} ≥ "
+                f"软阈值 {supervisor_budget.config.soft_threshold:.0%}")
+            status_msg = HumanMessage(content=(
+                f"{status_msg.content}\n"
+                f"[budget] 上下文占用 {ratio:.1%}（软阈值 "
+                f"{supervisor_budget.config.soft_threshold:.0%}），"
+                f"请尽快收敛输出。"))
+            call_messages = list(messages) + [status_msg]
+        return call_messages, None
+    except Exception:
+        return call_messages, None
+
+
 async def supervisor_node(state: AgentState) -> dict:
     query = state.get("query", "")
     format_hint = state.get("format_hint")
@@ -612,61 +685,21 @@ async def supervisor_node(state: AgentState) -> dict:
         for turn in range(SUPERVISOR_MAX_TURNS):
             forced_final = False
             t_llm = time.perf_counter()
-            # v8.3.5 Agent 状态栏 (规范 2.6): 上下文末尾注入显式状态，
-            # 模型无需从长历史"数"工具调用/文献数——"数不清"是预算超支的深层根因
-            # v8.4: 内容由 _build_status_content 代码确定性维护（含 TODO 列表/预算占用率）
-            # v8.4.6: 状态栏尾部追加输出画像（证据量驱动的篇幅/覆盖下限）
-            def _status_with_profile(ratio=None):
-                content = (
-                    _build_status_content(
-                        turn=turn + 1,
-                        max_turns=SUPERVISOR_MAX_TURNS,
-                        tool_call_count=tool_call_count,
-                        max_tools_per_turn=max_tools_per_turn,
-                        unique_docs=count_unique_docs(all_main_results),
-                        used_queries=used_queries,
-                        consecutive_failures=consecutive_failures,
-                        tool_names_called=tool_names_called,
-                        budget_ratio=ratio,
-                    )
-                    + "\n\n以上为系统注入的运行时状态摘要，请据此决策，不要重复已完成步骤。"
-                )
-                profile = _build_output_profile(
-                    count_unique_docs(all_main_results), format_hint)
-                if profile:
-                    content += "\n\n" + profile
-                return HumanMessage(content=content)
-
-            status_msg = _status_with_profile(None)
-            call_messages = list(messages) + [status_msg]
-            # v8.3.6 预算前移: 每次调用前估算，超硬阈值强制收尾（防窗口溢出），
-            # 超软阈值在状态栏提示模型收敛
-            if supervisor_budget is not None:
-                try:
-                    est = supervisor_budget.estimate_tokens(call_messages)
-                    ratio = est / supervisor_budget.config.max_tokens
-                    if ratio >= supervisor_budget.config.hard_threshold:
-                        logger.warning(
-                            f"[ExpertGraph:supervisor] 上下文占用 {ratio:.1%} ≥ "
-                            f"硬阈值 {supervisor_budget.config.hard_threshold:.0%}，强制收尾")
-                        # v8.4.2 根治: 预算触发就地收尾（统一函数，不再依赖循环后块）
-                        answer = await _force_final_answer(llm_base, messages, "budget")
-                        break
-                    # v8.4: 预算占用率进状态栏（模型随时可见，无需自己估算）
-                    status_msg = _status_with_profile(ratio)
-                    call_messages = list(messages) + [status_msg]
-                    if ratio >= supervisor_budget.config.soft_threshold:
-                        logger.warning(
-                            f"[ExpertGraph:supervisor] 上下文占用 {ratio:.1%} ≥ "
-                            f"软阈值 {supervisor_budget.config.soft_threshold:.0%}")
-                        status_msg = HumanMessage(content=(
-                            f"{status_msg.content}\n"
-                            f"[budget] 上下文占用 {ratio:.1%}（软阈值 "
-                            f"{supervisor_budget.config.soft_threshold:.0%}），"
-                            f"请尽快收敛输出。"))
-                        call_messages = list(messages) + [status_msg]
-                except Exception:
-                    pass
+            # v8.13-b5a: 状态栏构建 + 预算前移守卫收敛至 _guard_supervisor_budget
+            # （原 _status_with_profile 闭包 + 硬/软阈值检查块，逻辑逐字节一致）
+            call_messages, force_reason = _guard_supervisor_budget(
+                supervisor_budget, messages,
+                turn=turn, max_turns=SUPERVISOR_MAX_TURNS,
+                tool_call_count=tool_call_count,
+                max_tools_per_turn=max_tools_per_turn,
+                all_main_results=all_main_results, used_queries=used_queries,
+                consecutive_failures=consecutive_failures,
+                tool_names_called=tool_names_called, format_hint=format_hint,
+            )
+            if force_reason:
+                # v8.4.2 根治: 预算触发就地收尾（统一函数，不再依赖循环后块）
+                answer = await _force_final_answer(llm_base, messages, force_reason)
+                break
             # v8.13-b5a: LLM 重试收敛至 invoke_llm_with_retry（3 次/3s/失败上抛）
             response, _, _ = await invoke_llm_with_retry(
                 lambda: stream_llm_response(
