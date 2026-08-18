@@ -26,6 +26,18 @@ function Find-Python {
     return $null
 }
 
+function Test-Gpu {
+    # v8.13-b5b: 独立显卡探测（排除无驱动的虚拟/基础显示适配器）
+    $adapters = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue
+    if (-not $adapters) { return $false }
+    foreach ($a in $adapters) {
+        $n = "$($a.Name)"
+        if ($n -match 'Microsoft Basic|Virtual|Remote Display|VMware|Hyper-V|QEMU') { continue }
+        return $true
+    }
+    return $false
+}
+
 Write-Host ""
 Write-Host "  🍊 Citrus QA Agent 一键启动" -ForegroundColor Yellow
 Write-Host "  ============================" -ForegroundColor DarkGray
@@ -104,6 +116,26 @@ if ($LASTEXITCODE -ne 0) {
     if ($LASTEXITCODE -ne 0) { Write-Host "    依赖安装失败，请检查网络后重试" -ForegroundColor Red; exit 1 }
 } else {
     Write-Host "[4/6] 依赖已就绪" -ForegroundColor Green
+}
+
+# ── [4b/6] GPU 加速（v8.13-b5b：有独立显卡自动换 DirectML 版 onnxruntime）──
+#  DirectML 把嵌入/重排模型放进显存（不占内存）且更快；无独显则维持 CPU。
+if (Test-Gpu) {
+    $dml = & $VenvPy -c "import onnxruntime as ort; print('DmlExecutionProvider' in ort.get_available_providers())" 2>$null
+    if ("$dml".Trim() -eq 'True') {
+        Write-Host "[4b/6] 检测到独立显卡，GPU 加速已可用（DirectML）✅" -ForegroundColor Green
+    } else {
+        Write-Host "[4b/6] 检测到独立显卡，安装 DirectML 版 onnxruntime（模型将使用显存、不占内存；约 120MB）..." -ForegroundColor Cyan
+        & $VenvPip uninstall -y onnxruntime 2>$null | Out-Null
+        & $VenvPip install onnxruntime-directml
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "    ⚠ DirectML 安装失败，将使用 CPU 运行（不影响功能，仅嵌入/重排稍慢）" -ForegroundColor Yellow
+        } else {
+            Write-Host "[4b/6] DirectML 安装完成 ✅" -ForegroundColor Green
+        }
+    }
+} else {
+    Write-Host "[4b/6] 未检测到独立显卡，使用 CPU 运行（模型走内存，属正常）" -ForegroundColor DarkGray
 }
 
 # ── [5/6] 模型 ──
