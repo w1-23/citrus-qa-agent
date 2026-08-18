@@ -228,16 +228,27 @@ agent/data/
 
 ### 新数据包（pipeline 系预分块文献包）入库
 
-把新包放进 `agent/data/批次名/`（根目录 `chunks.jsonl` + `qdrant_data/` + `metadata.json`），用 `reindex_lance.py` 建成 LanceDB 表——**优先复用包内 qdrant 向量（分钟级），缺口自动小批量补嵌入（防内存爆），建表后重启服务即检索到新批次**：
+**标准流程（三步）**：
+
+1. **放包**：把新数据包放进 `agent/data/批次名/`（根目录 `chunks.jsonl` + `qdrant_data/` + `metadata.json`；任意命名，自动被发现）
+2. **建表**：`reindex_lance.py --batch 批次名`（在 `agent/` 目录、用项目 Python 环境执行）
+3. **重启服务**：restart 后检索器自动装载新 lance 表 + 重建/取用新 BM25 指纹缓存，新批次即可检索
 
 ```bash
 cd agent
-rag-agent\python.exe reindex_lance.py --batch 批次名              # 单个包
-rag-agent\python.exe reindex_lance.py --batch 1-1200 --no-qdrant  # qdrant 不可用时全量重嵌入
-rag-agent\python.exe reindex_lance.py --all                       # 重建全部
+rag-agent\python.exe reindex_lance.py --batch 我的新批次          # 单个包（推荐）
+rag-agent\python.exe reindex_lance.py --batch 1-1200 --no-qdrant   # qdrant 不可用时全量重嵌入
+rag-agent\python.exe reindex_lance.py --all                        # 一次性重建全部批次
 ```
 
-> 提示：新包入库与重索引期间请先停止服务（模型双份会吃满内存），完成后可用 `e2e_check.py`（HTTP 端到端检查：health 轮询 + SSE 解析答案/引用）做多查询验证。
+**新数据如何匹配**（`reindex_lance.py` 的换算逻辑）：
+
+- 以 `(paper_id, chunk_index)` 为全局键（与检索器 `global_chunks` 一致）对齐「包内 qdrant 向量」与「chunks.jsonl 文本」
+- **键命中** → 直接复用包内既有向量（免重新嵌入，分钟级）；**键缺失**（qdrant 损缺/新块）→ 用本地嵌入模型**小批量补嵌入**（64/批 + 逐批 gc，防止内存爆）
+- qdrant 里**重复键只留一份**、**chunks.jsonl 里已不存在的孤立点自动丢弃** → 生成的 LanceDB 表与 `chunks.jsonl` **严格 1:1**（表行数 = 块数，每块必有向量）
+- 修正/替换某批次内容后：重新对同批次执行 `reindex_lance.py --batch 该批` 即可（自动删旧表重建）
+
+**注意**：① 新包入库/重索引期间**先停止服务**（模型双份会吃满内存，曾在 16GB 机器上死机）；② 建表后必须**重启服务**才生效（`--reload` 只监听 .py 代码，不会因 data/ 目录变化自动重载）；③ 完成后可在 UI 直接提问验证，或用 `e2e_check.py` 做多查询核对（health 轮询 + SSE 答案/引用解析）。
 
 - `data/` 属于你的私有知识库：**不进 Git 仓库、不进主包**（`pack_release.ps1` 与 `.gitignore` 均已排除；公开示例语料经 `corpus` 附件分发——`run.ps1` 自动下载，或 `-full-data` 打包附带）
 - 检索阈值可在 `agent/config.yaml` 的 `retrieval:` 段调整（相似度下限、动态阈值比例等）
