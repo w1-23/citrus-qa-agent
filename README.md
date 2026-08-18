@@ -259,6 +259,7 @@ rag-agent\python.exe reindex_lance.py --all                        # 一次性�
 - **沙箱**：写文件仅限 `workspace/output`（可切换审批/拒绝模式）；读取仅限项目内路径
 - **提示注入防护**：检索证据块 `<evidence>` 标签隔离 + "数据边界"声明；日志邮箱/手机/身份证/密钥自动脱敏
 - **隐私**：全本地运行，除 DeepSeek API 调用外无任何外部请求
+- **凭据红线（v8.13-b5b）**：任何 GitHub/API token 永不写入 `.git/config`、仓库文件、脚本或日志；remote 地址保持纯 `https://...` 形式；推送/拉取凭据只走系统凭据管理器（Git Credential Manager）或用户本人在提示框输入——token 不落盘、不复制、不转发
 - **启动性能**：BM25 倒排索引按语料指纹持久化缓存（`.hf_cache/bm25/`），语料不变时启动跳过重建
 
 ## 🧪 测试
