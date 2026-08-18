@@ -21,16 +21,19 @@ $VenvPy = Join-Path $VenvDir 'Scripts\python.exe'
 $VenvPip = Join-Path $VenvDir 'Scripts\pip.exe'
 
 function Find-Python {
-    # 依次尝试: python / py launcher
-    $p = Get-Command python -ErrorAction SilentlyContinue
-    if ($p) { return $p.Source }
+    # v8.13-b5d: 优先 py 启动器的 3.11/3.12/3.10（避免拿到 3.13+ 装不上依赖），
+    #  再退回 PATH 上的 python.exe（版本仍会在 [2/6] 严格校验）
     $py = Get-Command py -ErrorAction SilentlyContinue
     if ($py) {
-        try {
-            $v = & $py.Source -3.11 -c "import sys; print(sys.executable)" 2>$null
-            if ($LASTEXITCODE -eq 0 -and $v) { return $v.Trim() }
-        } catch { }
+        foreach ($minor in 11, 12, 10) {
+            try {
+                $v = & $py.Source -3.$minor -c "import sys; print(sys.executable)" 2>$null
+                if ($LASTEXITCODE -eq 0 -and $v) { return $v.Trim() }
+            } catch { }
+        }
     }
+    $p = Get-Command python -ErrorAction SilentlyContinue
+    if ($p) { return $p.Source }
     return $null
 }
 
@@ -108,10 +111,13 @@ if (-not $py) {
     }
 }
 Write-Host "[2/6] Python: $py" -ForegroundColor Green
-& $py -c "import sys; assert sys.version_info >= (3, 10), '需要 Python 3.10+'" 2>$null
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "    ⚠ Python 版本过低，请安装 Python 3.11+（https://www.python.org/downloads/）" -ForegroundColor Red
-    Read-Host "按回车键关闭窗口"; exit 1
+# v8.13-b5d: 严格版本门禁 3.10~3.12（推荐 3.11）——3.13+ 装不上 lancedb/onnxruntime 预编译包
+$verInfo = & $py -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null
+if ($verInfo -notmatch '^3\.(10|11|12)$') {
+    Write-Host "    ⚠ 当前 Python 版本: $verInfo；本脚本需要 3.10~3.12（推荐 3.11）" -ForegroundColor Red
+    Write-Host "      解决: 打开 https://www.python.org/downloads/ 安装 Python 3.11（勾选 Add to PATH），装完重跑本脚本" -ForegroundColor Yellow
+    Read-Host "    按回车键关闭窗口"
+    exit 1
 }
 
 # ── [3/6] 虚拟环境 ──
