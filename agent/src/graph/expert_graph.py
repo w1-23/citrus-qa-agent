@@ -6,7 +6,6 @@ import asyncio
 import logging
 import re
 import time
-import uuid
 
 from langchain_core.messages import (
     SystemMessage,
@@ -19,6 +18,10 @@ from langgraph.graph import StateGraph, END
 from src.graph.state import AgentState
 from src.config import settings, get_deepseek_model, PROJECT_ROOT
 from src.core.evidence import render_evidence, EVIDENCE_SNIPPET_MAX_CHARS
+from src.core.agent_loop import (
+    tc_id as extract_tc_id, count_unique_docs, FINAL_ANSWER_PROMPT,
+    invoke_llm_with_retry, force_final_answer,
+)
 from src.prompts.loader import assemble_system_prompt
 
 logger = logging.getLogger(__name__)
@@ -45,25 +48,7 @@ def _make_tool_call(tc: dict) -> dict:
     return {"name": name, "args": args}
 
 
-def _tc_id(tc) -> str:
-    """兼容 dict/对象两种 tool_calls 形态取 id（v8.3.4）。"""
-    if isinstance(tc, dict):
-        return tc.get("id", "") or str(uuid.uuid4())
-    return getattr(tc, "id", "") or str(uuid.uuid4())
-
-
-def _count_unique_dois(main_results: list) -> int:
-    """按 DOI 去重计数文献（状态栏/引用统计用）。"""
-    seen = set()
-    n = 0
-    for r in main_results:
-        doi = (r.get("doi") or "").strip().lower()
-        if doi:
-            if doi in seen:
-                continue
-            seen.add(doi)
-        n += 1
-    return n
+# v8.13-b5a: _tc_id / _count_unique_dois 已收敛至 src.core.agent_loop（tc_id / count_unique_docs）
 
 
 def check_citation_support(answer: str, main_results: list,
@@ -77,7 +62,7 @@ def check_citation_support(answer: str, main_results: list,
     检测但不强制改写（只标记 + 日志 + 前端轻提示）。
     """
     cited = {int(n) for n in re.findall(r"\[(\d{1,3})\]", answer or "")}
-    unique_dois = _count_unique_dois(main_results)
+    unique_dois = count_unique_docs(main_results)
     supported = ((bool(retrieval_tool_called) and unique_dois > 0)
                  or evidence_count > 0 or ltm_chars > 0)
     return {
@@ -503,42 +488,22 @@ def _build_output_profile(evidence_count: int, format_hint: str | None) -> str:
     )
 
 
-# ── v8.4.2 统一收尾（根治重构）──
-# 原则: answer 一旦赋值，任何路径不得再改写（结构保证，非条件约定）。
-# 所有"强制收尾"（熔断/预算/跑满轮次）统一走 _force_final_answer：
-#   - 临时列表传参 messages + [HumanMessage] → 合成消息永不进 turn_trace/历史
-#   - 未绑工具客户端 llm_base → 模型不可能再发 tool_calls 导致空答
-#   - 详尽 prompt，无任何预算/限制措辞（影响质量与长度的预算一律不生效）
-#   - 空答兜底: 取 messages 最后一段 AIMessage.content，绝不返回空串
-_FINAL_PROMPT = (
-    "请立即给出最终回答：基于已检索的全部证据，完整、详尽、结构化地作答；"
-    "不要精简、不要省略、不要提及工具或轮次限制；信息不足请逐条说明缺口。"
-)
-
-
-def _last_aimessage_content(messages: list) -> str:
-    for m in reversed(messages):
-        if isinstance(m, AIMessage) and getattr(m, "content", None):
-            return m.content
-    return ""
+# ── v8.4.2 统一收尾（根治重构）── 原则不变：
+# answer 一旦赋值任何路径不得再改写（结构保证）；强制收尾统一入口。
+# v8.13-b5a: 收尾骨架 + 空答兜底已收敛至 src.core.agent_loop.force_final_answer，
+# 这里只保留 expert 差异点（label 含 reason、fallback=aimessage、llm_base 未绑工具流式）。
 
 
 async def _force_final_answer(llm, messages: list, reason: str) -> str:
-    """统一收尾入口（熔断/预算/跑满轮次三处调用）。调用方 break 后不得再改写 answer。
-
-    v8.4.13: 流式生成——回答逐 token 上屏，思维链进「深度思考」折叠块。
-    """
-    logger.info(f"[ExpertGraph:supervisor] {reason}, forcing final")
-    try:
-        resp = await stream_llm_response(
-            llm, messages + [HumanMessage(content=_FINAL_PROMPT)],
-            on_text=emit_text, on_reasoning=emit_reasoning)
-    except Exception as e:
-        logger.warning(f"[ExpertGraph:supervisor] {reason} 收尾调用失败: {e}")
-        return _last_aimessage_content(messages)
-    if getattr(resp, "content", None):
-        return resp.content
-    return _last_aimessage_content(messages)
+    """统一收尾入口（熔断/预算/跑满轮次三处调用）。调用方 break 后不得再改写 answer。"""
+    return await force_final_answer(
+        messages,
+        stream_call=lambda: stream_llm_response(
+            llm, messages + [HumanMessage(content=FINAL_ANSWER_PROMPT)],
+            on_text=emit_text, on_reasoning=emit_reasoning),
+        label=f"[ExpertGraph:supervisor] {reason}",
+        fallback_mode="aimessage",
+    )
 
 
 # v8.4.3 工单7: write-agent 回执提取（超长结果禁止裸截断，见 supervisor 工具回执处理）
@@ -658,7 +623,7 @@ async def supervisor_node(state: AgentState) -> dict:
                         max_turns=SUPERVISOR_MAX_TURNS,
                         tool_call_count=tool_call_count,
                         max_tools_per_turn=max_tools_per_turn,
-                        unique_docs=_count_unique_dois(all_main_results),
+                        unique_docs=count_unique_docs(all_main_results),
                         used_queries=used_queries,
                         consecutive_failures=consecutive_failures,
                         tool_names_called=tool_names_called,
@@ -667,7 +632,7 @@ async def supervisor_node(state: AgentState) -> dict:
                     + "\n\n以上为系统注入的运行时状态摘要，请据此决策，不要重复已完成步骤。"
                 )
                 profile = _build_output_profile(
-                    _count_unique_dois(all_main_results), format_hint)
+                    count_unique_docs(all_main_results), format_hint)
                 if profile:
                     content += "\n\n" + profile
                 return HumanMessage(content=content)
@@ -702,21 +667,12 @@ async def supervisor_node(state: AgentState) -> dict:
                         call_messages = list(messages) + [status_msg]
                 except Exception:
                     pass
-            for attempt in range(3):
-                try:
-                    # v8.4.13: 真流式——回答/过程文本逐 token 上屏（text 事件），
-                    # 思维链进「深度思考」折叠块（reasoning 事件）；聚合消息与
-                    # ainvoke 同构（tool_calls/usage_metadata 完整）
-                    response = await stream_llm_response(
-                        llm_with_tools, call_messages,
-                        on_text=emit_text, on_reasoning=emit_reasoning)
-                    break
-                except Exception as e:
-                    if attempt < 2:
-                        logger.warning(f"[ExpertGraph:supervisor] LLM retry {attempt+1}/3: {e}")
-                        await asyncio.sleep(3)
-                    else:
-                        raise
+            # v8.13-b5a: LLM 重试收敛至 invoke_llm_with_retry（3 次/3s/失败上抛）
+            response, _, _ = await invoke_llm_with_retry(
+                lambda: stream_llm_response(
+                    llm_with_tools, call_messages,
+                    on_text=emit_text, on_reasoning=emit_reasoning),
+                label="[ExpertGraph:supervisor]", sleep_s=3.0)
             dt_llm = (time.perf_counter() - t_llm) * 1000
             messages.append(response)
             # v8.3.3: 推送真实 token 增量（前端面板实时刷新，避免累计值重复计数）
@@ -775,7 +731,7 @@ async def supervisor_node(state: AgentState) -> dict:
                     messages.append(ToolMessage(
                         content=("[budget] 该工具调用因每轮工具预算限制未执行，"
                                  "如有必要请在下一轮重新发起。"),
-                        tool_call_id=_tc_id(sk),
+                        tool_call_id=extract_tc_id(sk),
                         name="budget_skip",
                     ))
                 logger.warning(
@@ -796,7 +752,7 @@ async def supervisor_node(state: AgentState) -> dict:
             # ToolMessage 装配按原调用顺序（INV-01 配对语义不变）。
             async def _exec_pending_tool(tc, pidx):
                 tc_dict = _make_tool_call(tc)
-                tc_id = _tc_id(tc)
+                tc_id = extract_tc_id(tc)
                 if tc_dict["name"] == "call_write_agent":
                     full_ctx = _build_full_retrieval_context(all_main_results, all_web_results)
                     if full_ctx:
@@ -943,7 +899,7 @@ async def supervisor_node(state: AgentState) -> dict:
                 tool_msg_content = f"[{agent_display} result]\n{truncated}"
                 messages.append(ToolMessage(
                     content=tool_msg_content,
-                    tool_call_id=_tc_id(tc),
+                    tool_call_id=extract_tc_id(tc),
                     name=tc_dict["name"],
                 ))
 
@@ -985,7 +941,7 @@ async def supervisor_node(state: AgentState) -> dict:
                     for rest in pending_calls[pidx + 1:]:
                         messages.append(ToolMessage(
                             content="[circuit_breaker] 熔断触发，该调用未执行。",
-                            tool_call_id=_tc_id(rest), name="circuit_breaker"))
+                            tool_call_id=extract_tc_id(rest), name="circuit_breaker"))
                     try:
                         emit_status("circuit_breaker",
                                     message=f"连续 {consecutive_failures} 次工具失败，"

@@ -13,6 +13,9 @@ from langgraph.graph import StateGraph, END
 from src.graph.state import AgentState
 from src.config import settings, get_deepseek_model
 from src.core.evidence import render_evidence, EVIDENCE_SNIPPET_MAX_CHARS
+from src.core.agent_loop import (
+    FINAL_ANSWER_PROMPT, invoke_llm_with_retry, force_final_answer,
+)
 from src.prompts.loader import assemble_system_prompt
 
 logger = logging.getLogger(__name__)
@@ -133,28 +136,17 @@ async def light_retrieve_node(state: AgentState) -> dict:
 async def _light_force_final(messages: list) -> str:
     """light 收尾统一函数（v8.4.6 B1：预算超限与跑满轮次共用）。
 
-    详尽中文措辞 + 临时列表（不入 turn_trace/历史）+ 未绑工具客户端
-    （杜绝收尾再发 tool_calls 导致空答）。
+    v8.13-b5a: 收尾骨架收敛至 src.core.agent_loop.force_final_answer，
+    这里保留 light 差异点（未绑工具客户端、不记日志、fallback=any）。
     """
-    final_prompt = (
-        "请立即给出最终回答：基于已检索的全部证据，完整、详尽、结构化地作答；"
-        "不要精简、不要省略、不要提及工具或轮次限制；信息不足请逐条说明缺口。"
-    )
-    try:
-        # v8.4.13: 流式收尾——回答逐 token 上屏 + 思维链折叠块
-        final_resp = await stream_llm_response(
+    return await force_final_answer(
+        messages,
+        stream_call=lambda: stream_llm_response(
             _build_light_llm(),
-            messages + [HumanMessage(content=final_prompt)],
-            on_text=emit_text, on_reasoning=emit_reasoning)
-        answer = final_resp.content or ""
-    except Exception:
-        answer = ""
-    if not answer:
-        for m in reversed(messages):
-            if getattr(m, "content", None):
-                answer = m.content
-                break
-    return answer
+            messages + [HumanMessage(content=FINAL_ANSWER_PROMPT)],
+            on_text=emit_text, on_reasoning=emit_reasoning),
+        fallback_mode="any",
+    )
 
 
 async def light_supervisor_node(state: AgentState) -> dict:
@@ -233,19 +225,12 @@ async def light_supervisor_node(state: AgentState) -> dict:
             except Exception:
                 pass
             t_llm = time.perf_counter()
-            for attempt in range(3):
-                try:
-                    # v8.4.13: 真流式——文本逐 token 上屏，思维链进折叠块
-                    response = await stream_llm_response(
-                        llm, messages,
-                        on_text=emit_text, on_reasoning=emit_reasoning)
-                    break
-                except Exception as e:
-                    if attempt < 2:
-                        logger.warning(f"[LightGraph:supervisor] LLM retry {attempt+1}/3: {e}")
-                        await asyncio.sleep(3)
-                    else:
-                        raise
+            # v8.13-b5a: LLM 重试收敛至 invoke_llm_with_retry（3 次/3s/失败上抛）
+            response, _, _ = await invoke_llm_with_retry(
+                lambda: stream_llm_response(
+                    llm, messages,
+                    on_text=emit_text, on_reasoning=emit_reasoning),
+                label="[LightGraph:supervisor]", sleep_s=3.0)
             dt_llm = (time.perf_counter() - t_llm) * 1000
             messages.append(response)
             # v8.3.3: 推送真实 token 增量（前端上下文面板实时刷新，避免累计值重复计数）

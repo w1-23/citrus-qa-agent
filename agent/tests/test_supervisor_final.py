@@ -99,12 +99,12 @@ def _min_state():
 
 
 def _no_synthetic(trace) -> bool:
-    from src.graph.expert_graph import _FINAL_PROMPT
+    from src.core.agent_loop import FINAL_ANSWER_PROMPT
     for m in trace:
         content = str(getattr(m, "content", "") or "")
         if content.startswith("You have reached the maximum number of turns"):
             return False
-        if content.startswith(_FINAL_PROMPT[:20]):
+        if content.startswith(FINAL_ANSWER_PROMPT[:20]):
             return False
     return True
 

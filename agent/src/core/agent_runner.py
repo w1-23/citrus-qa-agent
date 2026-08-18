@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-import uuid
 from typing import Optional
 
 from langchain_core.messages import (
@@ -21,6 +20,7 @@ from langchain_openai import ChatOpenAI
 
 from src.config import settings, get_deepseek_model
 from src.core.evidence import render_evidence, EVIDENCE_RENDER_MAX_CHARS
+from src.core.agent_loop import tc_id as extract_tc_id, last_message_content, invoke_llm_with_retry
 from src.prompts.loader import assemble_agent_prompt
 from src.tools import _TOOL_REGISTRY_BY_NAME
 from src.tools.registry import PartitionedToolNode
@@ -55,36 +55,8 @@ def _truncate_context_blocks(context: str, max_chars: int = 24000) -> str:
         f"\n\n[上下文已截断: 共 {len(blocks)} 条内容，仅显示前 {len(out)} 条，其余未提供]"
 
 
-def _count_unique_docs(main_results: list) -> int:
-    """按 DOI 去重计数文献（无 DOI 按条计数）— v8.3.4 收敛判断用。"""
-    seen = set()
-    n = 0
-    for r in main_results:
-        doi = (r.get("doi") or "").strip().lower()
-        if doi:
-            if doi in seen:
-                continue
-            seen.add(doi)
-        n += 1
-    return n
-
-
-def _tc_id(tc) -> str:
-    """兼容 dict/对象两种 tool_calls 形态取 id（v8.3.5 id 单一来源）。"""
-    if isinstance(tc, dict):
-        return tc.get("id", "") or str(uuid.uuid4())
-    return getattr(tc, "id", "") or str(uuid.uuid4())
-
-
-def _last_content_fallback(messages: list) -> str:
-    """收尾空答兜底（v8.4.5）：优先最后 AIMessage.content，其次任意非系统消息内容。"""
-    for m in reversed(messages):
-        if isinstance(m, AIMessage) and getattr(m, "content", None):
-            return m.content
-    for m in reversed(messages):
-        if not isinstance(m, SystemMessage) and getattr(m, "content", None):
-            return str(m.content)
-    return ""
+# v8.13-b5a: _count_unique_docs(死代码) / _tc_id / _last_content_fallback
+# 已收敛至 src.core.agent_loop（count_unique_docs 未再引用则删；tc_id / last_message_content）
 
 
 # ── v8.4.6 检索代码级去重与确定性证据回执（管道而非漏斗）──
@@ -354,18 +326,12 @@ async def run_agent(
         # 即完成），max_turns 兜底。
         turns_taken = turn + 1
         t_llm = time.perf_counter()
-        response = None
-        for attempt in range(3):
-            try:
-                response = await llm_with_tools.ainvoke(messages)
-                break
-            except Exception as e:
-                llm_error = str(e)
-                if attempt < 2:
-                    logger.warning(f"[AgentRunner] {agent_name} LLM retry {attempt+1}/3: {e}")
-                    await asyncio.sleep(2)
-                else:
-                    logger.error(f"[AgentRunner] {agent_name} LLM error (retries exhausted): {e}")
+        # v8.13-b5a: LLM 重试收敛至 invoke_llm_with_retry（3 次/2s/失败返回 None 兜底）
+        response, attempt, _err = await invoke_llm_with_retry(
+            lambda: llm_with_tools.ainvoke(messages),
+            label=f"[AgentRunner] {agent_name}", sleep_s=2.0, on_exhausted="none")
+        if _err:
+            llm_error = _err
         if response is None:
             break
 
@@ -374,7 +340,7 @@ async def run_agent(
         try:
             from src.core.diag import diag
             diag("llm_call", agent=agent_name, turn=turn + 1,
-                 ms=round(dt_llm, 1), attempts=attempt + 1)
+                 ms=round(dt_llm, 1), attempts=attempt)
         except Exception:
             pass
         messages.append(response)
@@ -410,7 +376,7 @@ async def run_agent(
         # Emit structured tool events for each tool call
         # v8.3.5: id 单一来源——每个 tool_call 只提取一次 id，
         # 协议 ToolMessage / 计时器 mark_tool_start-end / SSE 三处复用同一 id
-        tc_ids = [_tc_id(tc) for tc in response.tool_calls]
+        tc_ids = [extract_tc_id(tc) for tc in response.tool_calls]
         for idx, tc in enumerate(response.tool_calls):
             tc_dict = _make_tool_call_dict(tc)
             tc_id = tc_ids[idx]
@@ -438,7 +404,7 @@ async def run_agent(
                 q = str((tc_dict.get("args") or {}).get("query", "") or "")
                 reason = check_query_redundant(q, _seen_queries)
                 if reason:
-                    tc_id = tc_ids[idx] if idx < len(tc_ids) else _tc_id(tc)
+                    tc_id = tc_ids[idx] if idx < len(tc_ids) else extract_tc_id(tc)
                     placeholder_results[idx] = ToolMessage(
                         content=f"[DEDUP] 检索角度重复: {reason}。该检索未执行，请更换关键词/角度。",
                         tool_call_id=tc_id, name="citrus_rag_search",
@@ -447,7 +413,7 @@ async def run_agent(
                         f"[AgentRunner] {agent_name} 重复检索角度跳过: {reason}")
                     continue
                 if _turn_rag >= _MAX_RAG_PER_TURN or rag_search_count >= _MAX_RAG_PER_REQUEST:
-                    tc_id = tc_ids[idx] if idx < len(tc_ids) else _tc_id(tc)
+                    tc_id = tc_ids[idx] if idx < len(tc_ids) else extract_tc_id(tc)
                     _why = ("每轮检索上限" if _turn_rag >= _MAX_RAG_PER_TURN
                             else f"请求检索预算 {_MAX_RAG_PER_REQUEST} 已用尽")
                     placeholder_results[idx] = ToolMessage(
@@ -461,7 +427,7 @@ async def run_agent(
                 _seen_queries.append(q)
             elif agent_name == "retrieve-agent" and _tname == "academic_search":
                 if _turn_aca >= _MAX_ACA_PER_TURN:
-                    tc_id = tc_ids[idx] if idx < len(tc_ids) else _tc_id(tc)
+                    tc_id = tc_ids[idx] if idx < len(tc_ids) else extract_tc_id(tc)
                     placeholder_results[idx] = ToolMessage(
                         content="[SEARCH_BUDGET] 每轮学术源检索上限 1 次，该检索未执行。",
                         tool_call_id=tc_id, name="academic_search",
@@ -479,7 +445,7 @@ async def run_agent(
         except Exception as e:
             logger.error(f"[AgentRunner] {agent_name} tool exec failed: {e}")
             for idx, tc in enumerate(response.tool_calls):
-                tc_id = tc_ids[idx] if idx < len(tc_ids) else _tc_id(tc)
+                tc_id = tc_ids[idx] if idx < len(tc_ids) else extract_tc_id(tc)
                 tc_name = getattr(tc, "name", "") or (tc.get("name", "") if isinstance(tc, dict) else "")
                 try:
                     emit_tool_result(tc_name, str(e)[:500], tc_id,
@@ -514,7 +480,7 @@ async def run_agent(
             tc = response.tool_calls[idx] if idx < len(response.tool_calls) else None
             # v8.3.5: 复用 tc_ids 单一来源（此前两次独立提取 → dict 形态 UUID 不匹配，
             # mark_tool_start/end 失配 → 心跳计时器泄漏 → tool_executing 事件风暴）
-            tc_id = tc_ids[idx] if idx < len(tc_ids) else _tc_id(tc)
+            tc_id = tc_ids[idx] if idx < len(tc_ids) else extract_tc_id(tc)
             tc_name = (tc.get("name", "") if isinstance(tc, dict)
                        else getattr(tc, "name", "") if tc else "")
             # AG-8: 子 Agent 内工具结果分档截断（与 supervisor 的 TOOL_RESULT_CAPS 一致）
@@ -597,9 +563,9 @@ async def run_agent(
                 if final_resp is not None and getattr(final_resp, "content", None):
                     result_content = final_resp.content
                 if not result_content:
-                    result_content = _last_content_fallback(messages)
+                    result_content = last_message_content(messages, mode="nonsystem")
             except Exception:
-                result_content = _last_content_fallback(messages)
+                result_content = last_message_content(messages, mode="nonsystem")
 
     total_time = (time.perf_counter() - t_start) * 1000
 

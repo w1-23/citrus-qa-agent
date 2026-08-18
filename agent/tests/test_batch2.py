@@ -44,9 +44,15 @@ def test_ag7_timeout_retry():
                encoding='utf-8').read()
     check("registry 含 asyncio.wait_for", "asyncio.wait_for" in src)
     check("registry 含 [ERR_TIMEOUT]", "[ERR_TIMEOUT]" in src)
-    runner = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'core', 'agent_runner.py'),
-                  encoding='utf-8').read()
-    check("agent_runner 含 3 次重试", "range(3)" in runner and "retry" in runner)
+    loop_src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                 'src', 'core', 'agent_loop.py'), encoding='utf-8').read()
+    runner = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               'src', 'core', 'agent_runner.py'), encoding='utf-8').read()
+    # v8.13-b5a: LLM 重试循环收敛至 agent_loop.invoke_llm_with_retry（range(retries)，默认 3 次），
+    # agent_runner 只保留 label/2s 兜底差异点
+    check("重试循环收敛至 agent_loop", "range(retries)" in loop_src
+          and "retries: int = 3" in loop_src)
+    check("agent_runner 接统一重试", "invoke_llm_with_retry" in runner and "retry" in runner)
     check("agent_runner 含 [AgentError]", "[AgentError]" in runner)
 
     # 模拟超时: 构造一个 sleep 工具, 用极短超时验证 wait_for 生效
@@ -307,32 +313,32 @@ def test_ag18_budget_and_converge():
     check("agent_runner 已移除代码级收敛",
           "提前收敛" not in runner and "RETRIEVE_CONVERGE_MIN_DOCS" not in runner)
 
-    from src.core.agent_runner import _count_unique_docs
+    from src.core.agent_loop import count_unique_docs
     docs = [
         {"doi": "10.1/a"}, {"doi": "10.1/a"}, {"doi": "10.1/b"},
         {"doi": ""}, {"doi": ""},
     ]
-    check("去重计数(DOI+无DOI按条)", _count_unique_docs(docs) == 4, str(_count_unique_docs(docs)))
-    check("全同 DOI → 1", _count_unique_docs([{"doi": "x"}, {"doi": "x"}]) == 1)
-    check("空列表 → 0", _count_unique_docs([]) == 0)
+    check("去重计数(DOI+无DOI按条)", count_unique_docs(docs) == 4, str(count_unique_docs(docs)))
+    check("全同 DOI → 1", count_unique_docs([{"doi": "x"}, {"doi": "x"}]) == 1)
+    check("空列表 → 0", count_unique_docs([]) == 0)
 
 
 def test_ag19_protocol_pairing():
     print("[AG-19] 协议配对不变量（INV-01）")
-    from src.graph.expert_graph import _tc_id
+    from src.core.agent_loop import tc_id
     # dict / 对象 两种形态 id 提取一致且非空
     d_tc = {"id": "call_dict_1", "name": "x", "args": {}}
     o_tc = type("TC", (), {"id": "call_obj_1", "name": "y", "args": {}})()
-    check("dict 形态 id 提取", _tc_id(d_tc) == "call_dict_1")
-    check("对象形态 id 提取", _tc_id(o_tc) == "call_obj_1")
-    check("缺 id dict → 兜底 uuid", len(_tc_id({"name": "z", "args": {}})) == 36)
+    check("dict 形态 id 提取", tc_id(d_tc) == "call_dict_1")
+    check("对象形态 id 提取", tc_id(o_tc) == "call_obj_1")
+    check("缺 id dict → 兜底 uuid", len(tc_id({"name": "z", "args": {}})) == 36)
     # 预算截断/熔断场景: 每个 tool_call 必须有 ToolMessage 占位（配对硬约束）
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             'src', 'graph', 'expert_graph.py'), encoding='utf-8').read()
     check("跳过调用生成占位 ToolMessage", "budget_skip" in src
           and "占位响应" in src or "未执行" in src)
     check("熔断补占位 ToolMessage", "circuit_breaker" in src
-          and "_tc_id(rest)" in src)
+          and "extract_tc_id(rest)" in src)
 
 
 def test_ag20_lock_degrade():
