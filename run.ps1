@@ -6,6 +6,14 @@
 #  然后自动打开浏览器 http://localhost:8000，在页面填写 DeepSeek API Key 即可使用
 # ============================================================
 $ErrorActionPreference = 'Stop'
+# v8.13-b5c: 全局兜底——任何未捕获异常都停下让用户看得见错误，不再闪退
+trap {
+    Write-Host ""
+    Write-Host "  ⚠ 脚本异常中断: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "    请把上方完整输出（特别是 Python Traceback）复制反馈给维护者" -ForegroundColor Yellow
+    Read-Host "    按回车键关闭窗口"
+    exit 2
+}
 $Root = $PSScriptRoot
 $AgentDir = Join-Path $Root 'agent'
 $VenvDir = Join-Path $AgentDir '.venv'
@@ -67,7 +75,7 @@ if (-not (Test-Path $LanceDir)) {
             if ($partNo -eq 1) {
                 Write-Host "    ⚠ 语料下载失败: $($_.Exception.Message)" -ForegroundColor Red
                 Write-Host "      可稍后重试；或手动下载 corpus-v$ReleaseVersion-1.zip 解压到本目录后重新运行" -ForegroundColor Yellow
-                exit 1
+                Read-Host "按回车键关闭窗口"; exit 1
             }
             break
         }
@@ -75,7 +83,7 @@ if (-not (Test-Path $LanceDir)) {
     }
     if (-not (Test-Path $LanceDir)) {
         Write-Host "    ⚠ 分卷解压后未找到 agent/data/lancedb，请检查压缩包内容" -ForegroundColor Red
-        exit 1
+        Read-Host "按回车键关闭窗口"; exit 1
     }
 } else {
     Write-Host "[1/6] 语料数据已就绪" -ForegroundColor Green
@@ -92,25 +100,25 @@ if (-not $py) {
         $py = Find-Python
     } catch {
         Write-Host "    ⚠ winget 安装失败，请手动安装 Python 3.11（https://www.python.org/downloads/，勾选 Add to PATH）后重新运行本脚本" -ForegroundColor Red
-        exit 1
+        Read-Host "按回车键关闭窗口"; exit 1
     }
     if (-not $py) {
         Write-Host "    ⚠ 安装完成但未找到 python，请关闭本窗口重开后再运行" -ForegroundColor Red
-        exit 1
+        Read-Host "按回车键关闭窗口"; exit 1
     }
 }
 Write-Host "[2/6] Python: $py" -ForegroundColor Green
 & $py -c "import sys; assert sys.version_info >= (3, 10), '需要 Python 3.10+'" 2>$null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "    ⚠ Python 版本过低，请安装 Python 3.11+（https://www.python.org/downloads/）" -ForegroundColor Red
-    exit 1
+    Read-Host "按回车键关闭窗口"; exit 1
 }
 
 # ── [3/6] 虚拟环境 ──
 if (-not (Test-Path $VenvPy)) {
     Write-Host "[3/6] 创建虚拟环境（首次一次性）..." -ForegroundColor Cyan
     & $py -m venv $VenvDir
-    if ($LASTEXITCODE -ne 0) { Write-Host "    虚拟环境创建失败" -ForegroundColor Red; exit 1 }
+    if ($LASTEXITCODE -ne 0) { Write-Host "    虚拟环境创建失败" -ForegroundColor Red; Read-Host "按回车键关闭窗口"; exit 1 }
 } else {
     Write-Host "[3/6] 虚拟环境已就绪" -ForegroundColor Green
 }
@@ -120,7 +128,7 @@ $depsOk = & $VenvPy -c "import fastapi, uvicorn, langchain_core, fastembed, qdra
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[4/6] 安装依赖（首次约 5-10 分钟，取决于网络；进度条较长请耐心等待）..." -ForegroundColor Cyan
     & $VenvPip install -r (Join-Path $Root 'requirements.txt')
-    if ($LASTEXITCODE -ne 0) { Write-Host "    依赖安装失败，请检查网络后重试" -ForegroundColor Red; exit 1 }
+    if ($LASTEXITCODE -ne 0) { Write-Host "    依赖安装失败，请检查网络后重试" -ForegroundColor Red; Read-Host "按回车键关闭窗口"; exit 1 }
 } else {
     Write-Host "[4/6] 依赖已就绪" -ForegroundColor Green
 }
@@ -163,12 +171,16 @@ try {
 # ── [6/6] 启动 ──
 Write-Host "[6/6] 启动服务，浏览器将自动打开 http://localhost:8000 ..." -ForegroundColor Cyan
 Write-Host "      （关闭本窗口即停止服务；Key 首次在页面内填写，保存于本机）" -ForegroundColor DarkGray
-try {
-    Start-Process 'http://localhost:8000'
-} catch { }
+try { Start-Process 'http://localhost:8000' } catch { }
 Push-Location $AgentDir
 try {
     & $VenvPy -m uvicorn src.api.main:app --host 127.0.0.1 --port 8000
 } finally {
     Pop-Location
+}
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Host "  ⚠ 服务未能正常启动（上面红色 Traceback 就是具体原因）" -ForegroundColor Red
+    Write-Host "    常见原因：依赖没装全 / 数据或模型没放对位置 / 端口 8000 被占用" -ForegroundColor Yellow
+    Read-Host "    按回车键关闭窗口（可先截图或复制上方错误发我）"
 }
