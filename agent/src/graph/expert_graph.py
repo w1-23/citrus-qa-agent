@@ -606,6 +606,269 @@ def _guard_supervisor_budget(supervisor_budget, messages, *, turn, max_turns,
         return call_messages, None
 
 
+# v8.13-b5a: expert supervisor 循环骨架·本轮工具轮（预算跳过/检索去重/写序并行/装配截断/熔断）
+async def _execute_supervisor_tools(*, turn, response, messages,
+                                    all_main_results, all_web_results,
+                                    tool_names_called, used_queries,
+                                    max_tools_per_turn, session_id,
+                                    tool_call_count, consecutive_failures):
+    """执行本轮 supervisor 工具调用（原 supervisor_node 内联 ~200 行块提取）。
+
+    就地扩写 messages / all_main_results / all_web_results / tool_names_called /
+    used_queries；返回 (tool_call_count, consecutive_failures, forced_final)。
+    """
+    # v8.3.4 每轮工具预算强制 + v8.3.8 同轮至多一个检索子代理
+    pending_calls = list(response.tool_calls)
+    skipped_calls = pending_calls[max_tools_per_turn:]
+    pending_calls = pending_calls[:max_tools_per_turn]
+    extra_retrieves = []
+    if sum(1 for tc in pending_calls
+           if _make_tool_call(tc)["name"] == "call_retrieve_agent") > 1:
+        seen_retrieve = False
+        kept = []
+        for tc in pending_calls:
+            if _make_tool_call(tc)["name"] == "call_retrieve_agent":
+                if not seen_retrieve:
+                    seen_retrieve = True
+                    kept.append(tc)
+                else:
+                    extra_retrieves.append(tc)
+            else:
+                kept.append(tc)
+        pending_calls = kept
+    skipped_calls = skipped_calls + extra_retrieves
+    if extra_retrieves:
+        logger.warning(f"[ExpertGraph:supervisor] turn{turn}: 同轮多个检索子代理，"
+                       f"保留 1 个，推迟 {len(extra_retrieves)} 个")
+    if skipped_calls:
+        skipped_names = []
+        for sk in skipped_calls:
+            sk_dict = _make_tool_call(sk)
+            skipped_names.append(sk_dict["name"] or "?")
+            # 关键: AIMessage 的 tool_calls 必须全部有 ToolMessage 响应，
+            # 否则 OpenAI API 报 400 "must be followed by tool messages"。
+            # 被预算跳过的调用生成占位响应（不执行），id 必须与原始调用一致。
+            messages.append(ToolMessage(
+                content=("[budget] 该工具调用因每轮工具预算限制未执行，"
+                         "如有必要请在下一轮重新发起。"),
+                tool_call_id=extract_tc_id(sk),
+                name="budget_skip",
+            ))
+        logger.warning(
+            f"[ExpertGraph:supervisor] turn{turn}: 工具预算 {max_tools_per_turn} "
+            f"触发，跳过 {len(skipped_calls)} 个调用: {skipped_names}"
+        )
+        try:
+            emit_status("budget_skip",
+                        message=f"每轮工具预算 {max_tools_per_turn}，"
+                                f"{len(skipped_calls)} 个工具调用推迟到下一轮: "
+                                f"{', '.join(skipped_names)}")
+        except Exception:
+            pass
+
+    # v8.10r: 独立工具调用并行执行；call_write_agent 依赖完整检索上下文，保持串行。
+    # ToolMessage 装配按原调用顺序（INV-01 配对语义不变）。
+    async def _exec_pending_tool(tc, pidx):
+        tc_dict = _make_tool_call(tc)
+        tc_id = extract_tc_id(tc)
+        if tc_dict["name"] == "call_write_agent":
+            full_ctx = _build_full_retrieval_context(all_main_results, all_web_results)
+            if full_ctx:
+                tc_dict["args"]["_all_retrieved"] = full_ctx
+        logger.info(
+            f"[ExpertGraph:supervisor] turn{turn}: "
+            f"call {tc_dict['name']}({str(tc_dict['args'])[:80]})"
+        )
+        try:
+            emit_tool_call_start(tc_dict["name"], tc_dict.get("args", {}), tc_id)
+            emit_tool_executing(f"正在执行 {tc_dict['name']}...", tc_dict["name"], tc_id)
+            if tc_dict["name"] in ("call_retrieve_agent", "call_write_agent", "call_analyze_agent"):
+                agent_map_short = {
+                    "call_retrieve_agent": "retrieve-agent",
+                    "call_write_agent": "write-agent",
+                    "call_analyze_agent": "analyze-agent",
+                }
+                aname = agent_map_short.get(tc_dict["name"], "agent")
+                emit_encoded("agent_switch", {
+                    "agent_name": aname,
+                    "task": tc_dict["args"].get("goal", "")[:80],
+                    "turn": turn + 1,
+                })
+        except Exception:
+            pass
+
+        if tc_dict["name"] == "read_local_file":
+            try:
+                mark_tool_start(tc_id, "read_local_file")
+            except Exception:
+                pass
+            from src.tools.readfile import read_local_file
+            from src.tools.registry import run_tool_checked
+            # v8.13 第四批: 统一工具出口（sync 工具经 executor，大文件不阻塞事件循环）
+            content = await run_tool_checked(read_local_file, tc_dict["args"])
+            sub_result = {"agent": "read_local_file", "result": content or "", "artifacts": {}}
+            try:
+                emit_tool_result("read_local_file", str(content)[:100000], tc_id,
+                                 summary=f"读取完成 ({len(str(content))} 字符)")
+            except Exception:
+                pass
+        elif tc_dict["name"] == "pdf_read":
+            try:
+                mark_tool_start(tc_id, "pdf_read")
+            except Exception:
+                pass
+            from src.tools.search import pdf_read as pdf_read_func
+            file_path = tc_dict["args"].get("file_path", "")
+            content, artifact = await asyncio.to_thread(pdf_read_func.func, file_path, False)
+            sub_result = {"agent": "pdf_read", "result": content or "", "artifacts": artifact or {}}
+            try:
+                emit_tool_result("pdf_read", str(content)[:100000], tc_id,
+                                 summary=f"文献提取完成 ({len(str(content))} 字符)")
+            except Exception:
+                pass
+        elif tc_dict["name"] == "write_local_file":
+            try:
+                mark_tool_start(tc_id, "write_local_file")
+            except Exception:
+                pass
+            from src.tools.file_ops import write_local_file
+            from src.tools.registry import run_tool_checked
+            args = tc_dict.get("args", {})
+            content = str(args.get("content", ""))
+            # v8.13 第四批: 统一工具出口（沙箱/超时/offload 一致，去掉手写沙箱分支）
+            save_msg = await run_tool_checked(write_local_file, args)
+            sub_result = {"agent": "write_local_file", "result": save_msg,
+                          "artifacts": {}}
+            try:
+                emit_tool_result("write_local_file", str(sub_result.get("result", ""))[:100000],
+                                 tc_id,
+                                 summary=f"保存完成 ({len(content)} 字符)")
+            except Exception:
+                pass
+        else:
+            sub_result = await _execute_tool_call(
+                tc_dict, tc_id,
+                material_pack=all_main_results,
+                session_id=session_id,
+                seen_queries=used_queries,
+            )
+            try:
+                emit_tool_result(
+                    tc_dict["name"],
+                    sub_result.get("result", "")[:100000],
+                    tc_id,
+                    summary=(
+                        f"子Agent {sub_result.get('agent', '?')} 完成, "
+                        f"{sub_result.get('tools_called', 0)} 次工具调用"
+                    ),
+                )
+            except Exception:
+                pass
+        return pidx, tc, tc_dict, sub_result
+
+    pending_list = [(pidx, tc) for pidx, tc in enumerate(pending_calls)]
+    write_calls = [(p, tc) for p, tc in pending_list
+                   if _make_tool_call(tc)["name"] == "call_write_agent"]
+    other_calls = [(p, tc) for p, tc in pending_list
+                   if _make_tool_call(tc)["name"] != "call_write_agent"]
+    done_list = []
+    if other_calls:
+        done_list.extend(
+            await asyncio.gather(*[_exec_pending_tool(tc, p) for p, tc in other_calls]))
+    for p, tc in write_calls:
+        done_list.append(await _exec_pending_tool(tc, p))
+    done_list.sort(key=lambda x: x[0])
+
+    forced_final = False
+    for pidx, tc, tc_dict, sub_result in done_list:
+        artifacts = sub_result.get("artifacts", {}) or {}
+        all_main_results.extend(artifacts.get("main_results", []))
+        all_web_results.extend(artifacts.get("web_results", []))
+        tool_call_count += 1
+        if tc_dict["name"] not in tool_names_called:
+            tool_names_called.append(tc_dict["name"])
+
+        caps = getattr(settings, "TOOL_RESULT_CAPS", {}) or {}
+        agent_display = sub_result.get("agent", "?")
+        cap = caps.get(agent_display, caps.get("default", 100000))
+        result_text = sub_result.get("result", "") or ""
+        # v8.4.3 工单7: write-agent 超长结果禁止裸截断——提取结构化回执
+        # （"已保存到: path..."），失败时读文件生成摘要
+        if agent_display == "write-agent" and len(result_text) > cap:
+            receipt = _extract_write_receipt(
+                result_text,
+                hint_path=str((tc_dict.get("args") or {}).get("output_path", "")),
+            )
+            if receipt and len(receipt) <= cap:
+                truncated = receipt
+            else:
+                truncated = result_text[:cap] + "\n\n[... 已截断 ...]"
+                logger.warning(
+                    f"[ExpertGraph] truncated {agent_display} result "
+                    f"{len(result_text)} chars > cap {cap}（回执提取失败）")
+        else:
+            truncated = result_text[:cap]
+            if len(result_text) > cap:
+                truncated += "\n\n[... 已截断 ...]"
+                logger.warning(
+                    f"[ExpertGraph] truncated {agent_display} result "
+                    f"{len(result_text)} chars > cap {cap}"
+                )
+        tool_msg_content = f"[{agent_display} result]\n{truncated}"
+        messages.append(ToolMessage(
+            content=tool_msg_content,
+            tool_call_id=extract_tc_id(tc),
+            name=tc_dict["name"],
+        ))
+
+        # v8.3.7 M2: write 类工具执行 → job 升级为 write（断连保活判定依据）
+        if tc_dict["name"] in ("call_write_agent", "write_local_file"):
+            try:
+                from src.core.jobs import update_job
+                from src.core.tracing import get_job_id
+                update_job(get_job_id(), job_type="write")
+            except Exception:
+                pass
+        # v8.3.5 状态栏: 已用检索关键词（模型可见，防重复检索）
+        if tc_dict["name"] == "call_retrieve_agent":
+            q = str((tc_dict.get("args") or {}).get("query", ""))
+            if q:
+                used_queries.append(q[:80])
+        # v8.3.5 轻量熔断: 连续工具失败 ≥3 → 强制收尾
+        # v8.4.5: [ERR_HITL_REJECT] 是权限待授权而非工具失败，不计入熔断计数
+        # v8.4.6 B8: 优先读结构化 status 字段（子代理回执），自由文本仅兜底
+        # v8.13 F5: 兜底统一识别全部 [ERR_*] 标签
+        rtext = sub_result.get("result", "") or ""
+        _st = sub_result.get("status")
+        if _st is not None:
+            is_fail = (_st == "error")
+        else:
+            is_fail = (rtext.startswith("[Error")
+                       or rtext.startswith("[ERR_")
+                       or "[AgentError]" in rtext)
+            if is_fail and "[ERR_HITL_REJECT]" in rtext:
+                is_fail = False  # 权限待授权 ≠ 工具失败
+        consecutive_failures = consecutive_failures + 1 if is_fail else 0
+        if consecutive_failures >= 3:
+            logger.error(f"[ExpertGraph:supervisor] 连续 {consecutive_failures} 次工具失败，"
+                         f"熔断强制收尾")
+            forced_final = True
+            # 为剩余未执行的 tool_calls 补占位响应（INV-01 协议配对，防 400）
+            for rest in pending_calls[pidx + 1:]:
+                messages.append(ToolMessage(
+                    content="[circuit_breaker] 熔断触发，该调用未执行。",
+                    tool_call_id=extract_tc_id(rest), name="circuit_breaker"))
+            try:
+                emit_status("circuit_breaker",
+                            message=f"连续 {consecutive_failures} 次工具失败，"
+                                    f"已停止工具调用")
+            except Exception:
+                pass
+            break
+
+    return tool_call_count, consecutive_failures, forced_final
+
+
 async def supervisor_node(state: AgentState) -> dict:
     query = state.get("query", "")
     format_hint = state.get("format_hint")
@@ -683,7 +946,6 @@ async def supervisor_node(state: AgentState) -> dict:
 
     try:
         for turn in range(SUPERVISOR_MAX_TURNS):
-            forced_final = False
             t_llm = time.perf_counter()
             # v8.13-b5a: 状态栏构建 + 预算前移守卫收敛至 _guard_supervisor_budget
             # （原 _status_with_profile 闭包 + 硬/软阈值检查块，逻辑逐字节一致）
@@ -722,262 +984,18 @@ async def supervisor_node(state: AgentState) -> dict:
             # v8.4.13: 工具轮的中间文本已由流式 on_text 实时上屏（过程可见），
             # 不再聚合后 emit_thinking 状态行截断
 
-            # v8.3.4: 每轮工具预算强制（config supervisor.max_tools_per_turn）——
-            # 防止一轮内串行执行 3-4 个 retrieve-agent（预算由代码裁决，不依赖 LLM 自觉）
-            pending_calls = list(response.tool_calls)
-            skipped_calls = pending_calls[max_tools_per_turn:]
-            pending_calls = pending_calls[:max_tools_per_turn]
-            # v8.3.8: 同轮至多一个检索子代理（其内部已并行多角度检索，
-            # supervisor 一轮发多个 retrieve 是冗余决策——实测 22 工具/轮的主因）
-            extra_retrieves = []
-            if sum(1 for tc in pending_calls
-                   if _make_tool_call(tc)["name"] == "call_retrieve_agent") > 1:
-                seen_retrieve = False
-                kept = []
-                for tc in pending_calls:
-                    if _make_tool_call(tc)["name"] == "call_retrieve_agent":
-                        if not seen_retrieve:
-                            seen_retrieve = True
-                            kept.append(tc)
-                        else:
-                            extra_retrieves.append(tc)
-                    else:
-                        kept.append(tc)
-                pending_calls = kept
-            skipped_calls = skipped_calls + extra_retrieves
-            if extra_retrieves:
-                logger.warning(f"[ExpertGraph:supervisor] turn{turn}: 同轮多个检索子代理，"
-                               f"保留 1 个，推迟 {len(extra_retrieves)} 个")
-            if skipped_calls:
-                skipped_names = []
-                for sk in skipped_calls:
-                    sk_dict = _make_tool_call(sk)
-                    skipped_names.append(sk_dict["name"] or "?")
-                    # 关键: AIMessage 的 tool_calls 必须全部有 ToolMessage 响应，
-                    # 否则 OpenAI API 报 400 "must be followed by tool messages"。
-                    # 被预算跳过的调用生成占位响应（不执行），id 必须与原始调用一致。
-                    messages.append(ToolMessage(
-                        content=("[budget] 该工具调用因每轮工具预算限制未执行，"
-                                 "如有必要请在下一轮重新发起。"),
-                        tool_call_id=extract_tc_id(sk),
-                        name="budget_skip",
-                    ))
-                logger.warning(
-                    f"[ExpertGraph:supervisor] turn{turn}: 工具预算 {max_tools_per_turn} "
-                    f"触发，跳过 {len(skipped_calls)} 个调用: {skipped_names}"
+            # v8.13-b5a: 本轮工具轮（预算跳过/检索去重/写序并行/装配截断/熔断）
+            # 收敛至 _execute_supervisor_tools（原内联 ~200 行块，逻辑逐字节一致）
+            tool_call_count, consecutive_failures, forced_final = (
+                await _execute_supervisor_tools(
+                    turn=turn, response=response, messages=messages,
+                    all_main_results=all_main_results, all_web_results=all_web_results,
+                    tool_names_called=tool_names_called, used_queries=used_queries,
+                    max_tools_per_turn=max_tools_per_turn, session_id=session_id,
+                    tool_call_count=tool_call_count,
+                    consecutive_failures=consecutive_failures,
                 )
-                try:
-                    emit_status("budget_skip",
-                                message=f"每轮工具预算 {max_tools_per_turn}，"
-                                        f"{len(skipped_calls)} 个工具调用推迟到下一轮: "
-                                        f"{', '.join(skipped_names)}")
-                except Exception:
-                    pass
-
-            # v8.10r: 独立工具调用并行执行——call_retrieve_agent / call_analyze_agent /
-            # read_local_file / pdf_read / write_local_file 互相独立，asyncio.gather 并行
-            # （工具轮延迟减半）；call_write_agent 依赖完整检索上下文，保持串行。
-            # ToolMessage 装配按原调用顺序（INV-01 配对语义不变）。
-            async def _exec_pending_tool(tc, pidx):
-                tc_dict = _make_tool_call(tc)
-                tc_id = extract_tc_id(tc)
-                if tc_dict["name"] == "call_write_agent":
-                    full_ctx = _build_full_retrieval_context(all_main_results, all_web_results)
-                    if full_ctx:
-                        tc_dict["args"]["_all_retrieved"] = full_ctx
-                logger.info(
-                    f"[ExpertGraph:supervisor] turn{turn}: "
-                    f"call {tc_dict['name']}({str(tc_dict['args'])[:80]})"
-                )
-                try:
-                    emit_tool_call_start(tc_dict["name"], tc_dict.get("args", {}), tc_id)
-                    emit_tool_executing(f"正在执行 {tc_dict['name']}...", tc_dict["name"], tc_id)
-                    if tc_dict["name"] in ("call_retrieve_agent", "call_write_agent", "call_analyze_agent"):
-                        agent_map_short = {
-                            "call_retrieve_agent": "retrieve-agent",
-                            "call_write_agent": "write-agent",
-                            "call_analyze_agent": "analyze-agent",
-                        }
-                        aname = agent_map_short.get(tc_dict["name"], "agent")
-                        emit_encoded("agent_switch", {
-                            "agent_name": aname,
-                            "task": tc_dict["args"].get("goal", "")[:80],
-                            "turn": turn + 1,
-                        })
-                except Exception:
-                    pass
-
-                if tc_dict["name"] == "read_local_file":
-                    try:
-                        mark_tool_start(tc_id, "read_local_file")
-                    except Exception:
-                        pass
-                    from src.tools.readfile import read_local_file
-                    from src.tools.registry import run_tool_checked
-                    # v8.13 第四批: 统一工具出口（sync 工具经 executor，大文件不阻塞事件循环）
-                    content = await run_tool_checked(read_local_file, tc_dict["args"])
-                    sub_result = {"agent": "read_local_file", "result": content or "", "artifacts": {}}
-                    try:
-                        emit_tool_result("read_local_file", str(content)[:100000], tc_id,
-                                         summary=f"读取完成 ({len(str(content))} 字符)")
-                    except Exception:
-                        pass
-                elif tc_dict["name"] == "pdf_read":
-                    try:
-                        mark_tool_start(tc_id, "pdf_read")
-                    except Exception:
-                        pass
-                    from src.tools.search import pdf_read as pdf_read_func
-                    file_path = tc_dict["args"].get("file_path", "")
-                    content, artifact = await asyncio.to_thread(pdf_read_func.func, file_path, False)
-                    sub_result = {"agent": "pdf_read", "result": content or "", "artifacts": artifact or {}}
-                    try:
-                        emit_tool_result("pdf_read", str(content)[:100000], tc_id,
-                                         summary=f"文献提取完成 ({len(str(content))} 字符)")
-                    except Exception:
-                        pass
-                elif tc_dict["name"] == "write_local_file":
-                    try:
-                        mark_tool_start(tc_id, "write_local_file")
-                    except Exception:
-                        pass
-                    from src.tools.file_ops import write_local_file
-                    from src.tools.registry import run_tool_checked
-                    args = tc_dict.get("args", {})
-                    content = str(args.get("content", ""))
-                    # v8.13 第四批: 统一工具出口（沙箱/超时/offload 一致，去掉手写沙箱分支）
-                    save_msg = await run_tool_checked(write_local_file, args)
-                    sub_result = {"agent": "write_local_file", "result": save_msg,
-                                  "artifacts": {}}
-                    try:
-                        emit_tool_result("write_local_file", str(sub_result.get("result", ""))[:100000],
-                                         tc_id,
-                                         summary=f"保存完成 ({len(content)} 字符)")
-                    except Exception:
-                        pass
-                else:
-                    sub_result = await _execute_tool_call(
-                        tc_dict, tc_id,
-                        material_pack=all_main_results,
-                        session_id=state.get("session_id", ""),
-                        seen_queries=used_queries,
-                    )
-                    try:
-                        emit_tool_result(
-                            tc_dict["name"],
-                            sub_result.get("result", "")[:100000],
-                            tc_id,
-                            summary=(
-                                f"子Agent {sub_result.get('agent', '?')} 完成, "
-                                f"{sub_result.get('tools_called', 0)} 次工具调用"
-                            ),
-                        )
-                    except Exception:
-                        pass
-                return pidx, tc, tc_dict, sub_result
-
-            pending_list = [(pidx, tc) for pidx, tc in enumerate(pending_calls)]
-            write_calls = [(p, tc) for p, tc in pending_list
-                           if _make_tool_call(tc)["name"] == "call_write_agent"]
-            other_calls = [(p, tc) for p, tc in pending_list
-                           if _make_tool_call(tc)["name"] != "call_write_agent"]
-            done_list = []
-            if other_calls:
-                done_list.extend(
-                    await asyncio.gather(*[_exec_pending_tool(tc, p) for p, tc in other_calls]))
-            for p, tc in write_calls:
-                done_list.append(await _exec_pending_tool(tc, p))
-            done_list.sort(key=lambda x: x[0])
-
-            for pidx, tc, tc_dict, sub_result in done_list:
-
-                artifacts = sub_result.get("artifacts", {}) or {}
-                all_main_results.extend(artifacts.get("main_results", []))
-                all_web_results.extend(artifacts.get("web_results", []))
-                tool_call_count += 1
-                if tc_dict["name"] not in tool_names_called:
-                    tool_names_called.append(tc_dict["name"])
-
-                caps = getattr(settings, "TOOL_RESULT_CAPS", {}) or {}
-                agent_display = sub_result.get("agent", "?")
-                cap = caps.get(agent_display, caps.get("default", 100000))
-                result_text = sub_result.get("result", "") or ""
-                # v8.4.3 工单7: write-agent 超长结果禁止裸截断——提取结构化回执
-                # （"已保存到: path..."），失败时读文件生成摘要
-                if agent_display == "write-agent" and len(result_text) > cap:
-                    receipt = _extract_write_receipt(
-                        result_text,
-                        hint_path=str((tc_dict.get("args") or {}).get("output_path", "")),
-                    )
-                    if receipt and len(receipt) <= cap:
-                        truncated = receipt
-                    else:
-                        truncated = result_text[:cap] + "\n\n[... 已截断 ...]"
-                        logger.warning(
-                            f"[ExpertGraph] truncated {agent_display} result "
-                            f"{len(result_text)} chars > cap {cap}（回执提取失败）")
-                else:
-                    truncated = result_text[:cap]
-                    if len(result_text) > cap:
-                        truncated += "\n\n[... 已截断 ...]"
-                        logger.warning(
-                            f"[ExpertGraph] truncated {agent_display} result "
-                            f"{len(result_text)} chars > cap {cap}"
-                        )
-                tool_msg_content = f"[{agent_display} result]\n{truncated}"
-                messages.append(ToolMessage(
-                    content=tool_msg_content,
-                    tool_call_id=extract_tc_id(tc),
-                    name=tc_dict["name"],
-                ))
-
-                # v8.3.7 M2: write 类工具执行 → job 升级为 write（断连保活判定依据）
-                if tc_dict["name"] in ("call_write_agent", "write_local_file"):
-                    try:
-                        from src.core.jobs import update_job
-                        from src.core.tracing import get_job_id
-                        update_job(get_job_id(), job_type="write")
-                    except Exception:
-                        pass
-                # v8.3.5 状态栏: 已用检索关键词（模型可见，防重复检索）
-                if tc_dict["name"] == "call_retrieve_agent":
-                    q = str((tc_dict.get("args") or {}).get("query", ""))
-                    if q:
-                        used_queries.append(q[:80])
-                # v8.3.5 轻量熔断 (规范 1.2.2 Correct): 连续工具失败 ≥3 → 强制收尾
-                # v8.4.5: [ERR_HITL_REJECT] 是权限待授权而非工具失败，不计入熔断计数
-                # v8.4.6 B8: 优先读结构化 status 字段（子代理回执），自由文本仅兜底
-                # v8.13 F5: 兜底统一识别全部 [ERR_*] 标签——此前只认 [Error 前缀+
-                # ERR_TIMEOUT/ERR_NETWORK/AgentError，registry 主标签（FILE_NOT_FOUND/
-                # PERMISSION/PARSE/UNKNOWN_TOOL）连续失败永不触发熔断
-                rtext = sub_result.get("result", "") or ""
-                _st = sub_result.get("status")
-                if _st is not None:
-                    is_fail = (_st == "error")
-                else:
-                    is_fail = (rtext.startswith("[Error")
-                               or rtext.startswith("[ERR_")
-                               or "[AgentError]" in rtext)
-                    if is_fail and "[ERR_HITL_REJECT]" in rtext:
-                        is_fail = False  # 权限待授权 ≠ 工具失败
-                consecutive_failures = consecutive_failures + 1 if is_fail else 0
-                if consecutive_failures >= 3:
-                    logger.error(f"[ExpertGraph:supervisor] 连续 {consecutive_failures} 次工具失败，"
-                                 f"熔断强制收尾")
-                    forced_final = True
-                    # 为剩余未执行的 tool_calls 补占位响应（INV-01 协议配对，防 400）
-                    for rest in pending_calls[pidx + 1:]:
-                        messages.append(ToolMessage(
-                            content="[circuit_breaker] 熔断触发，该调用未执行。",
-                            tool_call_id=extract_tc_id(rest), name="circuit_breaker"))
-                    try:
-                        emit_status("circuit_breaker",
-                                    message=f"连续 {consecutive_failures} 次工具失败，"
-                                            f"已停止工具调用")
-                    except Exception:
-                        pass
-                    break
-
+            )
             if forced_final:
                 # v8.4.2 根治: 统一收尾（临时列表不入史 + 未绑工具 + 详尽 prompt）
                 answer = await _force_final_answer(llm_base, messages, "breaker")
