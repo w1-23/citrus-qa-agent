@@ -869,6 +869,150 @@ async def _execute_supervisor_tools(*, turn, response, messages,
     return tool_call_count, consecutive_failures, forced_final
 
 
+# v8.13-b5a: expert supervisor 循环骨架·收尾/引用装配 + 诊断日志（纯组装，不回写循环态）
+def _assemble_supervisor_answer(*, answer, all_main_results, all_web_results,
+                                tool_call_count, tool_names_called, session_id,
+                                state, messages, trace_start_index, t0) -> dict:
+    """supervisor 循环后块：DOI 去重装配 cited_refs / 历史证据 / 引用校验 / 诊断日志。"""
+    elapsed = (time.perf_counter() - t0) * 1000
+
+    deduped_main = dedup_by_doi(all_main_results)
+
+    cited_refs = []
+    for i, r in enumerate(deduped_main[:20]):
+        cited_refs.append({
+            "ref_id": i + 1,
+            "type": "main",
+            "doi": r.get("doi", "N/A"),
+            "title": r.get("title", r.get("name", "Untitled")),
+            "section_name": r.get("section_name", ""),
+            "text_preview": (r.get("abstract") or r.get("snippet") or "")[:300],
+            "score": r.get("score", r.get("rerank_score", 0)) or 0,
+            "year": r.get("year", ""),
+            "authors": r.get("authors", ""),
+        })
+    for i, wr in enumerate(all_web_results[:10]):
+        cited_refs.append({
+            "ref_id": f"W{i+1}",
+            "type": "web",
+            "url": wr.get("url", wr.get("link", "")),
+            "title": wr.get("title", wr.get("name", "Untitled")),
+            "text_preview": (wr.get("snippet") or wr.get("content") or "")[:300],
+            "score": 0,
+        })
+
+    references_data = {
+        "cited": cited_refs,
+        "uncited": [],
+        "total": len(cited_refs),
+    }
+
+    # v8.4.6 F2: 历史证据引用进侧栏——回答基于 [历史检索证据] 作答时，
+    # 侧栏展示历史证据条目（ref_id=H1..Hn），引用面板不再"消失"
+    try:
+        from src.session.manager import session_manager
+        historical = session_manager.get_evidence_refs(session_id, limit=20)
+        if historical:
+            references_data["historical"] = historical
+            references_data["total"] = len(cited_refs) + len(historical)
+    except Exception:
+        pass
+
+    if answer:
+        try:
+            emit_status("step_done", step_id="retrieve")
+            emit_status("step_done", step_id="supervise")
+            emit_status("step_active", step_id="answer")
+        except Exception:
+            pass
+        # v8.4.13: 回答已由流式逐 token 上屏（text 事件），
+        # 此处不再模拟打字机推送（原 8 字符/12ms 循环移除）
+        try:
+            emit_status("step_done", step_id="answer")
+        except Exception:
+            pass
+
+    logger.info(
+        f"[ExpertGraph:supervisor] done: {len(answer)}c, "
+        f"{tool_call_count} tool calls, "
+        f"{len(deduped_main)} main + {len(all_web_results)} web results, "
+        f"{elapsed:.0f}ms"
+    )
+
+    # v8.3.7 M3: 假完成检测——回答含 [n] 引用但无检索支撑 → 标记（不强制改写）
+    # v8.4.3 工单5: 证据感知——引用支撑 = 本轮检索 ∪ 会话证据库 ∪ LTM
+    _evidence_count = 0
+    _ltm_chars = 0
+    try:
+        from src.session.manager import session_manager
+        _evidence_count = session_manager.count_evidence_items(session_id)
+    except Exception:
+        pass
+    try:
+        _ltm_chars = len(state.get("long_term_memory") or "")
+    except Exception:
+        pass
+    citation_info = check_citation_support(
+        answer, all_main_results,
+        "call_retrieve_agent" in tool_names_called,
+        evidence_count=_evidence_count,
+        ltm_chars=_ltm_chars)
+
+    # v8.4.1: 业务日志——supervisor 完成（回答长度/工具/证据量，排查"回答太短"类问题）
+    # v8.4.6: 附加 evidence_avail/cited 指标（输出画像与后续评估的度量基础）
+    # v8.13: citation_info 计算上移——此前 blog 引用后置变量恒 NameError，
+    # 被 except 吞掉导致 supervisor_done 事件从未成功写出
+    try:
+        from src.core.business_logger import blog
+        blog("supervisor_done", answer_chars=len(answer),
+             tools=tool_call_count,
+             tool_names=",".join(tool_names_called[:8]) or "-",
+             main_results=len(deduped_main), web_results=len(all_web_results),
+             evidence_avail=len(deduped_main),
+             cited=citation_info.get("citation_count", 0),
+             ms=int(elapsed))
+    except Exception:
+        pass
+    # v8.13: 结构化诊断事件（supervisor 完成快照）
+    try:
+        from src.core.diag import diag
+        diag("supervisor_done", answer_chars=len(answer),
+             tools=tool_call_count, ms=int(elapsed),
+             cited=citation_info.get("citation_count", 0),
+             unsupported=citation_info.get("citation_unsupported", False))
+    except Exception:
+        pass
+    if citation_info["citation_unsupported"]:
+        logger.warning(
+            f"[ExpertGraph:supervisor] 假完成风险: 回答含 {citation_info['citation_count']} 个引用"
+            f"但无检索支撑 (retrieval_tools={tool_names_called}, "
+            f"evidence={_evidence_count}, ltm={_ltm_chars})")
+    else:
+        logger.debug(
+            f"[ExpertGraph:supervisor] citations backed: "
+            f"evidence={_evidence_count} ltm={_ltm_chars}")
+    if citation_info["citation_mismatch"]:
+        logger.warning(
+            f"[ExpertGraph:supervisor] 引用异常: {citation_info['citation_count']} 个引用 > "
+            f"{citation_info['retrieval_count']} 篇检索文献 + 2")
+
+    return {
+        "answer": answer,
+        "gen_time_ms": elapsed,
+        "main_results": deduped_main[:20],
+        "web_results": all_web_results[:10],
+        "references_data": references_data,
+        "tools_called": tool_names_called,
+        "citation_info": citation_info,
+        "turn_trace": messages[trace_start_index:],
+        "_trace": {
+            "node": "supervisor",
+            "elapsed_ms": elapsed,
+            "summary": f"{len(answer)} chars, {tool_call_count} tools",
+        },
+    }
+
+
 async def supervisor_node(state: AgentState) -> dict:
     query = state.get("query", "")
     format_hint = state.get("format_hint")
@@ -1022,144 +1166,12 @@ async def supervisor_node(state: AgentState) -> dict:
         logger.error(f"[ExpertGraph:supervisor] error: {e}")
         answer = f"An error occurred: {e}"
 
-    elapsed = (time.perf_counter() - t0) * 1000
-
-    deduped_main = dedup_by_doi(all_main_results)
-
-    cited_refs = []
-    for i, r in enumerate(deduped_main[:20]):
-        cited_refs.append({
-            "ref_id": i + 1,
-            "type": "main",
-            "doi": r.get("doi", "N/A"),
-            "title": r.get("title", r.get("name", "Untitled")),
-            "section_name": r.get("section_name", ""),
-            "text_preview": (r.get("abstract") or r.get("snippet") or "")[:300],
-            "score": r.get("score", r.get("rerank_score", 0)) or 0,
-            "year": r.get("year", ""),
-            "authors": r.get("authors", ""),
-        })
-    for i, wr in enumerate(all_web_results[:10]):
-        cited_refs.append({
-            "ref_id": f"W{i+1}",
-            "type": "web",
-            "url": wr.get("url", wr.get("link", "")),
-            "title": wr.get("title", wr.get("name", "Untitled")),
-            "text_preview": (wr.get("snippet") or wr.get("content") or "")[:300],
-            "score": 0,
-        })
-
-    references_data = {
-        "cited": cited_refs,
-        "uncited": [],
-        "total": len(cited_refs),
-    }
-
-    # v8.4.6 F2: 历史证据引用进侧栏——回答基于 [历史检索证据] 作答时，
-    # 侧栏展示历史证据条目（ref_id=H1..Hn），引用面板不再"消失"
-    try:
-        from src.session.manager import session_manager
-        historical = session_manager.get_evidence_refs(session_id, limit=20)
-        if historical:
-            references_data["historical"] = historical
-            references_data["total"] = len(cited_refs) + len(historical)
-    except Exception:
-        pass
-
-    if answer:
-        try:
-            emit_status("step_done", step_id="retrieve")
-            emit_status("step_done", step_id="supervise")
-            emit_status("step_active", step_id="answer")
-        except Exception:
-            pass
-        # v8.4.13: 回答已由流式逐 token 上屏（text 事件），
-        # 此处不再模拟打字机推送（原 8 字符/12ms 循环移除）
-        try:
-            emit_status("step_done", step_id="answer")
-        except Exception:
-            pass
-
-    logger.info(
-        f"[ExpertGraph:supervisor] done: {len(answer)}c, "
-        f"{tool_call_count} tool calls, "
-        f"{len(deduped_main)} main + {len(all_web_results)} web results, "
-        f"{elapsed:.0f}ms"
+    return _assemble_supervisor_answer(
+        answer=answer, all_main_results=all_main_results, all_web_results=all_web_results,
+        tool_call_count=tool_call_count, tool_names_called=tool_names_called,
+        session_id=session_id, state=state, messages=messages,
+        trace_start_index=trace_start_index, t0=t0,
     )
-
-    # v8.3.7 M3: 假完成检测——回答含 [n] 引用但无检索支撑 → 标记（不强制改写）
-    # v8.4.3 工单5: 证据感知——引用支撑 = 本轮检索 ∪ 会话证据库 ∪ LTM
-    _evidence_count = 0
-    _ltm_chars = 0
-    try:
-        from src.session.manager import session_manager
-        _evidence_count = session_manager.count_evidence_items(session_id)
-    except Exception:
-        pass
-    try:
-        _ltm_chars = len(state.get("long_term_memory") or "")
-    except Exception:
-        pass
-    citation_info = check_citation_support(
-        answer, all_main_results,
-        "call_retrieve_agent" in tool_names_called,
-        evidence_count=_evidence_count,
-        ltm_chars=_ltm_chars)
-
-    # v8.4.1: 业务日志——supervisor 完成（回答长度/工具/证据量，排查"回答太短"类问题）
-    # v8.4.6: 附加 evidence_avail/cited 指标（输出画像与后续评估的度量基础）
-    # v8.13: citation_info 计算上移——此前 blog 引用后置变量恒 NameError，
-    # 被 except 吞掉导致 supervisor_done 事件从未成功写出
-    try:
-        from src.core.business_logger import blog
-        blog("supervisor_done", answer_chars=len(answer),
-             tools=tool_call_count,
-             tool_names=",".join(tool_names_called[:8]) or "-",
-             main_results=len(deduped_main), web_results=len(all_web_results),
-             evidence_avail=len(deduped_main),
-             cited=citation_info.get("citation_count", 0),
-             ms=int(elapsed))
-    except Exception:
-        pass
-    # v8.13: 结构化诊断事件（supervisor 完成快照）
-    try:
-        from src.core.diag import diag
-        diag("supervisor_done", answer_chars=len(answer),
-             tools=tool_call_count, ms=int(elapsed),
-             cited=citation_info.get("citation_count", 0),
-             unsupported=citation_info.get("citation_unsupported", False))
-    except Exception:
-        pass
-    if citation_info["citation_unsupported"]:
-        logger.warning(
-            f"[ExpertGraph:supervisor] 假完成风险: 回答含 {citation_info['citation_count']} 个引用"
-            f"但无检索支撑 (retrieval_tools={tool_names_called}, "
-            f"evidence={_evidence_count}, ltm={_ltm_chars})")
-    else:
-        logger.debug(
-            f"[ExpertGraph:supervisor] citations backed: "
-            f"evidence={_evidence_count} ltm={_ltm_chars}")
-    if citation_info["citation_mismatch"]:
-        logger.warning(
-            f"[ExpertGraph:supervisor] 引用异常: {citation_info['citation_count']} 个引用 > "
-            f"{citation_info['retrieval_count']} 篇检索文献 + 2")
-
-    return {
-        "answer": answer,
-        "gen_time_ms": elapsed,
-        "main_results": deduped_main[:20],
-        "web_results": all_web_results[:10],
-        "references_data": references_data,
-        "tools_called": tool_names_called,
-        "citation_info": citation_info,
-        # v8.3.8: 本轮完整轨迹（save 节点持久化，含 tool_calls/ToolMessage 配对）
-        "turn_trace": messages[trace_start_index:],
-        "_trace": {
-            "node": "supervisor",
-            "elapsed_ms": elapsed,
-            "summary": f"{len(answer)} chars, {tool_call_count} tools",
-        },
-    }
 
 
 async def expert_save_node(state: AgentState) -> dict:
