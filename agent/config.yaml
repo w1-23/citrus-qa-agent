@@ -2,6 +2,7 @@
 # 优先级: 环境变量 > YAML > pydantic-settings 默认值
 
 retrieval:
+  backend: lancedb            # v8.13-b5b: 全项目数据源重定向——lancedb 统一承载新旧数据包（无锁/热更新）
   top_k_vector: 40          # 向量检索每批取回数量
   top_k_bm25: 40            # BM25 检索取回数量
   top_k_final: 10           # Rerank 后最终保留数量
