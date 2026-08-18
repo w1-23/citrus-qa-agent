@@ -216,6 +216,9 @@ class MultiBatchRetriever:
             if not batch_dir.is_dir(): continue
             chunks_path = batch_dir / "chunks" / "chunks.jsonl"
             if not chunks_path.exists():
+                # v8.13-b5b: 兼容新数据包（pipeline1 系）——chunks.jsonl 直接位于批次根目录
+                chunks_path = batch_dir / "chunks.jsonl"
+            if not chunks_path.exists():
                 continue
             batch_name = batch_dir.name
             # 公共：chunks.jsonl → global_chunks（两种后端共用；Qdrant 锁冲突时仅此处可用）
