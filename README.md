@@ -112,6 +112,16 @@ python prepare_models.py        # 预下载模型（向量编码 + 重排，首�
 
 ### 启动
 
+现有 conda 环境（项目运行时环境 `rag-agent`，Python 3.11）：
+
+```bash
+conda activate rag-agent
+cd agent
+python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+或使用项目自带虚拟环境：
+
 ```bash
 cd agent
 uvicorn src.api.main:app --host 0.0.0.0 --port 8000
@@ -168,7 +178,7 @@ citrus-qa-agent/
 │   │   ├── retrieval/          # 向量检索 + 重排（LanceDB/BM25/混合）
 │   │   ├── prompts/            # 全部提示词（静态前缀 + 动态块）
 │   │   └── guardrails/         # 记忆 / 提示注入消毒 / 日志脱敏
-│   ├── tests/                  # 115 个回归测试
+│   ├── tests/                  # 150 个回归测试
 │   └── workspace/output/       # 写作成果输出目录（运行时生成）
 ├── requirements.txt
 └── README.md
@@ -180,9 +190,9 @@ citrus-qa-agent/
 
 `-full-data` 完整包内置**示例语料**（公开下载的科研文献，已编码为向量）——开箱即可测试检索、引用、综述写作全链路。示例语料位于 `agent/data/`，可随时删除或替换。
 
-### 向量后端（v8.9）
+### 向量后端（v8.13-b5b 起默认 lancedb）
 
-默认 `auto`：检测到 `data/lancedb/`（嵌入式向量库：百万级、热更新、无锁）则自动使用，否则回退 Qdrant local（旧数据包兼容）。手动指定可在 `config.yaml` 设置 `retrieval.backend: qdrant|lancedb|auto`。
+`config.yaml` 的 `retrieval.backend` 已显式设为 `lancedb`——LanceDB 嵌入式向量库（百万级、热更新、无锁）统一承载新旧数据包。可手动改为 `qdrant`（旧后端兼容）或 `auto`（检测到 `data/lancedb/` 有表则用 lancedb，否则回退 Qdrant local）。
 
 > v8.9 已内置 LanceDB 语料（示例语料包即 LanceDB 格式），无需再迁移；历史 Qdrant 数据迁移脚本已随 v8.10 清理（见 git 历史 `agent/migrate_qdrant_to_lancedb.py`）。
 
@@ -201,12 +211,26 @@ python ingest.py --backend lancedb     # 显式指定后端（默认 auto）
 
 ```
 agent/data/
-└── 批次名/                # 任意命名，自动被发现
-    ├── chunks/chunks.jsonl   # 分块文本
-    ├── qdrant_data/          # Qdrant 向量库（旧后端）
-    └── metadata.json
-agent/data/lancedb/           # LanceDB 向量库（新后端，表名=批次名）
+├── 批次名/                # 任意命名，自动被发现
+│   ├── chunks/chunks.jsonl   # 旧数据包：分块文本在 chunks/ 子目录
+│   ├── chunks.jsonl          # 新数据包（pipeline1 系）：分块文本在批次根目录
+│   ├── qdrant_data/          # Qdrant 向量库（打包产物，建 LanceDB 表时复用）
+│   └── metadata.json
+└── lancedb/              # LanceDB 向量库（检索数据源，表名=批次名）
 ```
+
+### 新数据包（pipeline 系预分块文献包）入库
+
+把新包放进 `agent/data/批次名/`（根目录 `chunks.jsonl` + `qdrant_data/` + `metadata.json`），用 `reindex_lance.py` 建成 LanceDB 表——**优先复用包内 qdrant 向量（分钟级），缺口自动小批量补嵌入（防内存爆），建表后重启服务即检索到新批次**：
+
+```bash
+cd agent
+rag-agent\python.exe reindex_lance.py --batch 批次名              # 单个包
+rag-agent\python.exe reindex_lance.py --batch 1-1200 --no-qdrant  # qdrant 不可用时全量重嵌入
+rag-agent\python.exe reindex_lance.py --all                       # 重建全部
+```
+
+> 提示：新包入库与重索引期间请先停止服务（模型双份会吃满内存），完成后可用 `e2e_check.py`（HTTP 端到端检查：health 轮询 + SSE 解析答案/引用）做多查询验证。
 
 - `data/` 属于你的私有知识库：**不进 Git 仓库、不进主包**（`pack_release.ps1` 与 `.gitignore` 均已排除；公开示例语料经 `corpus` 附件分发——`run.ps1` 自动下载，或 `-full-data` 打包附带）
 - 检索阈值可在 `agent/config.yaml` 的 `retrieval:` 段调整（相似度下限、动态阈值比例等）
