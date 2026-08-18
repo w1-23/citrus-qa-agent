@@ -52,22 +52,29 @@ $CorpusZip = Join-Path $Root 'corpus.zip'
 $DataDir = Join-Path $AgentDir 'data'
 $LanceDir = Join-Path $DataDir 'lancedb'
 if (-not (Test-Path $LanceDir)) {
-    Write-Host "[1/6] 未检测到本地语料库，正在从 GitHub Releases 自动下载（约 1.2GB，首次约 10-30 分钟，取决于网络）..." -ForegroundColor Cyan
+    Write-Host "[1/6] 未检测到本地语料库，正在从 GitHub Releases 自动下载语料分卷（约 2.2GB，首次约 20-40 分钟，取决于网络）..." -ForegroundColor Cyan
     $ghBase = if ($env:GH_MIRROR) { $env:GH_MIRROR } else { 'https://github.com' }
-    $url = "$ghBase/$Repo/releases/download/v$ReleaseVersion/corpus-$ReleaseVersion.zip"
-    Write-Host "      下载地址: $url" -ForegroundColor DarkGray
-    try {
-        Invoke-WebRequest -Uri $url -OutFile $CorpusZip -UseBasicParsing
-        Write-Host "      下载完成，正在解压..." -ForegroundColor Cyan
-        Expand-Archive -Path $CorpusZip -DestinationPath $Root -Force
-        Remove-Item $CorpusZip -Force
-        if (-not (Test-Path $LanceDir)) {
-            Write-Host "    ⚠ 压缩包解压后未找到 agent/data/lancedb，请检查压缩包内容" -ForegroundColor Red
-            exit 1
+    $partNo = 1
+    while ($true) {
+        $url = "$ghBase/$Repo/releases/download/v$ReleaseVersion/corpus-$ReleaseVersion-$partNo.zip"
+        Write-Host "      分卷 ${partNo}: $url" -ForegroundColor DarkGray
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $CorpusZip -UseBasicParsing
+            Write-Host "      分卷 $partNo 下载完成，解压合并中..." -ForegroundColor Cyan
+            Expand-Archive -Path $CorpusZip -DestinationPath $Root -Force
+            Remove-Item $CorpusZip -Force
+        } catch {
+            if ($partNo -eq 1) {
+                Write-Host "    ⚠ 语料下载失败: $($_.Exception.Message)" -ForegroundColor Red
+                Write-Host "      可稍后重试；或手动下载 corpus-v$ReleaseVersion-1.zip 解压到本目录后重新运行" -ForegroundColor Yellow
+                exit 1
+            }
+            break
         }
-    } catch {
-        Write-Host "    ⚠ 语料下载失败: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host "      可稍后重试；或手动下载 corpus-$ReleaseVersion.zip 解压到本目录后重新运行" -ForegroundColor Yellow
+        $partNo++
+    }
+    if (-not (Test-Path $LanceDir)) {
+        Write-Host "    ⚠ 分卷解压后未找到 agent/data/lancedb，请检查压缩包内容" -ForegroundColor Red
         exit 1
     }
 } else {

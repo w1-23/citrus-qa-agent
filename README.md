@@ -37,9 +37,11 @@
 | 包 | 大小 | 说明 |
 |---|---|---|
 | `citrus-qa-agent-v8.13.0.zip` | ~2.3 MB | **必下**：代码 + 一键脚本 |
-| `corpus-v8.13.0.zip` | ~1.3 GB | **无需手动下载**：公开文献 7 批次（老 5 批 + 新增 xrz / 1-1200，LanceDB 向量库）。`run.ps1` 首次运行自动从 Releases 下载并解压到 `agent/data/`，之后秒级跳过 |
+| `corpus-v8.13.0-1.zip` | ~940 MB | 语料分卷 1/3：xrz、dxy-1、1-50、51-101 |
+| `corpus-v8.13.0-2.zip` | ~800 MB | 语料分卷 2/3：1-1200、7.20 |
+| `corpus-v8.13.0-3.zip` | ~510 MB | 语料分卷 3/3：720600 |
 
-> 国内下载加速：下载语料前先设置环境变量 `GH_MIRROR`（如 `https://ghproxy.net/`），`run.ps1` 会自动给下载地址加前缀；也可手动下载 `corpus-v8.13.0.zip` 解压到项目根目录后直接运行。
+> 语料 = **公开文献 7 批次**（老 5 批 + 新增 xrz / 1-1200，LanceDB 向量库 + chunks.jsonl），因单附件超 GitHub 2GiB 上限拆为 3 个分卷。**无需手动下载**：`run.ps1` 首次运行自动按序号下载**全部分卷**并解压合并到 `agent/data/`，之后秒级跳过；也可手动下载后全部解压到项目根目录（自动合并）直接运行。
 
 **模型自动安装**：向量编码（multilingual-e5-large）与重排（bge-reranker-v2-m3）模型不打包（重排模型单文件超 GitHub 2GB 上限）——首次运行 `run.ps1` 自动经 **HuggingFace 国内镜像（hf-mirror.com）** 下载，约 5-15 分钟，一次完成后秒级启动；也可手动运行 `python prepare_models.py`（`--skip-reranker` 可跳过重排模型）。
 

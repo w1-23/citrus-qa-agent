@@ -33,31 +33,61 @@ if ($CorpusOnly) {
         Write-Host "⚠ agent/data 不存在，无法打包语料" -ForegroundColor Red
         exit 1
     }
-    Write-Host "打包语料附件 corpus-v$Version.zip (LanceDB + chunks.jsonl) ..." -ForegroundColor Yellow
-    New-Item -ItemType Directory -Force -Path (Join-Path $Stage 'agent') | Out-Null
-    $StageData = Join-Path $Stage 'agent\data'
-    robocopy (Join-Path $DataDir 'lancedb') (Join-Path $StageData 'lancedb') /E /XF *.lock /R:0 /W:0 /NFL /NDL /NJH /NJS | Out-Null
-    # v8.13.0: 双布局——旧包 chunks/chunks.jsonl 与新包根目录 chunks.jsonl 统一归一为 <批次>/chunks.jsonl
+    # v8.13.0: 语料分卷打包——GitHub 单附件上限 2GiB，按批次贪心装箱为若干 <1GB 分卷，
+    #  run.ps1 按序号循环下载并解压合并（以后数据继续增大也不会超限）
+    Write-Host "打包语料分卷 corpus-v$Version-#.zip（每个分卷 <1GB）..." -ForegroundColor Yellow
+    $PartSpan = 1000MB   # 每卷目标上限（字节）
+    # 1) 统计各批次体积（chunks.jsonl + 对应 lancedb 表）
+    $sizes = @()
     Get-ChildItem $DataDir -Directory | Where-Object {
-        (Test-Path (Join-Path $_.FullName 'chunks.jsonl')) -or (Test-Path (Join-Path $_.FullName 'chunks\chunks.jsonl'))
+        $_.Name -ne 'lancedb' -and
+        ((Test-Path (Join-Path $_.FullName 'chunks.jsonl')) -or (Test-Path (Join-Path $_.FullName 'chunks\chunks.jsonl')))
     } | ForEach-Object {
-        $src = if (Test-Path (Join-Path $_.FullName 'chunks.jsonl')) { Join-Path $_.FullName 'chunks.jsonl' } else { Join-Path $_.FullName 'chunks\chunks.jsonl' }
-        $dst = Join-Path $StageData $_.Name
-        New-Item -ItemType Directory -Force -Path $dst | Out-Null
-        Copy-Item -Force $src (Join-Path $dst 'chunks.jsonl')
+        $name = $_.Name
+        $j = if (Test-Path (Join-Path $_.FullName 'chunks.jsonl')) { Join-Path $_.FullName 'chunks.jsonl' } else { Join-Path $_.FullName 'chunks\chunks.jsonl' }
+        $sz = (Get-Item $j).Length
+        $tbl = Join-Path $DataDir "lancedb\$name.lance"
+        if (Test-Path $tbl) { $sz += (Get-ChildItem $tbl -Recurse -File | Measure-Object -Property Length -Sum).Sum }
+        $sizes += [pscustomobject]@{ Name = $name; Json = $j; Bytes = [long]$sz }
     }
+    if ($sizes.Count -eq 0) { Write-Host "⚠ 未找到任何含 chunks.jsonl 的批次" -ForegroundColor Red; exit 1 }
+    # 2) 贪心装箱（体积降序 → 放入首个放得下的卷；ArrayList 规避 PS5.1 嵌套索引 += 坑）
+    $bins = New-Object System.Collections.ArrayList
+    foreach ($b in ($sizes | Sort-Object Bytes -Descending)) {
+        $idx = -1
+        for ($i = 0; $i -lt $bins.Count; $i++) {
+            $sum = ($bins[$i] | Measure-Object -Property Bytes -Sum).Sum
+            if (($sum + $b.Bytes) -le $PartSpan) { $idx = $i; break }
+        }
+        if ($idx -ge 0) { $null = $bins[$idx].Add($b) }
+        else { $nb = New-Object System.Collections.ArrayList; $null = $nb.Add($b); $null = $bins.Add($nb) }
+    }
+    # 3) 每卷暂存并打包（NoCompression 秒级；内容 = agent/data/<批次>/chunks.jsonl + lancedb/<批次>.lance）
     New-Item -ItemType Directory -Force -Path $Dist | Out-Null
-    $CorpusZipPath = Join-Path $Dist "corpus-v$Version.zip"
-    if (Test-Path $CorpusZipPath) { Remove-Item $CorpusZipPath -Force }
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    [System.IO.Compression.ZipFile]::CreateFromDirectory(
-        $Stage, $CorpusZipPath,
-        [System.IO.Compression.CompressionLevel]::NoCompression, $false)
-    $sizeMB = [Math]::Round((Get-Item $CorpusZipPath).Length / 1MB, 1)
-    Remove-Item -Recurse -Force $Stage
+    $partNo = 0; $totalMB = 0
+    foreach ($bin in $bins) {
+        $partNo++
+        $zipPath = Join-Path $Dist "corpus-v$Version-$partNo.zip"
+        if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+        $binRoot = Join-Path $Stage ("part" + $partNo)
+        $binData = Join-Path $binRoot 'agent\data'
+        foreach ($b in $bin) {
+            $dst = Join-Path $binData $b.Name
+            New-Item -ItemType Directory -Force -Path $dst | Out-Null
+            Copy-Item -Force $b.Json (Join-Path $dst 'chunks.jsonl')
+            $tbl = Join-Path $DataDir "lancedb\$($b.Name).lance"
+            if (Test-Path $tbl) { robocopy $tbl (Join-Path $binData "lancedb\$($b.Name).lance") /E /XF *.lock /R:0 /W:0 /NFL /NDL /NJH /NJS | Out-Null }
+        }
+        [System.IO.Compression.ZipFile]::CreateFromDirectory($binRoot, $zipPath, [System.IO.Compression.CompressionLevel]::NoCompression, $false)
+        $mb = [Math]::Round((Get-Item $zipPath).Length / 1MB, 1); $totalMB += $mb
+        Write-Host "  卷 $partNo/$($bins.Count): corpus-v$Version-$partNo.zip  $mb MB  (批次: $(($bin | ForEach-Object Name) -join ', '))" -ForegroundColor Cyan
+        Remove-Item -Recurse -Force $binRoot
+    }
+    Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue
     Write-Host ""
-    Write-Host "✅ 语料附件打包完成: $CorpusZipPath  ($sizeMB MB)" -ForegroundColor Green
-    Write-Host "   上传到 GitHub Releases v$Version，run.ps1 首次运行自动下载"
+    Write-Host "✅ 语料分卷打包完成（$partNo 卷，共 $totalMB MB -> $Dist）" -ForegroundColor Green
+    Write-Host "   上传到 GitHub Releases v$Version；run.ps1 按序号自动循环下载并合并"
     exit 0
 }
 
