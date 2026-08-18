@@ -92,33 +92,41 @@ if (-not (Test-Path $LanceDir)) {
     Write-Host "[1/6] 语料数据已就绪" -ForegroundColor Green
 }
 
-# ── [2/6] Python ──
-$py = Find-Python
-if (-not $py) {
-    Write-Host "[2/6] 未检测到 Python，正在通过 winget 自动安装 Python 3.11 ..." -ForegroundColor Cyan
+# ── [2/6] Python（v8.13-b5e: 不迁就目标机——没有就装 3.11，版本不对也自动装 3.11，与现有并存）──
+function Install-Py311 {
+    Write-Host "    正在通过 winget 自动安装 Python 3.11（与现有 Python 并存互不影响，约 1-2 分钟）..." -ForegroundColor Cyan
     try {
         winget install --id Python.Python.3.11 -e --accept-source-agreements --accept-package-agreements
-        # winget 安装后需刷新 PATH
+        # winget 安装后刷新 PATH（installer 同时注册 py 启动器）
         $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
-        $py = Find-Python
     } catch {
-        Write-Host "    ⚠ winget 安装失败，请手动安装 Python 3.11（https://www.python.org/downloads/，勾选 Add to PATH）后重新运行本脚本" -ForegroundColor Red
-        Read-Host "按回车键关闭窗口"; exit 1
-    }
-    if (-not $py) {
-        Write-Host "    ⚠ 安装完成但未找到 python，请关闭本窗口重开后再运行" -ForegroundColor Red
-        Read-Host "按回车键关闭窗口"; exit 1
+        Write-Host "    ⚠ winget 不可用或安装失败，请手动安装 Python 3.11：https://www.python.org/downloads/ （勾选 Add to PATH）后重跑本脚本" -ForegroundColor Red
+        Read-Host "    按回车键关闭窗口"; exit 1
     }
 }
-Write-Host "[2/6] Python: $py" -ForegroundColor Green
-# v8.13-b5d: 严格版本门禁 3.10~3.12（推荐 3.11）——3.13+ 装不上 lancedb/onnxruntime 预编译包
+$py = Find-Python
+if (-not $py) {
+    Write-Host "[2/6] 未检测到 Python，自动安装 Python 3.11..." -ForegroundColor Cyan
+    Install-Py311
+    $py = Find-Python
+    if (-not $py) {
+        Write-Host "    ⚠ 安装完成仍未找到 python，请关闭窗口重开后再运行" -ForegroundColor Red
+        Read-Host "    按回车键关闭窗口"; exit 1
+    }
+}
 $verInfo = & $py -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null
 if ($verInfo -notmatch '^3\.(10|11|12)$') {
-    Write-Host "    ⚠ 当前 Python 版本: $verInfo；本脚本需要 3.10~3.12（推荐 3.11）" -ForegroundColor Red
-    Write-Host "      解决: 打开 https://www.python.org/downloads/ 安装 Python 3.11（勾选 Add to PATH），装完重跑本脚本" -ForegroundColor Yellow
-    Read-Host "    按回车键关闭窗口"
-    exit 1
+    Write-Host "[2/6] 当前 Python $verInfo 不在支持范围（3.10~3.12），自动安装 Python 3.11 ..." -ForegroundColor Yellow
+    Install-Py311
+    $py = Find-Python
+    $verInfo = if ($py) { & $py -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null } else { '' }
+    if ($verInfo -notmatch '^3\.(10|11|12)$') {
+        Write-Host "    ⚠ 自动安装后版本仍为 $verInfo，请手动安装 Python 3.11：https://www.python.org/downloads/ （勾选 Add to PATH）后重跑" -ForegroundColor Red
+        Read-Host "    按回车键关闭窗口"; exit 1
+    }
+    Write-Host "    ✅ 已自动改用 Python 3.11" -ForegroundColor Green
 }
+Write-Host "[2/6] Python: $py (v$verInfo)" -ForegroundColor Green
 
 # ── [3/6] 虚拟环境 ──
 if (-not (Test-Path $VenvPy)) {
