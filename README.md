@@ -36,10 +36,10 @@
 
 | 包 | 大小 | 说明 |
 |---|---|---|
-| `citrus-qa-agent-v8.9.0.zip` | ~2.2 MB | **必下**：代码 + 一键脚本 |
-| `corpus-v8.9.0.zip` | ~1.05 GB | **无需手动下载**：示例语料（公开文献 5 批次，LanceDB 向量库）。`run.ps1` 首次运行自动从 Releases 下载并解压到 `agent/data/`，之后秒级跳过 |
+| `citrus-qa-agent-v8.13.0.zip` | ~2.3 MB | **必下**：代码 + 一键脚本 |
+| `corpus-v8.13.0.zip` | ~1.3 GB | **无需手动下载**：公开文献 7 批次（老 5 批 + 新增 xrz / 1-1200，LanceDB 向量库）。`run.ps1` 首次运行自动从 Releases 下载并解压到 `agent/data/`，之后秒级跳过 |
 
-> 国内下载加速：下载语料前先设置环境变量 `GH_MIRROR`（如 `https://ghproxy.net/`），`run.ps1` 会自动给下载地址加前缀；也可手动下载 `corpus-v8.9.0.zip` 解压到项目根目录后直接运行。
+> 国内下载加速：下载语料前先设置环境变量 `GH_MIRROR`（如 `https://ghproxy.net/`），`run.ps1` 会自动给下载地址加前缀；也可手动下载 `corpus-v8.13.0.zip` 解压到项目根目录后直接运行。
 
 **模型自动安装**：向量编码（multilingual-e5-large）与重排（bge-reranker-v2-m3）模型不打包（重排模型单文件超 GitHub 2GB 上限）——首次运行 `run.ps1` 自动经 **HuggingFace 国内镜像（hf-mirror.com）** 下载，约 5-15 分钟，一次完成后秒级启动；也可手动运行 `python prepare_models.py`（`--skip-reranker` 可跳过重排模型）。
 
@@ -61,7 +61,7 @@
 
 对部署者的要求：**Windows 电脑 + 能上网**，无需安装任何东西（Python 都会自动装）。
 
-1. 下载 [citrus-qa-agent-v8.9.0.zip](https://github.com/w1-23/citrus-qa-agent/releases)（~2.2MB）→ 解压到任意目录
+1. 下载 [citrus-qa-agent-v8.13.0.zip](https://github.com/w1-23/citrus-qa-agent/releases)（~2.3MB）→ 解压到任意目录
 2. **双击 `run.ps1`**（或右键 → 使用 PowerShell 运行）
 3. 首次运行全自动完成（约 20-40 分钟，取决于网络）：
    - 语料自动下载（~1.05GB，从 GitHub Releases）
@@ -77,7 +77,7 @@
 
 **常见问题（FAQ）**
 
-- **语料下载慢/失败？** 先设置环境变量 `GH_MIRROR`（如 `https://ghproxy.net/`）再运行 run.ps1；或手动下载 `corpus-v8.9.0.zip` 解压到项目根目录（zip 内含 `agent/data/...`）后直接运行。
+- **语料下载慢/失败？** 先设置环境变量 `GH_MIRROR`（如 `https://ghproxy.net/`）再运行 run.ps1；或手动下载 `corpus-v8.13.0.zip` 解压到项目根目录（zip 内含 `agent/data/...`）后直接运行。
 - **模型下载慢？** 已默认走国内镜像 hf-mirror.com；如需官方源，注释 run.ps1 中 `$env:HF_ENDPOINT` 一行。
 - **首次等了很久正常吗？** 正常——语料 1.05GB + 依赖 + 模型约 2GB，总计首次约 20-40 分钟；一次完成后下次启动秒级。
 - **怎么停止？** 直接关闭 PowerShell 窗口，或运行 `stop.ps1`。

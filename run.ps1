@@ -1,5 +1,5 @@
 ﻿# ============================================================
-#  Citrus QA Agent 一键启动脚本（v8.9.0）
+#  Citrus QA Agent 一键启动脚本（v8.13.0）
 #  ------------------------------------------------------------
 #  零门槛：下载解压后，右键 → 使用 PowerShell 运行（或: powershell -File run.ps1）
 #  自动完成: 语料下载 → Python 检测/安装 → 虚拟环境 → 依赖安装 → 模型下载 → 启动服务
@@ -43,11 +43,11 @@ Write-Host "  🍊 Citrus QA Agent 一键启动" -ForegroundColor Yellow
 Write-Host "  ============================" -ForegroundColor DarkGray
 
 # ── [1/6] 语料数据（首次从 GitHub Releases 自动下载，之后秒级跳过）──
-#  v8.9.0: 向量库已迁移至 LanceDB（data/lancedb），不再需要本地 Qdrant；
+#  v8.13.0: 向量库已迁移至 LanceDB（data/lancedb），不再需要本地 Qdrant；
 #  语料作为 Releases 附件分发，首次运行自动下载约 1.2GB。
 #  国内加速: 设置环境变量 GH_MIRROR（例如 https://ghproxy.net/）即可自动加前缀。
 $Repo = 'w1-23/citrus-qa-agent'
-$ReleaseVersion = '8.9.0'
+$ReleaseVersion = '8.13.0'
 $CorpusZip = Join-Path $Root 'corpus.zip'
 $DataDir = Join-Path $AgentDir 'data'
 $LanceDir = Join-Path $DataDir 'lancedb'
@@ -139,7 +139,7 @@ if (Test-Gpu) {
 }
 
 # ── [5/6] 模型 ──
-# v8.9.0: 模型走 HuggingFace 国内镜像（hf-mirror.com）自动下载，无需手动配置；
+# v8.13.0: 模型走 HuggingFace 国内镜像（hf-mirror.com）自动下载，无需手动配置；
 # 如需官方源，注释下一行即可
 $env:HF_ENDPOINT = 'https://hf-mirror.com'
 Write-Host "[5/6] 检查模型（首次自动从镜像下载向量编码/重排模型，约 5-15 分钟；之后秒级启动）..." -ForegroundColor Cyan

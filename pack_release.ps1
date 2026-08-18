@@ -1,5 +1,5 @@
 ﻿# ============================================================
-#  Citrus QA Agent 发布打包（v8.9.0）
+#  Citrus QA Agent 发布打包（v8.13.0）
 #  ------------------------------------------------------------
 #  用法:
 #    powershell -File pack_release.ps1                # 主包（代码，~2MB）
@@ -9,14 +9,14 @@
 #  说明: GitHub Releases 单文件上限 2GB——大模型（reranker 2.2GB）不走发布包，
 #        首次运行经 HF 镜像自动下载（run.ps1 / prepare_models.py 已内置）；
 #        语料（LanceDB 向量库）用 -CorpusOnly 单独打包，run.ps1 首次运行自动下载。
-#  输出: dist/citrus-qa-agent-v8.9.0[-full[-data]].zip / dist/corpus-v8.9.0.zip
+#  输出: dist/citrus-qa-agent-v8.13.0[-full[-data]].zip / dist/corpus-v8.13.0.zip
 #  用户拿到 zip → 解压 → 双击运行 run.ps1 → 浏览器打开即用
 # ============================================================
 param([switch]$IncludeModels, [switch]$IncludeData, [switch]$CorpusOnly)
 
 $ErrorActionPreference = 'Stop'
 $Root = $PSScriptRoot
-$Version = '8.9.0'
+$Version = '8.13.0'
 $Dist = Join-Path $Root 'dist'
 $Suffix = $(if ($IncludeModels) { '-full' } else { '' }) + $(if ($IncludeData) { '-data' } else { '' })
 $ZipName = "citrus-qa-agent-v$Version$Suffix.zip"
@@ -24,7 +24,7 @@ $ZipPath = Join-Path $Dist $ZipName
 $Stage = Join-Path $env:TEMP ("citrus-pack-" + [guid]::NewGuid().ToString('N'))
 
 # ── 仅语料附件（zip 内路径 agent/data/...，解压到仓库根目录即得 agent/data）──
-#  v8.9.0: 只打包 LanceDB 向量库 + 各批次 chunks.jsonl（证据定位必需）；
+#  v8.13.0: 只打包 LanceDB 向量库 + 各批次 chunks.jsonl（证据定位必需）；
 #  旧 Qdrant 批次目录（向量库本体，1.18GB 冗余）不进发布包——体积减半且远低于
 #  GitHub 2GiB 单文件上限；本地仍完整保留，可随时回退 qdrant 后端。
 if ($CorpusOnly) {
@@ -37,10 +37,14 @@ if ($CorpusOnly) {
     New-Item -ItemType Directory -Force -Path (Join-Path $Stage 'agent') | Out-Null
     $StageData = Join-Path $Stage 'agent\data'
     robocopy (Join-Path $DataDir 'lancedb') (Join-Path $StageData 'lancedb') /E /XF *.lock /R:0 /W:0 /NFL /NDL /NJH /NJS | Out-Null
-    Get-ChildItem $DataDir -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'chunks\chunks.jsonl') } | ForEach-Object {
-        $dst = Join-Path $StageData (Join-Path $_.Name 'chunks')
+    # v8.13.0: 双布局——旧包 chunks/chunks.jsonl 与新包根目录 chunks.jsonl 统一归一为 <批次>/chunks.jsonl
+    Get-ChildItem $DataDir -Directory | Where-Object {
+        (Test-Path (Join-Path $_.FullName 'chunks.jsonl')) -or (Test-Path (Join-Path $_.FullName 'chunks\chunks.jsonl'))
+    } | ForEach-Object {
+        $src = if (Test-Path (Join-Path $_.FullName 'chunks.jsonl')) { Join-Path $_.FullName 'chunks.jsonl' } else { Join-Path $_.FullName 'chunks\chunks.jsonl' }
+        $dst = Join-Path $StageData $_.Name
         New-Item -ItemType Directory -Force -Path $dst | Out-Null
-        Copy-Item -Force (Join-Path $_.FullName 'chunks\chunks.jsonl') (Join-Path $dst 'chunks.jsonl')
+        Copy-Item -Force $src (Join-Path $dst 'chunks.jsonl')
     }
     New-Item -ItemType Directory -Force -Path $Dist | Out-Null
     $CorpusZipPath = Join-Path $Dist "corpus-v$Version.zip"
@@ -110,10 +114,14 @@ if ($IncludeData) {
         $DataStage = Join-Path $StageAgent 'data'
         if (Test-Path $DataStage) { Remove-Item -Recurse -Force $DataStage }
         robocopy (Join-Path $DataDir 'lancedb') (Join-Path $DataStage 'lancedb') /E /XF *.lock /R:0 /W:0 /NFL /NDL /NJH /NJS | Out-Null
-        Get-ChildItem $DataDir -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'chunks\chunks.jsonl') } | ForEach-Object {
-            $dst = Join-Path $DataStage (Join-Path $_.Name 'chunks')
+        # v8.13.0: 双布局归一（同 CorpusOnly）
+        Get-ChildItem $DataDir -Directory | Where-Object {
+            (Test-Path (Join-Path $_.FullName 'chunks.jsonl')) -or (Test-Path (Join-Path $_.FullName 'chunks\chunks.jsonl'))
+        } | ForEach-Object {
+            $src = if (Test-Path (Join-Path $_.FullName 'chunks.jsonl')) { Join-Path $_.FullName 'chunks.jsonl' } else { Join-Path $_.FullName 'chunks\chunks.jsonl' }
+            $dst = Join-Path $DataStage $_.Name
             New-Item -ItemType Directory -Force -Path $dst | Out-Null
-            Copy-Item -Force (Join-Path $_.FullName 'chunks\chunks.jsonl') (Join-Path $dst 'chunks.jsonl')
+            Copy-Item -Force $src (Join-Path $dst 'chunks.jsonl')
         }
     } else {
         Write-Host "⚠ agent/data 不存在，跳过语料" -ForegroundColor Yellow
@@ -134,6 +142,12 @@ Get-ChildItem -Path $Stage -Recurse -File -Filter '.env' -ErrorAction SilentlyCo
 foreach ($f in @('README.md', 'LICENSE', 'requirements.txt', 'run.ps1', '.gitignore')) {
     $src = Join-Path $Root $f
     if (Test-Path $src) { Copy-Item -Force $src (Join-Path $Stage $f) }
+}
+
+# ── .ps1 统一强制 UTF-8 BOM（v8.13.0 防呆：Windows PowerShell 5.1 读取无 BOM UTF-8 会乱码）──
+Get-ChildItem $Stage -Recurse -Filter '*.ps1' | ForEach-Object {
+    $t = [System.IO.File]::ReadAllText($_.FullName, [System.Text.Encoding]::UTF8)
+    [System.IO.File]::WriteAllText($_.FullName, $t, (New-Object System.Text.UTF8Encoding($true)))
 }
 
 # ── 打 zip（v8.5.0: 改用 .NET ZipFile——PS5.1 的 Compress-Archive 对 2GB+
