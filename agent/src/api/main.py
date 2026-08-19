@@ -587,8 +587,17 @@ async def runtime_config():
         # v8.5.0 开源版: 只暴露"是否已配置"，永不回传 key 本身
         "has_api_key": bool(settings.RESOLVED_MAIN_API_KEY),
         "model": {
-            "main": settings.MAIN_MODEL,
-            "fast": settings.FAST_MODEL,
+            "main": settings.RESOLVED_MAIN_MODEL,
+            "fast": settings.RESOLVED_FAST_MODEL,
+            "main_base_url": settings.RESOLVED_MAIN_BASE_URL,
+            "fast_base_url": settings.RESOLVED_FAST_BASE_URL,
+            "defaults": {
+                "main": settings.MAIN_MODEL,
+                "fast": settings.FAST_MODEL,
+                "main_base_url": settings.MAIN_BASE_URL,
+                "fast_base_url": settings.FAST_BASE_URL or settings.MAIN_BASE_URL,
+            },
+            "runtime_overrides": settings.has_model_overrides,
         },
     }
 
@@ -608,13 +617,13 @@ async def set_api_key(req: ApiKeyRequest):
     key = (req.api_key or "").strip()
     if len(key) < 16 or not key.startswith("sk-"):
         raise HTTPException(status_code=400,
-                            detail="Key 格式不正确（应为 DeepSeek 的 sk- 开头密钥）")
+                            detail="Key 格式不正确（应为 sk- 开头的 API Key）")
     # 连通性校验：GET {base}/models
     try:
         import httpx
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(
-                f"{settings.MAIN_BASE_URL.rstrip('/')}/models",
+                f"{settings.RESOLVED_MAIN_BASE_URL.rstrip('/')}/models",
                 headers={"Authorization": f"Bearer {key}"},
             )
         if resp.status_code != 200:
@@ -626,11 +635,72 @@ async def set_api_key(req: ApiKeyRequest):
         raise
     except Exception as e:
         logger.warning(f"[API] apikey connectivity check failed: {e}")
-        raise HTTPException(status_code=400, detail=f"无法连接 DeepSeek API: {e}")
+        raise HTTPException(status_code=400, detail=f"无法连接 API 服务: {e}")
     if not settings.save_runtime_api_key(key):
         raise HTTPException(status_code=500, detail="Key 保存失败")
     logger.info("[API] runtime api key configured via WebUI")
     return {"status": "ok", "has_api_key": True}
+
+
+# ── v8.14.1 运行时底座模型切换（前端设置面板）──
+# 主/快模型 ID + API 地址，留空 = 恢复默认（yaml/env）；
+# 持久化到 state/model_config.json（gitignore 内），跨重启保留。
+class ModelConfigRequest(BaseModel):
+    main_model: str = ""
+    fast_model: str = ""
+    main_base_url: str = ""
+    fast_base_url: str = ""
+
+
+@app.post("/api/v2/config/model")
+async def set_model_config(req: ModelConfigRequest):
+    main_base_url = (req.main_base_url or "").strip().rstrip("/")
+    if main_base_url and not (main_base_url.startswith("http://")
+                              or main_base_url.startswith("https://")):
+        raise HTTPException(status_code=400,
+                            detail="API 地址需以 http:// 或 https:// 开头")
+    # 连通性校验：仅当已配 Key 且给了主地址时校验（保证地址未拼错）。
+    # 401/403 视为「地址可达但 Key 属于其他厂商」——放行并附警告（换地址后需再换 Key）。
+    auth_warning = ""
+    key = settings.RESOLVED_MAIN_API_KEY
+    if key and main_base_url:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    f"{main_base_url}/models",
+                    headers={"Authorization": f"Bearer {key}"},
+                )
+            if resp.status_code not in (200, 401, 403):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"模型列表校验失败（HTTP {resp.status_code}）：请检查 API 地址")
+            if resp.status_code in (401, 403):
+                auth_warning = (
+                    f"地址可达但当前 Key 校验未通过（HTTP {resp.status_code}）；"
+                    f"若该 Key 属于其他厂商，保存模型配置后请再在下方保存新 Key")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.warning(f"[API] model config connectivity check failed: {e}")
+            raise HTTPException(status_code=400,
+                                detail=f"无法连接 {main_base_url}（请检查地址是否拼写正确）: {e}")
+    if not settings.save_runtime_model_config(
+            main=req.main_model, fast=req.fast_model,
+            main_base_url=req.main_base_url, fast_base_url=req.fast_base_url):
+        raise HTTPException(status_code=500, detail="模型配置保存失败")
+    logger.info("[API] runtime model config saved: %s", settings._runtime_model_cfg)
+    return {
+        "status": "ok",
+        "warning": auth_warning,
+        "model": {
+            "main": settings.RESOLVED_MAIN_MODEL,
+            "fast": settings.RESOLVED_FAST_MODEL,
+            "main_base_url": settings.RESOLVED_MAIN_BASE_URL,
+            "fast_base_url": settings.RESOLVED_FAST_BASE_URL,
+            "runtime_overrides": settings.has_model_overrides,
+        },
+    }
 
 
 @app.get("/")

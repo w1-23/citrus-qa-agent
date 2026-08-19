@@ -381,7 +381,7 @@ def _generate_hyde_answer(query: str) -> str | None:
             timeout=15,  # v8.3.1: 3s 太短导致 flash 生成假想答案频繁超时降级（每次检索白等+丢 hyde_dense 一路）
         )
         resp = client.chat.completions.create(
-            model=settings.FAST_MODEL,
+            model=settings.RESOLVED_FAST_MODEL,
             messages=[
                 {"role": "system", "content": _HYDE_PROMPT},
                 {"role": "user", "content": f"User question:\n{query}\n\nHypothetical answer paragraph:"},

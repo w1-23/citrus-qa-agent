@@ -80,7 +80,7 @@ class ContextManager:
         if self._fast_llm is None:
             from src.core.llm_pool import get_llm as _pool_get_llm
             self._fast_llm = _pool_get_llm(
-                model=settings.FAST_MODEL,
+                model=settings.RESOLVED_FAST_MODEL,
                 api_key=settings.RESOLVED_FAST_API_KEY,
                 base_url=settings.RESOLVED_FAST_BASE_URL,
                 temperature=0,
@@ -94,7 +94,7 @@ class ContextManager:
         if self._compact_llm is None:
             from src.core.llm_pool import get_llm as _pool_get_llm
             self._compact_llm = _pool_get_llm(
-                model=settings.FAST_MODEL,
+                model=settings.RESOLVED_FAST_MODEL,
                 api_key=settings.RESOLVED_FAST_API_KEY,
                 base_url=settings.RESOLVED_FAST_BASE_URL,
                 temperature=0,
