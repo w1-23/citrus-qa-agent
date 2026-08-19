@@ -104,6 +104,39 @@ def plot_curves(reports: dict, outdir: Path):
         print("[plot] saved", outdir / fname)
 
 
+def plot_crosslingual(outdir: Path, logdir: Path):
+    """fig6 跨语言召回矩阵（读 logs/crosslingual.json）。"""
+    if plt is None:
+        return
+    f = logdir / "crosslingual.json"
+    if not f.exists():
+        return
+    data = json.loads(f.read_text(encoding="utf-8"))
+    _setup_font()
+    ids = []
+    zh_rec, en_rec, zh_pass, en_pass = [], [], [], []
+    for r in data:
+        if r["lang"] == "zh":
+            ids.append(r["id"])
+            zh_rec.append(r["recall@10"] or 0.0)
+            zh_pass.append(r["passed"])
+        else:
+            en_rec.append(r["recall@10"] or 0.0)
+            en_pass.append(r["passed"])
+    x = range(len(ids))
+    fig, ax = plt.subplots(figsize=(8.5, 4.6))
+    w = 0.35
+    ax.bar([i - w / 2 for i in x], zh_rec, w, color="#C62828", label="中文查询 Recall@10")
+    ax.bar([i + w / 2 for i in x], en_rec, w, color="#1F6F5C", label="英文查询 Recall@10")
+    ax.set_xticks(list(x)); ax.set_xticklabels(ids)
+    ax.set_ylim(0, 1.1); ax.set_ylabel("Recall@10")
+    ax.set_title("跨语言召回矩阵：中文文献型查询 vs 英文同义查询（证据=英文 top5 锚定）")
+    ax.legend(loc="upper left", fontsize=9)
+    ax.grid(axis="y", linestyle=":", alpha=0.4)
+    fig.tight_layout(); fig.savefig(outdir / "fig6_crosslingual.png", dpi=200)
+    print("[plot] saved", outdir / "fig6_crosslingual.png")
+
+
 def plot(reports: dict, outdir: Path):
     if plt is None:
         print("[plot] matplotlib 不可用，跳过绘图（仅打印数据摘要）")
@@ -157,6 +190,7 @@ def main():
         return
     plot(reports, Path(args.outdir))
     plot_curves(reports, Path(args.outdir))
+    plot_crosslingual(Path(args.outdir), Path(args.logdir))
 
 
 if __name__ == "__main__":
