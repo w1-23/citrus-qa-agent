@@ -18,6 +18,7 @@ param([switch]$IncludeModels, [switch]$IncludeData, [switch]$CorpusOnly,
 $ErrorActionPreference = 'Stop'
 $Root = $PSScriptRoot
 $Version = '8.14.1'
+$CorpusVersion = '8.13.0'   # 语料附件归属 Release（旧卷 1-3 原地不动，增量卷 4 挂此版本，文件名用此版本）
 $Dist = Join-Path $Root 'dist'
 $Suffix = $(if ($IncludeModels) { '-full' } else { '' }) + $(if ($IncludeData) { '-data' } else { '' })
 $ZipName = "citrus-qa-agent-v$Version$Suffix.zip"
@@ -35,7 +36,7 @@ if ($CorpusOnly) {
         exit 1
     }
     # ── v8.14.1: 单批增量分卷（-CorpusOnly -BatchOnly <批次名> [-PartNo <n>]）──
-    # 新增批次不打乱既有分卷编号：单独打成 corpus-v$Version-<PartNo>.zip
+    # 新增批次不打乱既有分卷编号：单独打成 corpus-v$CorpusVersion-<PartNo>.zip
     # （默认 PartNo=1；运行 run.ps1 时自动按序号续接下载）。
     if ($BatchOnly) {
         $name = $BatchOnly
@@ -46,7 +47,7 @@ if ($CorpusOnly) {
             exit 1
         }
         $pn = if ($PartNo -gt 0) { $PartNo } else { 1 }
-        $zipPath = Join-Path $Dist "corpus-v$Version-$pn.zip"
+        $zipPath = Join-Path $Dist "corpus-v$CorpusVersion-$pn.zip"
         if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
         New-Item -ItemType Directory -Force -Path $Dist | Out-Null
         $binRoot = Join-Path $Stage ("part" + $pn)
@@ -59,13 +60,13 @@ if ($CorpusOnly) {
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         [System.IO.Compression.ZipFile]::CreateFromDirectory($binRoot, $zipPath, [System.IO.Compression.CompressionLevel]::NoCompression, $false)
         $mb = [Math]::Round((Get-Item $zipPath).Length / 1MB, 1)
-        Write-Host "✅ 单批分卷打包完成: corpus-v$Version-$pn.zip  $mb MB（$name）" -ForegroundColor Green
+        Write-Host "✅ 单批分卷打包完成: corpus-v$CorpusVersion-$pn.zip  $mb MB（$name）" -ForegroundColor Green
         Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue
         exit 0
     }
     # v8.13.0: 语料分卷打包——GitHub 单附件上限 2GiB，按批次贪心装箱为若干 <1GB 分卷，
     #  run.ps1 按序号循环下载并解压合并（以后数据继续增大也不会超限）
-    Write-Host "打包语料分卷 corpus-v$Version-#.zip（每个分卷 <1GB）..." -ForegroundColor Yellow
+    Write-Host "打包语料分卷 corpus-v$CorpusVersion-#.zip（每个分卷 <1GB）..." -ForegroundColor Yellow
     $PartSpan = 1000MB   # 每卷目标上限（字节）
     # 1) 统计各批次体积（chunks.jsonl + 对应 lancedb 表）
     $sizes = @()
@@ -98,7 +99,7 @@ if ($CorpusOnly) {
     $partNo = 0; $totalMB = 0
     foreach ($bin in $bins) {
         $partNo++
-        $zipPath = Join-Path $Dist "corpus-v$Version-$partNo.zip"
+        $zipPath = Join-Path $Dist "corpus-v$CorpusVersion-$partNo.zip"
         if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
         $binRoot = Join-Path $Stage ("part" + $partNo)
         $binData = Join-Path $binRoot 'agent\data'
@@ -111,13 +112,13 @@ if ($CorpusOnly) {
         }
         [System.IO.Compression.ZipFile]::CreateFromDirectory($binRoot, $zipPath, [System.IO.Compression.CompressionLevel]::NoCompression, $false)
         $mb = [Math]::Round((Get-Item $zipPath).Length / 1MB, 1); $totalMB += $mb
-        Write-Host "  卷 $partNo/$($bins.Count): corpus-v$Version-$partNo.zip  $mb MB  (批次: $(($bin | ForEach-Object Name) -join ', '))" -ForegroundColor Cyan
+        Write-Host "  卷 $partNo/$($bins.Count): corpus-v$CorpusVersion-$partNo.zip  $mb MB  (批次: $(($bin | ForEach-Object Name) -join ', '))" -ForegroundColor Cyan
         Remove-Item -Recurse -Force $binRoot
     }
     Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue
     Write-Host ""
     Write-Host "✅ 语料分卷打包完成（$partNo 卷，共 $totalMB MB -> $Dist）" -ForegroundColor Green
-    Write-Host "   上传到 GitHub Releases v$Version；run.ps1 按序号自动循环下载并合并"
+    Write-Host "   上传到 GitHub Releases v$CorpusVersion；run.ps1 按序号自动循环下载并合并"
     exit 0
 }
 

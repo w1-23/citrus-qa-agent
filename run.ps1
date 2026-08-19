@@ -77,7 +77,12 @@ Write-Host "  ============================" -ForegroundColor DarkGray
 #  语料作为 Releases 附件分发，首次运行自动下载约 1.2GB。
 #  国内加速: 设置环境变量 GH_MIRROR（例如 https://ghproxy.net/）即可自动加前缀。
 $Repo = 'w1-23/citrus-qa-agent'
-$ReleaseVersion = '8.14.1'
+$ReleaseVersion = '8.14.1'                       # 主包版本（包自检以它为准）
+# v8.14.1: 语料附件统一挂在 v8.13.0 Release——旧卷 1-3 原地不动，仅增量上传卷 4；
+# 数据版本与主包版本解耦，本变量标识语料附件实际所在 Release。
+$CorpusReleaseVersion = '8.13.0'
+$NewLanceBatches = @('categories-cn')            # 增量批次清单（存量部署缺失时只补拉对应分卷）
+$IncrementalStartPart = 4                        # 增量分卷起始序号（全量卷数 3 + 1）
 $CorpusZip = Join-Path $Root 'corpus.zip'
 $DataDir = Join-Path $AgentDir 'data'
 $LanceDir = Join-Path $DataDir 'lancedb'
@@ -86,7 +91,7 @@ $LanceDir = Join-Path $DataDir 'lancedb'
 $cfgVer = $null
 $cfgFile = Join-Path $AgentDir 'src\config.py'
 if (Test-Path $cfgFile) {
-    $m = Select-String -Path $cfgFile -Pattern 'VERSION\s*=\s*"([^"]+)"' | Select-Object -First 1
+    $m = Select-String -Path $cfgFile -Pattern 'VERSION[^=]*=\s*"([^"]+)"' | Select-Object -First 1
     if ($m) { $cfgVer = $m.Matches[0].Groups[1].Value }
 }
 if ($cfgVer -and $cfgVer -ne $ReleaseVersion) {
@@ -111,12 +116,13 @@ foreach ($c in $checks) {
 }
 Write-Host ""
 
+$missingNew = @($NewLanceBatches | Where-Object { -not (Test-Path (Join-Path $LanceDir "$_.lance")) })
 if (-not (Test-Path $LanceDir)) {
-    Write-Host "[1/6] 未检测到本地语料库，正在从 GitHub Releases 自动下载语料分卷（约 2.2GB，首次约 20-40 分钟，取决于网络）..." -ForegroundColor Cyan
+    Write-Host "[1/6] 未检测到本地语料库，正在从 GitHub Releases 自动下载语料分卷（约 2.3GB，首次约 20-40 分钟，取决于网络）..." -ForegroundColor Cyan
     $ghBase = if ($env:GH_MIRROR) { $env:GH_MIRROR } else { 'https://github.com' }
     $partNo = 1
     while ($true) {
-        $url = "$ghBase/$Repo/releases/download/v$ReleaseVersion/corpus-$ReleaseVersion-$partNo.zip"
+        $url = "$ghBase/$Repo/releases/download/v$CorpusReleaseVersion/corpus-$CorpusReleaseVersion-$partNo.zip"
         Write-Host "      分卷 ${partNo}: $url" -ForegroundColor DarkGray
         try {
             Invoke-WebRequest -Uri $url -OutFile $CorpusZip -UseBasicParsing
@@ -126,7 +132,7 @@ if (-not (Test-Path $LanceDir)) {
         } catch {
             if ($partNo -eq 1) {
                 Write-Host "    ⚠ 语料下载失败: $($_.Exception.Message)" -ForegroundColor Red
-                Write-Host "      可稍后重试；或手动下载 corpus-v$ReleaseVersion-1.zip 解压到本目录后重新运行" -ForegroundColor Yellow
+                Write-Host "      可稍后重试；或手动下载 corpus-v$CorpusReleaseVersion-1.zip 解压到本目录后重新运行" -ForegroundColor Yellow
                 Read-Host "按回车键关闭窗口"; exit 1
             }
             break
@@ -136,6 +142,29 @@ if (-not (Test-Path $LanceDir)) {
     if (-not (Test-Path $LanceDir)) {
         Write-Host "    ⚠ 分卷解压后未找到 agent/data/lancedb，请检查压缩包内容" -ForegroundColor Red
         Read-Host "按回车键关闭窗口"; exit 1
+    }
+} elseif ($missingNew.Count -gt 0) {
+    # v8.14.1 增量：已有语料的存量部署只补拉新批次分卷（旧卷 1-3 不重传）
+    Write-Host "[1/6] 检测到新增语料批次未本地化，增量下载（仅 $($missingNew -join '、') 所属分卷，约 76MB）..." -ForegroundColor Cyan
+    $ghBase = if ($env:GH_MIRROR) { $env:GH_MIRROR } else { 'https://github.com' }
+    $partNo = $IncrementalStartPart
+    while ($true) {
+        $url = "$ghBase/$Repo/releases/download/v$CorpusReleaseVersion/corpus-$CorpusReleaseVersion-$partNo.zip"
+        Write-Host "      增量分卷 ${partNo}: $url" -ForegroundColor DarkGray
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $CorpusZip -UseBasicParsing
+            Expand-Archive -Path $CorpusZip -DestinationPath $Root -Force
+            Remove-Item $CorpusZip -Force
+            $partNo++
+        } catch {
+            break
+        }
+    }
+    $stillMissing = @($NewLanceBatches | Where-Object { -not (Test-Path (Join-Path $LanceDir "$_.lance")) })
+    if ($stillMissing.Count -gt 0) {
+        Write-Host "    ⚠ 增量批次 $($stillMissing -join '、') 仍未就绪（附件未上传或网络失败）；可继续运行，但该库暂不可检索。也可手动下载 corpus-v$CorpusReleaseVersion-$($IncrementalStartPart).zip 解压到本目录后重跑" -ForegroundColor Yellow
+    } else {
+        Write-Host "    ✔ 增量语料就绪" -ForegroundColor Green
     }
 } else {
     Write-Host "[1/6] 语料数据已就绪" -ForegroundColor Green

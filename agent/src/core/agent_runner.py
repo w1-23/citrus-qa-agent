@@ -171,7 +171,7 @@ def build_evidence_report(collected_artifacts: dict, query: str,
         text = render_evidence(r, max_chars=EVIDENCE_RENDER_MAX_CHARS)
         lines.append(
             f"[{i}] {r.get('title', r.get('name', 'Untitled'))} | "
-            f"{r.get('year', 'N/A')} | DOI: {r.get('doi', 'N/A')} | "
+            f"{r.get('year', 'N/A')} | DOI: {r.get('doi') or r.get('source_type') or 'N/A'} | "
             f"score: {r.get('score', r.get('rerank_score', 0)) or 0}")
         if text:
             quoted = "\n".join(f"> {ln}" for ln in text.splitlines())
