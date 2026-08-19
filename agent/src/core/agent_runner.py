@@ -94,21 +94,37 @@ def check_query_redundant(q: str, seen_queries: list) -> str:
 
 
 def _dedup_evidence_items(items: list) -> list:
-    """按 DOI（无 DOI 按标题）去重，保持原始顺序。"""
-    seen_doi, seen_title, out = set(), set(), []
+    """按 DOI（无 DOI 按标题）去重，保持首次出现位置，去重碰撞时保留正文更丰富的条目。
+
+    v8.14: fetch_fulltext 抓到的全文证据与同 DOI 的学术摘要条目碰撞时，应保留正文
+    （text > abstract/snippet、更长优先），否则先到的摘要会把更完整证据挤掉。
+    对既有 RAG 路径仅产生「同论文取正文最长块而非首块」的良性差异。
+    """
+    def _key(r):
+        doi = str(r.get("doi") or "").strip().lower()
+        if doi:
+            return ("d", doi)
+        return ("t", str(r.get("title") or "").strip().lower()[:80])
+
+    def _priority(r):
+        text = str(r.get("text") or "").strip()
+        fallback = str(r.get("abstract") or r.get("snippet") or "").strip()
+        return (bool(text), bool(fallback), len(text or fallback))
+
+    out, seen = [], {}
     for r in items:
         if not isinstance(r, dict):
             continue
-        doi = str(r.get("doi") or "").strip().lower()
-        title = str(r.get("title") or "").strip().lower()[:80]
-        if doi and doi in seen_doi:
+        k = _key(r)
+        if not k[1]:
             continue
-        if not doi and title and title in seen_title:
+        if k in seen:
+            i, prev = seen[k]
+            if _priority(r) > _priority(prev):
+                out[i] = r
+                seen[k] = (i, r)
             continue
-        if doi:
-            seen_doi.add(doi)
-        elif title:
-            seen_title.add(title)
+        seen[k] = (len(out), r)
         out.append(r)
     return out
 
@@ -664,7 +680,7 @@ def _make_tool_call_dict(tc) -> dict:
 def _resolve_tool_names(agent_name: str) -> list[str]:
     mapping = {
         "retrieve-agent": [
-            "citrus_rag_search", "academic_search",
+            "citrus_rag_search", "academic_search", "fetch_fulltext",
         ],
         "write-agent": ["write_local_file"],
         "analyze-agent": [

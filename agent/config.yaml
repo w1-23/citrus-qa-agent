@@ -20,7 +20,7 @@ retrieval:
 # 学术搜索配置（CrossRef/PubMed/Semantic Scholar/OpenAlex）
 # 根据网络状况选择性启用。大陆网络仅 CrossRef+PubMed 稳定。
 academic_search:
-  enabled_sources: ["crossref"]
+  enabled_sources: ["pubmed"]  # 仅 PubMed：有摘要+MeSH；CrossRef 无摘要无全文，已移除
   timeout_per_source: 5  # 单源超时秒数
 
 model:
@@ -194,6 +194,7 @@ tool_tags:
   analysis_stat: [statistical_analysis, experimental_design]
   file_io: [read_local_file, pdf_read]
   web: [academic_search]
+  fulltext: [fetch_fulltext]
   agent: [call_specialist]
   orchestrator_tools: [call_specialist]
 
@@ -208,6 +209,10 @@ tools:
       category: web
       readonly: true
       concurrency_key: web
+    - name: fetch_fulltext
+      category: rag
+      readonly: true
+      concurrency_key: rag
     - name: pdf_read
       category: analysis
       readonly: true
