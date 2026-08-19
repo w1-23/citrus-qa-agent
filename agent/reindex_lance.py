@@ -15,6 +15,7 @@
 """
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -36,6 +37,24 @@ def find_chunks(batch_dir: Path):
     return None
 
 
+def derive_paper_id(c: dict) -> str:
+    """稳定 paper_id（幂等）：优先现有字段；缺失时按 variety/registry/source 派生。
+
+    v8.14.1: categories-cn（UCR 品种库）等新包 chunk 无 paper_id——直接用
+    ("", chunk_index) 会让跨品种 chunk_index 互相覆盖（索引塌缩 + 向量错配）。
+    派生后 (paper_id, chunk_index) 恢复全局唯一，检索器 idx_map 同口径。
+    """
+    pid = str(c.get("paper_id") or "").strip()
+    if pid:
+        return pid
+    base = str(c.get("variety_id") or c.get("registry_id") or c.get("source_file") or "")
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", base).lower()
+    slug = re.sub(r"_+", "_", slug).strip("_")[:64]
+    if slug:
+        return f"doc_{slug}"
+    return f"chunk_{abs(hash(str(c.get('text', ''))))}"
+
+
 def load_chunk_index(chunks_path: Path) -> dict:
     """(paper_id, chunk_index) -> 拼接文本（与检索器 section+text 口径一致）。"""
     index = {}
@@ -45,7 +64,7 @@ def load_chunk_index(chunks_path: Path) -> dict:
             if not line:
                 continue
             c = json.loads(line)
-            key = (str(c.get("paper_id", "")), int(c.get("chunk_index", -1)))
+            key = (derive_paper_id(c), int(c.get("chunk_index", -1)))
             index[key] = (c.get("section_name", "") + " " + c.get("text", ""))[:2000]
     return index
 
@@ -66,7 +85,7 @@ def read_qdrant_vectors(qdrant_path: Path) -> dict:
             pts, offset = client.scroll(coll, limit=500, offset=offset, with_vectors=True)
             for p in pts:
                 pl = p.payload or {}
-                key = (str(pl.get("paper_id", "")), int(pl.get("chunk_index", -1)))
+                key = (derive_paper_id(pl), int(pl.get("chunk_index", -1)))
                 vecs[key] = np.asarray(p.vector, dtype=np.float32)
             if not offset:
                 break
