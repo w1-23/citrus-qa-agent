@@ -65,26 +65,32 @@ def _aggregate(rows):
 
 
 def plot_curves(reports: dict, outdir: Path):
-    """fig2 阈值比率曲线；fig3 BM25 权重曲线（读 *_r* / *_w* 网格报告）。"""
+    """fig2 阈值比率曲线；fig3 BM25 权重曲线；fig4 重排预算；fig5 RRF k。
+    读 *_r* / *_w* / *_tk* / *_kk* 网格报告。"""
     if plt is None:
         return
     _setup_font()
-    ratio_pts, w_pts = [], []
-    for cfg, rows in reports.items():
-        m = __import__("re").match(r"default_r([\d.]+)", cfg)
-        if m:
-            ratio_pts.append((float(m.group(1)), _aggregate(rows)))
-        m = __import__("re").match(r"default_w([\d.]+)", cfg)
-        if m:
-            w_pts.append((float(m.group(1)), _aggregate(rows)))
-    if not ratio_pts and not w_pts:
-        return
-    for pts, fname, xlab, title in (
-        (sorted(ratio_pts), "fig2_threshold_ratio.png", "动态阈值比率 ratio", "阈值比率 vs Recall@10 / MRR"),
-        (sorted(w_pts), "fig3_bm25_weight.png", "BM25 RRF 权重", "BM25 权重 vs Recall@10 / MRR"),
-    ):
+    re_mod = __import__("re")
+    series = [
+        (("default_r([\d.]+)", "fig2_threshold_ratio.png", "动态阈值比率 ratio",
+          "阈值比率 vs Recall@10 / MRR"), 0.6),
+        (("default_w([\d.]+)", "fig3_bm25_weight.png", "BM25 RRF 权重",
+          "BM25 权重 vs Recall@10 / MRR"), 1.0),
+        (("default_tk(\d+)", "fig4_topk_final.png", "重排预算 TOP_K_FINAL",
+          "重排预算 vs Recall@10 / MRR"), 10.0),
+        (("default_kk(\d+)", "fig5_rrf_k.png", "RRF k", "RRF k vs Recall@10 / MRR"), 60.0),
+    ]
+    for (pat, fname, xlab, title), anchor in series:
+        pts = []
+        for cfg, rows in reports.items():
+            m = re_mod.match(pat, cfg)
+            if m:
+                pts.append((float(m.group(1)), _aggregate(rows)))
+        if "default" in reports and anchor not in [p[0] for p in pts]:
+            pts.append((anchor, _aggregate(reports["default"])))
         if not pts:
             continue
+        pts.sort()
         xs = [p[0] for p in pts]
         rec = [p[1][0] for p in pts]
         mrr = [p[1][1] for p in pts]
