@@ -182,6 +182,7 @@ def main():
     ap.add_argument("--api-key", default="")
     ap.add_argument("--ratio", type=float, default=None, help="动态阈值比率覆盖（网格）")
     ap.add_argument("--bweight", type=float, default=None, help="BM25 RRF 权重覆盖（网格）")
+    ap.add_argument("--dweight", type=float, default=None, help="原始稠密 RRF 权重覆盖（单路消融）")
     ap.add_argument("--topkfinal", type=int, default=None, help="TOP_K_FINAL 覆盖（重排预算）")
     ap.add_argument("--rrfk", type=int, default=None, help="RRF k 覆盖（融合广度）")
     args = ap.parse_args()
@@ -213,6 +214,11 @@ def main():
             saved.setdefault("RRF_WEIGHT_BM25", _s2.RRF_WEIGHT_BM25)
             _s2.RRF_WEIGHT_BM25 = args.bweight
             tag += f"_w{args.bweight}"
+        if args.dweight is not None:
+            from src.config import settings as _s2b
+            saved.setdefault("RRF_WEIGHT_ORIG_DENSE", _s2b.RRF_WEIGHT_ORIG_DENSE)
+            _s2b.RRF_WEIGHT_ORIG_DENSE = args.dweight
+            tag += f"_dw{args.dweight}"
         if args.topkfinal is not None:
             from src.config import settings as _s3
             saved.setdefault("TOP_K_FINAL", _s3.TOP_K_FINAL)

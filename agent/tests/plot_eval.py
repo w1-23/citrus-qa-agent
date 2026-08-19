@@ -104,6 +104,45 @@ def plot_curves(reports: dict, outdir: Path):
         print("[plot] saved", outdir / fname)
 
 
+def _p50(rows):
+    ms = [r.get("ms") for r in rows if r.get("ms") is not None]
+    if not ms:
+        return None
+    ms = sorted(ms)
+    return ms[len(ms) // 2] / 1000.0
+
+
+def plot_cost_quality(reports: dict, outdir: Path):
+    """fig7 成本-质量帕累托前沿：x=p50 时耗(s)，y=Recall@10，标注重排预算档位。"""
+    if plt is None:
+        return
+    _setup_font()
+    pts = []
+    for cfg, rows in reports.items():
+        m = __import__("re").match(r"default_tk(\d+)", cfg)
+        if m and _p50(rows) is not None:
+            rec, mrr, _, _ = _aggregate(rows)
+            pts.append((float(m.group(1)), _p50(rows), rec, mrr))
+    if "default" in reports and len(pts) < 4:
+        rec, mrr, _, _ = _aggregate(reports["default"])
+        pts.append((10.0, _p50(reports["default"]), rec, mrr))
+    if not pts:
+        return
+    pts.sort()
+    fig, ax = plt.subplots(figsize=(8.5, 4.8))
+    xs = [p[1] for p in pts]
+    ys = [p[2] for p in pts]
+    ax.plot(xs, ys, "-o", color="#1F6F5C")
+    for tk, x, rec, mrr in pts:
+        ax.annotate(f"TOP_K_FINAL={tk:.0f}\n(Recall {rec:.3f} / MRR {mrr:.3f})",
+                    (x, rec), textcoords="offset points", xytext=(8, 4), fontsize=9)
+    ax.set_xlabel("p50 单查询时耗 (s)"); ax.set_ylabel("Recall@10")
+    ax.set_title("成本-质量前沿：重排预算与端到端时耗/召回（CPU）")
+    ax.grid(linestyle=":", alpha=0.4)
+    fig.tight_layout(); fig.savefig(outdir / "fig7_cost_quality.png", dpi=200)
+    print("[plot] saved", outdir / "fig7_cost_quality.png")
+
+
 def plot_crosslingual(outdir: Path, logdir: Path):
     """fig6 跨语言召回矩阵（读 logs/crosslingual.json）。"""
     if plt is None:
@@ -191,6 +230,7 @@ def main():
     plot(reports, Path(args.outdir))
     plot_curves(reports, Path(args.outdir))
     plot_crosslingual(Path(args.outdir), Path(args.logdir))
+    plot_cost_quality(reports, Path(args.outdir))
 
 
 if __name__ == "__main__":
