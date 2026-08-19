@@ -128,6 +128,7 @@ def cleanup_offload_files() -> int:
 _READONLY_TOOLS = frozenset({
     "citrus_rag_search", "academic_search", "pdf_read",
     "read_local_file", "statistical_analysis", "experimental_design",
+    "fetch_fulltext",
 })
 
 
