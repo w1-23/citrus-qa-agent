@@ -180,6 +180,8 @@ def main():
     ap.add_argument("--use-hyde", action="store_true", help="有模型 key 时走产品等价 HyDE 路径")
     ap.add_argument("--mode", default="retrieval", choices=["retrieval", "judge"])
     ap.add_argument("--api-key", default="")
+    ap.add_argument("--ratio", type=float, default=None, help="动态阈值比率覆盖（网格）")
+    ap.add_argument("--bweight", type=float, default=None, help="BM25 RRF 权重覆盖（网格）")
     args = ap.parse_args()
 
     if args.cpu:
@@ -197,7 +199,18 @@ def main():
 
     print(f"[eval] 加载 {len(gold)} 题 | 消融={args.ablation} ({_ABLATIONS[args.ablation][0]}) | mode={args.mode}")
     saved = _apply_ablation(args.ablation)
+    tag = args.ablation
     try:
+        if args.ratio is not None:
+            from src.config import settings as _s
+            saved.setdefault("DYNAMIC_THRESHOLD_RATIO", _s.DYNAMIC_THRESHOLD_RATIO)
+            _s.DYNAMIC_THRESHOLD_RATIO = args.ratio
+            tag += f"_r{args.ratio}"
+        if args.bweight is not None:
+            from src.config import settings as _s2
+            saved.setdefault("RRF_WEIGHT_BM25", _s2.RRF_WEIGHT_BM25)
+            _s2.RRF_WEIGHT_BM25 = args.bweight
+            tag += f"_w{args.bweight}"
         t0 = time.time()
         r = MultiBatchRetriever()
         print(f"[eval] retriever 加载 {time.time()-t0:.1f}s | 批次={len(r.lance_tables)}")
@@ -227,7 +240,7 @@ def main():
             print("\n[eval] 无含 gold 的题目（全是 TBD）——请人工补 required_evidence")
 
         _REPORT.parent.mkdir(exist_ok=True)
-        report_path = _REPORT.with_name(f"eval_qa_report_{args.ablation}_{args.subset.lower()}.json")
+        report_path = _REPORT.with_name(f"eval_qa_report_{tag}_{args.subset.lower()}.json")
         out = {"ablation": args.ablation, "subset": args.subset, "rows": rows}
         report_path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"[eval] 报告已写: {report_path}")

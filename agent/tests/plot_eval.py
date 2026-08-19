@@ -48,9 +48,54 @@ def load_reports(logdir: Path):
             d = json.loads(p.read_text(encoding="utf-8"))
         except Exception:
             continue
-        cfg = d.get("ablation", p.stem.replace("eval_qa_report_", ""))
+        # 优先用文件名标签（含 _r0.3/_w1.3 等网格后缀），兼容无标签旧文件
+        stem = p.stem.replace("eval_qa_report_", "").replace("_all", "")
+        cfg = stem if stem and stem != "report" else d.get("ablation", "default")
         reports[cfg] = d.get("rows", [])
     return reports
+
+
+def _aggregate(rows):
+    """返回 (recall_avg, mrr_avg, n_gold_rows, nonempty_ratio)。"""
+    gold = [r for r in rows if r.get("recall@10") is not None]
+    rec = sum(r["recall@10"] for r in gold) / len(gold) if gold else None
+    mrr = sum(r["mrr@10"] for r in gold) / len(gold) if gold else None
+    nonempty = sum(1 for r in rows if r.get("top_hit") not in (None, "-")) / max(len(rows), 1)
+    return rec, mrr, len(gold), nonempty
+
+
+def plot_curves(reports: dict, outdir: Path):
+    """fig2 阈值比率曲线；fig3 BM25 权重曲线（读 *_r* / *_w* 网格报告）。"""
+    if plt is None:
+        return
+    _setup_font()
+    ratio_pts, w_pts = [], []
+    for cfg, rows in reports.items():
+        m = __import__("re").match(r"default_r([\d.]+)", cfg)
+        if m:
+            ratio_pts.append((float(m.group(1)), _aggregate(rows)))
+        m = __import__("re").match(r"default_w([\d.]+)", cfg)
+        if m:
+            w_pts.append((float(m.group(1)), _aggregate(rows)))
+    if not ratio_pts and not w_pts:
+        return
+    for pts, fname, xlab, title in (
+        (sorted(ratio_pts), "fig2_threshold_ratio.png", "动态阈值比率 ratio", "阈值比率 vs Recall@10 / MRR"),
+        (sorted(w_pts), "fig3_bm25_weight.png", "BM25 RRF 权重", "BM25 权重 vs Recall@10 / MRR"),
+    ):
+        if not pts:
+            continue
+        xs = [p[0] for p in pts]
+        rec = [p[1][0] for p in pts]
+        mrr = [p[1][1] for p in pts]
+        fig, ax = plt.subplots(figsize=(8.5, 4.8))
+        ax.plot(xs, rec, "-o", color="#1F6F5C", label="Recall@10")
+        ax.plot(xs, mrr, "-s", color="#C62828", label="MRR@10")
+        ax.set_xlabel(xlab); ax.set_ylabel("得分")
+        ax.set_ylim(0, 1.05); ax.grid(linestyle=":", alpha=0.4)
+        ax.set_title(title); ax.legend(loc="lower left", fontsize=9)
+        fig.tight_layout(); fig.savefig(outdir / fname, dpi=200)
+        print("[plot] saved", outdir / fname)
 
 
 def plot(reports: dict, outdir: Path):
@@ -105,6 +150,7 @@ def main():
         print("[plot] 无报告 JSON")
         return
     plot(reports, Path(args.outdir))
+    plot_curves(reports, Path(args.outdir))
 
 
 if __name__ == "__main__":
