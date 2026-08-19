@@ -1,0 +1,8 @@
+{"id": "l1-001", "level": "L1", "question": "Nagami kumquat 的品种特征是什么？", "topic": "品种", "required_evidence": ["doc_nagami_kumquat_crc_132_crc_132", "doc_nagami_kumquat_crc_3877_crc_3877"], "answer_sketch": "金桔品种，CRC 132/3877 两登记号，果实特征见品种页", "notes": "品种库金标准（实测 top 命中）"}
+{"id": "l1-002", "level": "L1", "question": "Dancy mandarin 的来源与品种信息", "topic": "品种", "required_evidence": ["doc_dancy_mandarin_crc_3026"], "answer_sketch": "宽皮橘品种（Tangerine），CRC 3026", "notes": "品种库金标准"}
+{"id": "l1-003", "level": "L1", "question": "单胚枳（Monoembryonic trifoliate）与 Trifoliate #27 的基本信息", "topic": "品种", "required_evidence": ["doc_monoembryonic_trifoliate_crc_3888", "doc_trifoliate_27_crc_3938"], "answer_sketch": "枳砧木品种系，CRC 3888/3938", "notes": "品种库金标准"}
+{"id": "l1-004", "level": "L1", "question": "血橙中花青素积累的分子机制有哪些报道？", "topic": "代谢", "required_evidence": [], "answer_sketch": "文献综述要点：MYB 转录因子/低温诱导等（人工补证据 id）", "notes": "文献题，required_evidence 需人工标注（待补）"}
+{"id": "l1-005", "level": "L1", "question": "Poncirus trifoliata 作为柑橘砧木的作用", "topic": "砧木", "required_evidence": [], "answer_sketch": "抗寒/抗病砧木，矮化等（人工补证据 id）", "notes": "文献题，待补证据 id"}
+{"id": "l1-006", "level": "L1", "question": "kumquat（金柑）属的物种学名及其与柑橘属的关系", "topic": "分类", "required_evidence": [], "answer_sketch": "Fortunella 属/并入 Citrus 的讨论（待补）", "notes": "文献题，待补证据 id"}
+{"id": "l1-007", "level": "L1", "question": "CRC 850 登记的是什么材料？", "topic": "品种", "required_evidence": [], "answer_sketch": "UCR 品种登记，需带品种名提问（裸编号召回弱——见04文档§12）", "notes": "负例设计：验证提示词引导的必要性"}
+{"id": "l1-008", "level": "L1", "question": "Valencia orange 果汁加工用途的品种特性", "topic": "品种/加工", "required_evidence": [], "answer_sketch": "甜橙品种，加工/鲜食用途（待补）", "notes": "文献+品种混合题，待补证据 id"}
