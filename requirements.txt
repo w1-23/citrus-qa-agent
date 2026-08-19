@@ -1,3 +1,6 @@
+﻿# -*- coding: utf-8 -*-
+# 注意: 本文件必须带 UTF-8 BOM 或前两行 coding 声明——pip 在 GBK 代码页的 Windows 上
+#       对无声明文件按 GBK 解码，中文注释会让 pip 崩 UnicodeDecodeError（v8.13-b5g 已修复）
 # Core
 langchain-core>=0.3.0
 langchain-openai>=0.2.0

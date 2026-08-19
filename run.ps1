@@ -31,6 +31,14 @@ if ($badChar) {
     exit 1
 }
 
+# v8.13-b5h: 统一 Python 运行时环境（作用于后续所有 python/uvicorn 子进程）——
+#   PYTHONUTF8=1: 根治 GBK 代码页下打印 ✓/中文的 UnicodeEncodeError 崩溃
+#   FASTEMBED_CACHE_PATH/HF_HOME: 模型缓存锚定项目内 agent\.hf_cache（整目录拷贝即自带，免重新下载）
+$env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'
+$env:FASTEMBED_CACHE_PATH = Join-Path (Join-Path $AgentDir '.hf_cache') 'fastembed'
+$env:HF_HOME = Join-Path (Join-Path $AgentDir '.hf_cache') 'hf'
+
 function Find-Python {
     # v8.13-b5d: 优先 py 启动器的 3.11/3.12/3.10（避免拿到 3.13+ 装不上依赖），
     #  再退回 PATH 上的 python.exe（版本仍会在 [2/6] 严格校验）
