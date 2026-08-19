@@ -650,6 +650,7 @@ footer {
 .api-divider { border: none; border-top: 1px solid var(--border-hairline); margin: 18px 0 14px; }
 .api-close { background: none; border: none; color: var(--text-muted); font-size: 18px; cursor: pointer; float: right; line-height: 1; padding: 0 2px; }
 .api-setup-card .api-close:hover { color: var(--text-primary); }
+.api-warn { color: #e0a34b; font-size: 11px; line-height: 1.6; margin: -2px 0 12px; }
 
 /* ── Sidebar ── */
 .sidebar {
@@ -1192,6 +1193,7 @@ footer {
     <hr class="api-divider">
     <label for="mainModelInput">主模型（默认 deepseek-v4-flash）</label>
     <input type="text" id="mainModelInput" placeholder="留空=默认；如 qwen-turbo" autocomplete="off">
+    <div class="api-warn">⚠ 本项目上下文预算为 1M token（context_budget.max_tokens=1000000），请选择上下文窗口 ≥1M 的模型（如 DeepSeek V4 Flash / qwen-long 10M）。qwen-turbo 等小窗口模型在长会话中会触发截断。</div>
     <label for="fastModelInput">快模型（压缩/意图，留空=跟随主模型）</label>
     <input type="text" id="fastModelInput" placeholder="留空=跟随主模型" autocomplete="off">
     <div style="height:10px"></div>

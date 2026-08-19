@@ -139,6 +139,7 @@ def _has_retrieval_markers(text: str) -> bool:
 
 
 _sync_cls_llm = None
+_sync_cls_llm_sig = None
 
 
 def _get_sync_cls_llm():
@@ -146,17 +147,22 @@ def _get_sync_cls_llm():
 
     v8.13: v8.12 传 cls 去重时漏传 llm，导致 classify 的 LLM 结构化分类兜底
     （正则快筛不命中的目标）在生产路径变成死代码——此处补回。
+    v8.14.1: 签名化缓存(model/base_url/api_key)——前端切换底座模型后自动重建，
+    避免运行时切换残留旧厂商客户端（与 llm_pool 同语义）。
     """
-    global _sync_cls_llm
-    if _sync_cls_llm is None:
+    global _sync_cls_llm, _sync_cls_llm_sig
+    sig = (settings.RESOLVED_MAIN_MODEL, settings.RESOLVED_MAIN_BASE_URL,
+           settings.RESOLVED_MAIN_API_KEY)
+    if _sync_cls_llm is None or sig != _sync_cls_llm_sig:
         from langchain_openai import ChatOpenAI
         _sync_cls_llm = ChatOpenAI(
-            model=settings.RESOLVED_MAIN_MODEL,
-            api_key=settings.RESOLVED_MAIN_API_KEY,
-            base_url=settings.RESOLVED_MAIN_BASE_URL,
+            model=sig[0],
+            api_key=sig[2],
+            base_url=sig[1],
             temperature=0,
             timeout=30,
         )
+        _sync_cls_llm_sig = sig
     return _sync_cls_llm
 
 

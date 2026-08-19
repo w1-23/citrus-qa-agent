@@ -5,7 +5,7 @@
 (model, api_key, base_url, temperature, timeout, max_tokens) 缓存复用；
 bind_tools 仍由调用方按需包装（轻量本地操作，不属于客户端创建开销）。
 
-注意: 运行时切换模型（switch_model）后 get_deepseek_model() 返回新值，
+注意: 前端设置面板切换模型后，get_deepseek_model() 返回新值（RESOLVED_MAIN_MODEL），
 自然产生新缓存键，旧实例保留至进程退出（成本可忽略）。
 """
 from __future__ import annotations

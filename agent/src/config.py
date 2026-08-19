@@ -332,22 +332,11 @@ if _config_issues:
     for _issue in _config_issues:
         _w.warning(f"[Config] 配置问题: {_issue}")
 
-# --- Model Switching Logic ---
-# v8.3.1: 全部切换 DeepSeek V4 Flash 正式版，V4 Pro 已移除
-_available_models: Dict[str, str] = {
-    "deepseek-v4-flash": "DeepSeek V4 Flash",
-    "deepseek-chat": "DeepSeek V4 Flash (legacy)",
-    "deepseek-reasoner": "DeepSeek V4 Flash thinking (legacy)",
-}
-_current_model = settings.MAIN_MODEL
+# --- 主模型解析（v8.14.1）---
+# 全链路主模型唯一入口 get_deepseek_model()：运行时覆盖（前端设置面板，
+# state/model_config.json）优先，未覆盖回退 yaml/env(model.main)。
+# 遗留的 switch_model/_available_models 运行时切换已删除（无调用点；
+# 切换统一走前端设置面板 POST /api/v2/config/model）。
 
 def get_deepseek_model() -> str:
-    # v8.14.1: 运行时覆盖优先（前端设置面板），未覆盖则回退 yaml/env 主模型
     return settings.RESOLVED_MAIN_MODEL
-
-def switch_model(model_id: str) -> bool:
-    global _current_model
-    if model_id in _available_models:
-        _current_model = model_id
-        return True
-    return False
