@@ -1,5 +1,5 @@
 ﻿# ============================================================
-#  Citrus QA Agent 发布打包（v8.13.0）
+#  Citrus QA Agent 发布打包（v8.14.1）
 #  ------------------------------------------------------------
 #  用法:
 #    powershell -File pack_release.ps1                # 主包（代码，~2MB）
@@ -12,11 +12,12 @@
 #  输出: dist/citrus-qa-agent-v8.13.0[-full[-data]].zip / dist/corpus-v8.13.0.zip
 #  用户拿到 zip → 解压 → 双击运行 run.ps1 → 浏览器打开即用
 # ============================================================
-param([switch]$IncludeModels, [switch]$IncludeData, [switch]$CorpusOnly)
+param([switch]$IncludeModels, [switch]$IncludeData, [switch]$CorpusOnly,
+      [string]$BatchOnly = '', [int]$PartNo = 0)
 
 $ErrorActionPreference = 'Stop'
 $Root = $PSScriptRoot
-$Version = '8.13.0'
+$Version = '8.14.1'
 $Dist = Join-Path $Root 'dist'
 $Suffix = $(if ($IncludeModels) { '-full' } else { '' }) + $(if ($IncludeData) { '-data' } else { '' })
 $ZipName = "citrus-qa-agent-v$Version$Suffix.zip"
@@ -32,6 +33,35 @@ if ($CorpusOnly) {
     if (-not (Test-Path $DataDir)) {
         Write-Host "⚠ agent/data 不存在，无法打包语料" -ForegroundColor Red
         exit 1
+    }
+    # ── v8.14.1: 单批增量分卷（-CorpusOnly -BatchOnly <批次名> [-PartNo <n>]）──
+    # 新增批次不打乱既有分卷编号：单独打成 corpus-v$Version-<PartNo>.zip
+    # （默认 PartNo=1；运行 run.ps1 时自动按序号续接下载）。
+    if ($BatchOnly) {
+        $name = $BatchOnly
+        $j = if (Test-Path (Join-Path $DataDir "$name\chunks.jsonl")) { Join-Path $DataDir "$name\chunks.jsonl" } else { Join-Path $DataDir "$name\chunks\chunks.jsonl" }
+        $tbl = Join-Path $DataDir "lancedb\$name.lance"
+        if (-not (Test-Path $j) -or -not (Test-Path $tbl)) {
+            Write-Host "⚠ 批次 $name 缺少 chunks.jsonl 或 lancedb\$name.lance" -ForegroundColor Red
+            exit 1
+        }
+        $pn = if ($PartNo -gt 0) { $PartNo } else { 1 }
+        $zipPath = Join-Path $Dist "corpus-v$Version-$pn.zip"
+        if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+        New-Item -ItemType Directory -Force -Path $Dist | Out-Null
+        $binRoot = Join-Path $Stage ("part" + $pn)
+        $binData = Join-Path $binRoot 'agent\data'
+        $dst = Join-Path $binData $name
+        New-Item -ItemType Directory -Force -Path $dst | Out-Null
+        New-Item -ItemType Directory -Force -Path (Join-Path $binData 'lancedb') | Out-Null
+        Copy-Item -Force $j (Join-Path $dst 'chunks.jsonl')
+        robocopy $tbl (Join-Path $binData "lancedb\$name.lance") /E /XF *.lock /R:0 /W:0 /NFL /NDL /NJH /NJS | Out-Null
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [System.IO.Compression.ZipFile]::CreateFromDirectory($binRoot, $zipPath, [System.IO.Compression.CompressionLevel]::NoCompression, $false)
+        $mb = [Math]::Round((Get-Item $zipPath).Length / 1MB, 1)
+        Write-Host "✅ 单批分卷打包完成: corpus-v$Version-$pn.zip  $mb MB（$name）" -ForegroundColor Green
+        Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue
+        exit 0
     }
     # v8.13.0: 语料分卷打包——GitHub 单附件上限 2GiB，按批次贪心装箱为若干 <1GB 分卷，
     #  run.ps1 按序号循环下载并解压合并（以后数据继续增大也不会超限）

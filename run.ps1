@@ -1,5 +1,5 @@
 ﻿# ============================================================
-#  Citrus QA Agent 一键启动脚本（v8.13.0）
+#  Citrus QA Agent 一键启动脚本（v8.14.1）
 #  ------------------------------------------------------------
 #  零门槛：下载解压后，右键 → 使用 PowerShell 运行（或: powershell -File run.ps1）
 #  自动完成: 语料下载 → Python 检测/安装 → 虚拟环境 → 依赖安装 → 模型下载 → 启动服务
@@ -77,7 +77,7 @@ Write-Host "  ============================" -ForegroundColor DarkGray
 #  语料作为 Releases 附件分发，首次运行自动下载约 1.2GB。
 #  国内加速: 设置环境变量 GH_MIRROR（例如 https://ghproxy.net/）即可自动加前缀。
 $Repo = 'w1-23/citrus-qa-agent'
-$ReleaseVersion = '8.13.0'
+$ReleaseVersion = '8.14.1'
 $CorpusZip = Join-Path $Root 'corpus.zip'
 $DataDir = Join-Path $AgentDir 'data'
 $LanceDir = Join-Path $DataDir 'lancedb'
