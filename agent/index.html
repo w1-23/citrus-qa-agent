@@ -1192,7 +1192,7 @@ footer {
         <div class="avatar">◆</div>
         <div class="content">
           您好，我是 <span id="welcomeVersion">Citrus QA Agent v8.13.0</span>。<br>
-          <span style="color:var(--text-muted);font-size:13px">本地 RAG 检索 · CrossRef 学术搜索 · 文献综述写作 · 实验设计 · 文件读写</span>
+          <span style="color:var(--text-muted);font-size:13px">本地 RAG 检索 · PubMed 学术检索 · OA 全文证据 · 文献综述写作 · 实验设计 · 文件读写</span>
         </div>
       </div>
     </div>
@@ -2151,7 +2151,7 @@ async function clearSession(silent) {
   if (!silent && !confirm('确定清空当前会话？')) return;
   try {
     await fetch('/api/v1/session/' + sessionId + '/clear', { method: 'POST' });
-    chatContainer.innerHTML = '<div class="message bot"><div class="avatar">◆</div><div class="content">您好，我是 <span id="welcomeVersion">Citrus QA Agent v' + _appVersion() + '</span>。<br><span style="color:var(--text-muted);font-size:13px">本地 RAG 检索 · CrossRef 学术搜索 · 文献综述写作 · 实验设计 · 文件读写</span></div></div>';
+    chatContainer.innerHTML = '<div class="message bot"><div class="avatar">◆</div><div class="content">您好，我是 <span id="welcomeVersion">Citrus QA Agent v' + _appVersion() + '</span>。<br><span style="color:var(--text-muted);font-size:13px">本地 RAG 检索 · PubMed 学术检索 · OA 全文证据 · 文献综述写作 · 实验设计 · 文件读写</span></div></div>';
     sidebarContent.innerHTML = '<div class="empty-sidebar">提交问题后文献将在此展示</div>';
     citationCount.textContent = '0';
     roundHistory = [];

@@ -18,7 +18,7 @@ retrieval:
   hyde_max_tokens: 512           # HyDE 假想答案输出上限（与 prompt 250词约束配套，防截断）
 
 # 学术搜索配置（CrossRef/PubMed/Semantic Scholar/OpenAlex）
-# 根据网络状况选择性启用。大陆网络仅 CrossRef+PubMed 稳定。
+# 根据网络状况选择性启用。大陆网络 PubMed 稳定；其余源无摘要或需外网，默认关闭。
 academic_search:
   enabled_sources: ["pubmed"]  # 仅 PubMed：有摘要+MeSH；CrossRef 无摘要无全文，已移除
   timeout_per_source: 5  # 单源超时秒数

@@ -133,10 +133,6 @@ _SUPERVISOR_TOOL_SCHEMAS = [
                         "type": "string",
                         "description": "File path to the PDF paper (absolute or relative to workspace)",
                     },
-                    "cross_reference": {
-                        "type": "boolean",
-                        "description": "Whether to validate metadata via CrossRef (default false)",
-                    },
                 },
                 "required": ["file_path"],
             },
