@@ -81,6 +81,36 @@ $ReleaseVersion = '8.13.0'
 $CorpusZip = Join-Path $Root 'corpus.zip'
 $DataDir = Join-Path $AgentDir 'data'
 $LanceDir = Join-Path $DataDir 'lancedb'
+
+# ── [0/6] 包完整性自检（防止解压错包/旧包/漏拷贝；v8.13-b5i）──
+$cfgVer = $null
+$cfgFile = Join-Path $AgentDir 'src\config.py'
+if (Test-Path $cfgFile) {
+    $m = Select-String -Path $cfgFile -Pattern 'VERSION\s*=\s*"([^"]+)"' | Select-Object -First 1
+    if ($m) { $cfgVer = $m.Matches[0].Groups[1].Value }
+}
+if ($cfgVer -and $cfgVer -ne $ReleaseVersion) {
+    Write-Host ""
+    Write-Host "  ⚠ 当前包版本: $cfgVer，预期: v$ReleaseVersion —— 你在用旧包！" -ForegroundColor Red
+    Write-Host "    旧发布包（v8.5.0 / v8.9.0）已废止删除；请从 https://github.com/w1-23/citrus-qa-agent/releases 下载最新主包" -ForegroundColor Yellow
+    Write-Host ""
+} else {
+    Write-Host "  ✔ 包版本校验通过: v$ReleaseVersion" -ForegroundColor DarkGray
+}
+Write-Host "  ── 部署完整性自检 ──" -ForegroundColor DarkGray
+$hc = Join-Path $AgentDir '.hf_cache'
+$checks = @(
+    @{ n = "代码包 (agent\src\config.py)";            p = $cfgFile },
+    @{ n = "语料库 (agent\data\lancedb)";            p = $LanceDir },
+    @{ n = "e5 编码模型缓存 (.hf_cache\fastembed)";   p = (Join-Path (Join-Path $hc 'fastembed') 'models--qdrant--multilingual-e5-large-onnx') },
+    @{ n = "重排模型缓存 (.hf_cache\onnx_reranker\model.onnx)"; p = (Join-Path (Join-Path $hc 'onnx_reranker') 'model.onnx') }
+)
+foreach ($c in $checks) {
+    if (Test-Path $c.p) { Write-Host "    ✔ $($c.n)" -ForegroundColor Green }
+    else { Write-Host "    ⚠ $($c.n) —— 缺失：将自动在线下载（首次较慢）；若已拷贝，请检查是否放对位置" -ForegroundColor Yellow }
+}
+Write-Host ""
+
 if (-not (Test-Path $LanceDir)) {
     Write-Host "[1/6] 未检测到本地语料库，正在从 GitHub Releases 自动下载语料分卷（约 2.2GB，首次约 20-40 分钟，取决于网络）..." -ForegroundColor Cyan
     $ghBase = if ($env:GH_MIRROR) { $env:GH_MIRROR } else { 'https://github.com' }

@@ -43,21 +43,26 @@
 
 > 语料 = **公开文献 7 批次**（老 5 批 + 新增 xrz / 1-1200，LanceDB 向量库 + chunks.jsonl），因单附件超 GitHub 2GiB 上限拆为 3 个分卷。**无需手动下载**：`run.ps1` 首次运行自动按序号下载**全部分卷**并解压合并到 `agent/data/`，之后秒级跳过；也可手动下载后全部解压到项目根目录（自动合并）直接运行。
 
+> ⚠️ **只认最新包**：`v8.13.0` 是当前正式版；旧发布包 `v8.5.0` / `v8.9.0` **已删除废止**。旧 zip 缺语料分卷、缺 e5 模型缓存、缺 pip 编码修复，部署时会报 `UnicodeDecodeError` 或让你多等一遍模型下载——请一律从 [Releases](https://github.com/w1-23/citrus-qa-agent/releases) 下载最新主包；运行 `run.ps1` 后窗口会先做**包版本与完整性自检**（见下方步骤 0），有不对会明确红字提示。
+
 **模型自动安装**：向量编码（multilingual-e5-large）与重排（bge-reranker-v2-m3）模型不打包（重排模型单文件超 GitHub 2GB 上限）——首次运行 `run.ps1` 自动经 **HuggingFace 国内镜像（hf-mirror.com）** 下载，约 5-15 分钟，一次完成后秒级启动；也可手动运行 `python prepare_models.py`（`--skip-reranker` 可跳过重排模型）。
+
+> **零下载部署**：把源机 `agent/.hf_cache/`（含 e5 本体 `fastembed\models--qdrant--multilingual-e5-large-onnx`，约 4.8GB）与 `agent/data/`（约 2.2GB）整目录拷贝到新机器即可直接运行。模型缓存**与 GPU/CPU 无关**——CPU、AMD、NVIDIA（DirectML）通吃同一份；显卡加速只由每台机器自己 pip 安装的 onnxruntime 执行后端决定。**注意 e5 本体必须包含**，只拷了 2.6GB 旧缓存仍会在线重新下载。
 
 `run.ps1` 全自动处理：
 
 | 步骤 | 行为 |
 |---|---|
-| 1. 语料 | 检测 `agent/data/lancedb`，缺失则自动从 GitHub Releases 下载（仅首次，~1.05GB） |
-| 2. Python | 未安装则自动 `winget install Python 3.11` |
+| 0. 包自检 | 校验包版本（防旧包）+ 检查语料/模型缓存是否缺失，缺失项黄色提示 |
+| 1. 语料 | 检测 `agent/data/lancedb`，缺失则自动从 GitHub Releases 下载 3 分卷（仅首次，~2.2GB） |
+| 2. Python | 未安装或版本不符则自动 `winget install Python 3.11` |
 | 3. 虚拟环境 | 自动创建 `agent/.venv`（仅首次） |
 | 4. 依赖 | 自动 `pip install -r requirements.txt`（仅首次，5-10 分钟） |
 | 5. 模型 | 自动下载向量编码模型 + 导出重排模型到本地缓存（仅首次，5-15 分钟；之后秒级启动） |
 | 6. 启动 | 启动服务并自动打开浏览器 |
 
-> 首次等待较长是因为下载语料和安装依赖/模型（语料 ~1.05GB，依赖+模型约 2GB）；一次完成后下次启动秒级。
-> 也可选择 `-full` 完整包（含模型缓存 + 语料，约 3.3GB，需自行打包），下载后跳过步骤 1/5 直接运行。
+> 首次等待较长是因为下载语料和安装依赖/模型（语料 ~2.2GB，依赖+模型约 2GB）；一次完成后下次启动秒级。
+> 也可选择 `-IncludeData -IncludeModels` 打包完整包（含模型缓存 + 语料，约 7GB，需自行打包），下载后跳过步骤 1/5 直接运行。
 
 ### 部署给其他人
 
@@ -66,7 +71,7 @@
 1. 下载 [citrus-qa-agent-v8.13.0.zip](https://github.com/w1-23/citrus-qa-agent/releases)（~2.3MB）→ 解压到任意目录
 2. **双击 `run.ps1`**（或右键 → 使用 PowerShell 运行）
 3. 首次运行全自动完成（约 20-40 分钟，取决于网络）：
-   - 语料自动下载（~1.05GB，从 GitHub Releases）
+   - 语料自动下载（~2.2GB 三分卷，从 GitHub Releases）
    - Python 检测/安装 → 虚拟环境 → 依赖安装
    - 模型经 hf-mirror 国内镜像自动下载
 4. 浏览器自动打开 `http://localhost:8000` → 页面填写 DeepSeek API Key → 开始使用
@@ -77,11 +82,16 @@
 
 > 注：本仓库 .ps1 脚本按 Windows PowerShell 5.1 兼容编写（UTF-8 带 BOM），任何编辑器编辑后请保持该编码，否则双击运行会乱码报错。
 
-**常见问题（FAQ）**
+**常见问题（FAQ/避坑速查）**
 
-- **语料下载慢/失败？** 先设置环境变量 `GH_MIRROR`（如 `https://ghproxy.net/`）再运行 run.ps1；或手动下载 `corpus-v8.13.0.zip` 解压到项目根目录（zip 内含 `agent/data/...`）后直接运行。
+- **报 `UnicodeDecodeError: 'gbk' codec ...` 或 pip 一装依赖就崩？** → 你用的一定是**旧包**（pip 在中文 Windows 上读无编码声明的 requirements 会崩，v8.13.0 已加 UTF-8 BOM + `# -*- coding: utf-8 -*-` 修复）。换最新主包，勿用 v8.5.0/v8.9.0。
+- **拷了 .hf_cache 却还在重新下载模型、速度极慢？** → 缓存缺 e5 本体（应含 `fastembed\models--qdrant--multilingual-e5-large-onnx` 约 2.1GB）。重启新版 run.ps1 会黄色提示；补齐或接受首次在线下载一次。
+- **中文文件夹名（如 `E:\文献`）？** → 必须使用纯英文路径（如 `E:\citrus`）。中文路径会让 onnxruntime/模型库报莫名 Traceback；新版脚本会自动拦截并红字提示。
+- **窗口闪退看不到报错？** → 新版不会闪退：任何失败都会停在窗口，完整输出在 `agent\logs\last_run.log`，把该文件发给维护者即可。
+- **Python 没装 / 版本不对？** → 脚本会自动 `winget install` Python 3.11（若系统有高版本 3.13+ 会自动降级使用），无需手动处理。
+- **语料下载慢/失败？** 先设置环境变量 `GH_MIRROR`（如 `https://ghproxy.net/`）再运行 run.ps1；或手动下载 `corpus-v8.13.0-1/2/3.zip` 解压到项目根目录后直接运行。
 - **模型下载慢？** 已默认走国内镜像 hf-mirror.com；如需官方源，注释 run.ps1 中 `$env:HF_ENDPOINT` 一行。
-- **首次等了很久正常吗？** 正常——语料 1.05GB + 依赖 + 模型约 2GB，总计首次约 20-40 分钟；一次完成后下次启动秒级。
+- **首次等了很久正常吗？** 正常——语料 2.2GB + 依赖 + 模型约 2GB，总计首次约 20-40 分钟；一次完成后下次启动秒级。
 - **怎么停止？** 直接关闭 PowerShell 窗口，或运行 `stop.ps1`。
 - **怎么更新版本？** 下载新主包解压**覆盖旧目录**（`agent/data/` 与 `agent/state/` 自动保留，会话与语料不丢），重新运行 run.ps1 即可。
 - **换电脑/多人使用？** 每台机器独立部署；语料数据共用时直接拷贝 `agent/data/` 目录（LanceDB 无单实例锁限制，可多实例并行）。
