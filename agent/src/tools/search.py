@@ -540,12 +540,11 @@ def _deduplicate_text(text: str) -> str:
 
 
 @tool(response_format="content_and_artifact")
-def pdf_read(file_path: str, cross_reference: bool = True) -> tuple[str, dict]:
+def pdf_read(file_path: str) -> tuple[str, dict]:
     """读取本地 PDF 论文文件，提取 摘要 → Results/Conclusion，去重去参文献。
 
     Args:
         file_path: PDF 文件路径（绝对路径或相对 workspace/ 的路径）
-        cross_reference: 是否与文献库比对关联信息
     """
     import fitz
 
