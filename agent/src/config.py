@@ -2,6 +2,7 @@
 Unified configuration for Citrus RAG Agent using pydantic-settings + YAML.
 Priority: environment variable > YAML > pydantic-settings default
 """
+import json
 import os
 import logging
 from pathlib import Path
@@ -232,6 +233,59 @@ class Settings(BaseSettings):
         except Exception:
             return False
 
+    # ── v8.14.1 运行时模型覆盖（前端设置面板切换底座模型）──
+    # state/model_config.json（gitignore 内）存 {main_model,fast_model,main_base_url,fast_base_url}；
+    # 空字段 = 回退 yaml/env 默认。优先级: 运行时覆盖 > 环境变量 > YAML > 默认值。
+    _runtime_model_cfg: Dict[str, str] = {}
+
+    def _load_runtime_model_config(self) -> None:
+        try:
+            p = PROJECT_ROOT / "state" / "model_config.json"
+            if p.exists():
+                data = json.loads(p.read_text(encoding="utf-8"))
+                self._runtime_model_cfg = {
+                    k: str(v).strip() for k, v in data.items()
+                    if k in ("main_model", "fast_model", "main_base_url", "fast_base_url")
+                    and str(v).strip()
+                }
+        except Exception:
+            self._runtime_model_cfg = {}
+
+    def save_runtime_model_config(self, *, main: str = "", fast: str = "",
+                                  main_base_url: str = "", fast_base_url: str = "") -> bool:
+        cfg = {}
+        for k, v in (("main_model", main), ("fast_model", fast),
+                     ("main_base_url", main_base_url), ("fast_base_url", fast_base_url)):
+            if (v or "").strip():
+                cfg[k] = v.strip()
+        try:
+            p = PROJECT_ROOT / "state" / "model_config.json"
+            if not cfg:
+                p.unlink(missing_ok=True)
+            else:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._runtime_model_cfg = cfg
+            return True
+        except Exception:
+            return False
+
+    @property
+    def has_model_overrides(self) -> bool:
+        return bool(self._runtime_model_cfg)
+
+    @property
+    def RESOLVED_MAIN_MODEL(self) -> str:
+        return self._runtime_model_cfg.get("main_model") or self.MAIN_MODEL
+
+    @property
+    def RESOLVED_FAST_MODEL(self) -> str:
+        return self._runtime_model_cfg.get("fast_model") or self.FAST_MODEL
+
+    @property
+    def RESOLVED_MAIN_BASE_URL(self) -> str:
+        return self._runtime_model_cfg.get("main_base_url") or self.MAIN_BASE_URL
+
     @property
     def RESOLVED_MAIN_API_KEY(self) -> str:
         return self._runtime_api_key or self.DEEPSEEK_API_KEY or self.MAIN_API_KEY
@@ -242,7 +296,9 @@ class Settings(BaseSettings):
 
     @property
     def RESOLVED_FAST_BASE_URL(self) -> str:
-        return self.FAST_BASE_URL or self.MAIN_BASE_URL
+        return (self._runtime_model_cfg.get("fast_base_url")
+                or self.FAST_BASE_URL
+                or self.RESOLVED_MAIN_BASE_URL)
 
 settings = Settings()
 
@@ -251,6 +307,7 @@ settings = Settings()
 # 已有 HF_ENDPOINT 环境变量则尊重用户自定义
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 settings._load_runtime_api_key()
+settings._load_runtime_model_config()
 
 # ── 启动配置校验（v8.3.3 fail-fast）──
 def validate_config() -> list:
@@ -285,7 +342,8 @@ _available_models: Dict[str, str] = {
 _current_model = settings.MAIN_MODEL
 
 def get_deepseek_model() -> str:
-    return _current_model
+    # v8.14.1: 运行时覆盖优先（前端设置面板），未覆盖则回退 yaml/env 主模型
+    return settings.RESOLVED_MAIN_MODEL
 
 def switch_model(model_id: str) -> bool:
     global _current_model

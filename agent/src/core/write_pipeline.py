@@ -1202,9 +1202,9 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
         from langchain_openai import ChatOpenAI
         def llm_factory():
             return ChatOpenAI(
-                model=settings.MAIN_MODEL,
+                model=settings.RESOLVED_MAIN_MODEL,
                 api_key=settings.RESOLVED_MAIN_API_KEY,
-                base_url=settings.MAIN_BASE_URL,
+                base_url=settings.RESOLVED_MAIN_BASE_URL,
                 temperature=0,
                 timeout=settings.PIPELINE_SECTION_TIMEOUT,
             )

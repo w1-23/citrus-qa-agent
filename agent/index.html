@@ -645,6 +645,11 @@ footer {
   font-size: 11px; color: var(--text-muted);
   line-height: 1.6;
 }
+/* v8.14.1 设置面板：模型切换 + 分隔线 + 可滚动 + 关闭按钮 */
+.api-setup-card { max-height: 92vh; overflow-y: auto; }
+.api-divider { border: none; border-top: 1px solid var(--border-hairline); margin: 18px 0 14px; }
+.api-close { background: none; border: none; color: var(--text-muted); font-size: 18px; cursor: pointer; float: right; line-height: 1; padding: 0 2px; }
+.api-setup-card .api-close:hover { color: var(--text-primary); }
 
 /* ── Sidebar ── */
 .sidebar {
@@ -1167,21 +1172,38 @@ footer {
       </svg>
     </button>
     <button class="theme-btn" id="themeBtn" onclick="toggleTheme()" title="切换主题">⊙</button>
+    <button class="theme-btn" id="modelSettingsBtn" onclick="openSettingsModal()" title="设置（API Key / 模型切换）">⚙</button>
   </div>
 </header>
 
 <!-- v8.5.0 开源版：首次启动 API Key 引导（未配置时全屏遮罩，配置后隐藏） -->
 <div class="api-setup-overlay" id="apiSetupOverlay" style="display:none">
   <div class="api-setup-card">
-    <div class="api-logo">🍊 Citrus QA Agent</div>
-    <div class="api-sub">本地运行的科研问答 Agent。首次使用请填写你的 DeepSeek API Key（模型固定为 <b>deepseek-v4-flash</b>），Key 仅保存在本机，不会上传或写入项目配置。</div>
-    <label for="apiKeyInput">DeepSeek API Key（sk- 开头）</label>
+    <div class="api-logo">🍊 Citrus QA Agent <button class="api-close" id="settingsCloseBtn" onclick="closeSettingsModal()" style="display:none" title="关闭">✕</button></div>
+    <div class="api-sub">本地运行的科研问答 Agent。填写 API Key + 主/快模型 + API 地址即可切换底座模型（留空 = 恢复默认 deepseek-v4-flash）。Key 与模型配置仅保存在本机，不会上传。</div>
+
+    <label for="apiKeyInput">API Key（sk- 开头）</label>
     <input type="password" id="apiKeyInput" placeholder="sk-..." autocomplete="off">
     <div class="api-error" id="apiKeyError"></div>
     <div class="api-actions">
-      <button class="api-save" id="apiKeySave" onclick="saveApiKey()">保存并开始使用</button>
+      <button class="api-save" id="apiKeySave" onclick="saveApiKey()">保存 Key</button>
     </div>
-    <div class="api-note">如何获取：platform.deepseek.com → API Keys → 创建。配置后保存于本机（state/api_key），无需重复填写；如需更换，清除该文件后刷新页面即可。</div>
+
+    <hr class="api-divider">
+    <label for="mainModelInput">主模型（默认 deepseek-v4-flash）</label>
+    <input type="text" id="mainModelInput" placeholder="留空=默认；如 qwen-turbo" autocomplete="off">
+    <label for="fastModelInput">快模型（压缩/意图，留空=跟随主模型）</label>
+    <input type="text" id="fastModelInput" placeholder="留空=跟随主模型" autocomplete="off">
+    <div style="height:10px"></div>
+    <label for="mainBaseUrlInput">主 API 地址（默认 https://api.deepseek.com）</label>
+    <input type="text" id="mainBaseUrlInput" placeholder="如 https://dashscope.aliyuncs.com/compatible-mode/v1" autocomplete="off">
+    <label for="fastBaseUrlInput">快模型 API 地址（留空=跟随主地址）</label>
+    <input type="text" id="fastBaseUrlInput" placeholder="留空=跟随主地址" autocomplete="off">
+    <div class="api-error" id="modelConfigError"></div>
+    <div class="api-actions">
+      <button class="api-save" id="modelConfigSave" onclick="saveModelConfig()">保存模型配置</button>
+    </div>
+    <div class="api-note">切换流程：先填 API 地址 + 模型名并保存，再填该厂商的 Key 并保存。DeepSeek: https://api.deepseek.com ｜ 通义 DashScope: https://dashscope.aliyuncs.com/compatible-mode/v1。配置保存于本机（state/），立即生效、无需重启。</div>
   </div>
 </div>
 
@@ -1364,6 +1386,9 @@ function maybeShowApiSetup(cfg) {
     overlay.style.display = 'none';
   } else {
     overlay.style.display = 'flex';
+    fillModelConfigFields(cfg);
+    var closeBtn = document.getElementById('settingsCloseBtn');
+    if (closeBtn) closeBtn.style.display = 'none';
     var input = document.getElementById('apiKeyInput');
     if (input) input.focus();
   }
@@ -1389,6 +1414,62 @@ function saveApiKey() {
       if (overlay) overlay.style.display = 'none';
       updateStatus('ok', 'API Key 已配置，可以开始使用');
       if (input) input.value = '';
+      loadRuntimeConfig();
+    } else {
+      if (err) err.textContent = (res.d && res.d.detail) || '保存失败';
+      if (btn) btn.disabled = false;
+    }
+  }).catch(function(e) {
+    if (err) err.textContent = '请求失败: ' + e.message;
+    if (btn) btn.disabled = false;
+  });
+}
+/* v8.14.1 运行时底座模型切换（前端设置面板） */
+function fillModelConfigFields(cfg) {
+  var m = (cfg && cfg.model) || {};
+  function setv(id, v) { var el = document.getElementById(id); if (el) el.value = v || ''; }
+  setv('mainModelInput', m.main);
+  setv('fastModelInput', m.fast);
+  setv('mainBaseUrlInput', m.main_base_url);
+  setv('fastBaseUrlInput', m.fast_base_url);
+}
+function openSettingsModal() {
+  var overlay = document.getElementById('apiSetupOverlay');
+  if (!overlay) return;
+  overlay.style.display = 'flex';
+  fillModelConfigFields(_runtimeConfig);
+  var closeBtn = document.getElementById('settingsCloseBtn');
+  if (closeBtn) closeBtn.style.display = (_runtimeConfig && _runtimeConfig.has_api_key) ? 'inline-block' : 'none';
+  var keyInput = document.getElementById('apiKeyInput');
+  if (!(_runtimeConfig && _runtimeConfig.has_api_key) && keyInput) keyInput.focus();
+}
+function closeSettingsModal() {
+  var overlay = document.getElementById('apiSetupOverlay');
+  if (overlay) overlay.style.display = 'none';
+}
+function saveModelConfig() {
+  var err = document.getElementById('modelConfigError');
+  var btn = document.getElementById('modelConfigSave');
+  function val(id) { var el = document.getElementById(id); return (el && el.value || '').trim(); }
+  var payload = {
+    main_model: val('mainModelInput'),
+    fast_model: val('fastModelInput'),
+    main_base_url: val('mainBaseUrlInput'),
+    fast_base_url: val('fastBaseUrlInput'),
+  };
+  if (btn) btn.disabled = true;
+  if (err) err.textContent = '保存中...';
+  fetch('/api/v2/config/model', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }).then(function(r) {
+    return r.json().then(function(d) { return { ok: r.ok, d: d }; });
+  }).then(function(res) {
+    if (res.ok) {
+      if (err) err.textContent = (res.d && res.d.warning) ? '⚠ ' + res.d.warning : '';
+      updateStatus('ok', '模型配置已保存（主模型: ' + (res.d.model.main || '默认') + '）');
+      loadRuntimeConfig();
     } else {
       if (err) err.textContent = (res.d && res.d.detail) || '保存失败';
       if (btn) btn.disabled = false;

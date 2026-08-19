@@ -151,9 +151,9 @@ def _get_sync_cls_llm():
     if _sync_cls_llm is None:
         from langchain_openai import ChatOpenAI
         _sync_cls_llm = ChatOpenAI(
-            model=settings.MAIN_MODEL,
+            model=settings.RESOLVED_MAIN_MODEL,
             api_key=settings.RESOLVED_MAIN_API_KEY,
-            base_url=settings.MAIN_BASE_URL,
+            base_url=settings.RESOLVED_MAIN_BASE_URL,
             temperature=0,
             timeout=30,
         )
@@ -174,7 +174,7 @@ async def _classify_document(text: str) -> bool:
             timeout=10,
         )
         resp = client.chat.completions.create(
-            model=settings.FAST_MODEL,
+            model=settings.RESOLVED_FAST_MODEL,
             messages=[
                 {"role": "system", "content": (
                     "Classify the given text as exactly ONE word:\n"
@@ -1054,7 +1054,7 @@ async def supervisor_node(state: AgentState) -> dict:
     llm_base = _pool_get_llm(
         model=get_deepseek_model(),
         api_key=settings.RESOLVED_MAIN_API_KEY,
-        base_url=settings.MAIN_BASE_URL,
+        base_url=settings.RESOLVED_MAIN_BASE_URL,
         temperature=settings.TEMPERATURE_MAIN,
         max_tokens=32768,
         timeout=120,

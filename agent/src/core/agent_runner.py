@@ -307,7 +307,7 @@ async def run_agent(
     llm_base = _pool_get_llm(
         model=get_deepseek_model(),
         api_key=settings.RESOLVED_MAIN_API_KEY,
-        base_url=settings.MAIN_BASE_URL,
+        base_url=settings.RESOLVED_MAIN_BASE_URL,
         temperature=settings.TEMPERATURE_MAIN,
         max_tokens=max_t,
         timeout=timeout_sec,
