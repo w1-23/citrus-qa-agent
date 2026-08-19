@@ -118,24 +118,57 @@ def _restore(saved: dict):
         setattr(settings, attr, val)
 
 
-# ───────────────────────── LLM-as-Judge 钩子（需模型 key）─────────────────────────
+# ───────────────────────── LLM-as-Judge（需模型 key；分离模型=fast，温度0）─────────────────────────
 _JUDGE_RUBRIC = {
-    "factual": "回答中的每条关键断言是否被给出的证据支持（不支持/部分/支持）",
-    "citation": "回答引用的 [id] 是否与证据文本一致（错配率）",
-    "gap": "证据不足处是否如实声明缺口（未声明/部分/声明）",
+    "factual": "回答中的每条关键断言是否被给出的证据支持（0=编造/0.5=部分/1=完全）",
+    "citation": "回答引用的证据是否与给出证据一致（0=错配/0.5=部分/1=一致）",
+    "gap": "证据不足处是否如实声明缺口（0=未声明/0.5=部分/1=声明）",
 }
 
 
-def judge_hook(question: str, answer: str, evidence: list, api_key: str = "") -> dict:
-    """三维 rubric 打分（LLM-as-Judge 分离模型）。未实现时返回 skip。
+def _judge_evidence_lines(hits: list, max_chars: int = 1200) -> str:
+    out = []
+    for c in hits[:6]:
+        title = str(c.get("title") or c.get("name") or "?")[:60]
+        text = str(c.get("text") or c.get("abstract") or c.get("snippet") or "")[: max_chars // 6]
+        out.append(f"[{c.get('paper_id')}] {title}: {text}")
+    return "\n".join(out)
 
-    设计: Judge=独立模型、temperature 0、给理由；人工抽检 10% 校准（07 §4）。
-    实现要点: 用 src.core.llm_pool 的 fast 模型；逐维 0-1 分数 + 一句话理由。
+
+def judge_hook(question: str, answer: str, hits: list, api_key: str = "") -> dict:
+    """三维 rubric 打分：事实/引用一致/缺口声明。
+
+    Judge = 独立 fast 模型、temperature 0、给理由；人工抽检 10% 校准（07 §4）。
+    key 缺失 → skipped（离线检索模式不受影响）。
     """
-    if not api_key:
+    from src.config import settings
+    key = api_key or settings.RESOLVED_FAST_API_KEY
+    if not key:
         return {"status": "skipped", "reason": "no api key"}
-    # TODO(P0): 接 llm_pool 或独立 judge 通道；先落格式保证 golden 字段完整
-    return {"status": "todo", "rubric": _JUDGE_RUBRIC}
+    if not (answer or "").strip():
+        return {"status": "skipped", "reason": "empty answer"}
+    try:
+        from src.core.llm_pool import get_llm
+        model = settings.RESOLVED_FAST_MODEL
+        base_url = settings.RESOLVED_FAST_BASE_URL
+        llm = get_llm(model, key, base_url, temperature=0.0, timeout=60, max_tokens=800)
+        ev = _judge_evidence_lines(hits)
+        sys_prompt = (
+            "你是独立的科研答案评审（Judge）。基于【证据】对【回答】按三维打分，"
+            "只输出 JSON：{\"factual\":0|0.5|1,\"citation\":0|0.5|1,\"gap\":0|0.5|1,"
+            "\"reasons\":{\"factual\":\"...\",\"citation\":\"...\",\"gap\":\"...\"}}。"
+            "事实=断言是否被证据支持；引用=引用的证据是否一致；缺口=证据不足处是否如实声明。"
+        )
+        user = f"【问题】{question}\n【证据】\n{ev or '(无证据)'}\n【回答】\n{answer[:4000]}"
+        resp = llm.invoke([{"role": "system", "content": sys_prompt},
+                           {"role": "user", "content": user}])
+        content = (resp.content or "").strip()
+        content = content[content.find("{"): content.rfind("}") + 1]
+        import json as _json
+        parsed = _json.loads(content)
+        return {"status": "ok", "model": model, **parsed}
+    except Exception as e:  # noqa: BLE001
+        return {"status": "error", "reason": str(e)[:300]}
 
 
 # ───────────────────────── 主流程 ─────────────────────────
@@ -194,9 +227,10 @@ def main():
             print("\n[eval] 无含 gold 的题目（全是 TBD）——请人工补 required_evidence")
 
         _REPORT.parent.mkdir(exist_ok=True)
+        report_path = _REPORT.with_name(f"eval_qa_report_{args.ablation}_{args.subset.lower()}.json")
         out = {"ablation": args.ablation, "subset": args.subset, "rows": rows}
-        _REPORT.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"[eval] 报告已写: {_REPORT}")
+        report_path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[eval] 报告已写: {report_path}")
 
         if args.mode == "judge":
             print("[eval] judge 模式为钩子框架（judge_hook 需接 llm_pool，见 TODO）")
