@@ -391,6 +391,9 @@ def _generate_hyde_answer(query: str) -> str | None:
         )
         answer = resp.choices[0].message.content.strip()
         # v8.4.2: 强制英文校验（中文 query 时常跟随生成中文，破坏英文向量匹配）
+        if not answer:
+            logger.warning("[HyDE] 生成结果为空，回退基础检索")
+            return None
         if not _is_english_answer(answer):
             logger.warning(
                 f"[HyDE] 输出非英文（CJK 占比过高），回退基础检索: {answer[:60]!r}")
