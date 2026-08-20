@@ -143,6 +143,78 @@ def plot_cost_quality(reports: dict, outdir: Path):
     print("[plot] saved", outdir / "fig7_cost_quality.png")
 
 
+def plot_extra(logdir: Path, outdir: Path):
+    """fig8 稠密∩BM25 交叠率；fig9 域外空归因；fig10 双语分数分布。"""
+    if plt is None:
+        return
+    _setup_font()
+    # fig8 交叠
+    f = logdir / "overlap.json"
+    if f.exists():
+        data = json.loads(f.read_text(encoding="utf-8"))
+        ids = [d["id"] for d in data]
+        jac = [d["jaccard"] for d in data]
+        fig, ax = plt.subplots(figsize=(9.5, 4.6))
+        ax.bar(ids, jac, color="#1F6F5C")
+        ax.axhline(sum(jac) / len(jac), color="#C62828", linestyle="--",
+                   label=f"均值 {sum(jac)/len(jac):.3f}")
+        ax.set_ylabel("Jaccard（top40 集合交叠）")
+        ax.set_ylim(0, 1.05); ax.grid(axis="y", linestyle=":", alpha=0.4)
+        ax.set_title("稠密(向量)∩BM25 top40 交叠率：越低越互补")
+        ax.legend(fontsize=9)
+        fig.tight_layout(); fig.savefig(outdir / "fig8_overlap.png", dpi=200)
+        print("[plot] saved", outdir / "fig8_overlap.png")
+    # fig9 域外
+    f = logdir / "outofdomain.json"
+    if f.exists():
+        data = json.loads(f.read_text(encoding="utf-8"))
+        labels = [d["query"][:10] + "…" for d in data]
+        passed = [d["passed"] for d in data]
+        fig, ax = plt.subplots(figsize=(9.5, 4.4))
+        bars = ax.bar(range(len(data)), passed, color="#C62828")
+        for i, d in enumerate(data):
+            ax.text(i, d["passed"] + 0.15, d["reason"] or "", ha="center", fontsize=8)
+        ax.set_xticks(range(len(data))); ax.set_xticklabels(labels, fontsize=9)
+        ax.set_ylabel("passed 证据数"); ax.set_ylim(0, max(passed + [1]) * 1.4)
+        ax.set_title("域外查询空归因：passed=0 + 归因类型（诚实空答设计）")
+        fig.tight_layout(); fig.savefig(outdir / "fig9_outofdomain.png", dpi=200)
+        print("[plot] saved", outdir / "fig9_outofdomain.png")
+    # fig10 双语分数分布
+    f = logdir / "scores_dist.json"
+    if f.exists():
+        data = json.loads(f.read_text(encoding="utf-8"))
+        pairs = sorted({d["pair"] for d in data})
+        zh_bins, en_bins = [], []
+        for p in pairs:
+            zh = next((d for d in data if d["pair"] == p and d["lang"] == "zh"), None)
+            en = next((d for d in data if d["pair"] == p and d["lang"] == "en"), None)
+            if zh and en:
+                zh_bins.append([s for s in zh["scores"]])
+                en_bins.append([s for s in en["scores"]])
+        if zh_bins:
+            fig, ax = plt.subplots(figsize=(9.5, 5.0))
+            pos = [i - 0.2 for i in range(len(pairs))] + [i + 0.2 for i in range(len(pairs))]
+            bp_zh = ax.boxplot([b for b in zh_bins], positions=pos[:len(pairs)], widths=0.32,
+                               patch_artist=True, manage_ticks=False)
+            for box in bp_zh["boxes"]:
+                box.set_facecolor("#C62828"); box.set_alpha(0.55)
+            bp_en = ax.boxplot([b for b in en_bins], positions=pos[len(pairs):], widths=0.32,
+                               patch_artist=True, manage_ticks=False)
+            for box in bp_en["boxes"]:
+                box.set_facecolor("#1F6F5C"); box.set_alpha(0.55)
+            ax.axhline(0.25, color="gray", linestyle=":", label="RERANK_THRESHOLD=0.25")
+            ax.set_xticks(list(range(len(pairs))))
+            ax.set_xticklabels([f"p{i+1}" for i in pairs], fontsize=9)
+            ax.set_ylabel("rerank_score（候选 top40）"); ax.set_ylim(0, 1.05)
+            ax.set_title("双语 rerank 分数分布（红=中文, 绿=英文；中文文献型表述整体偏低）")
+            from matplotlib.patches import Patch
+            ax.legend(handles=[Patch(color="#C62828", alpha=0.55, label="中文"),
+                               Patch(color="#1F6F5C", alpha=0.55, label="英文")],
+                      loc="lower right", fontsize=9)
+            fig.tight_layout(); fig.savefig(outdir / "fig10_score_dist.png", dpi=200)
+            print("[plot] saved", outdir / "fig10_score_dist.png")
+
+
 def plot_crosslingual(outdir: Path, logdir: Path):
     """fig6 跨语言召回矩阵（读 logs/crosslingual.json）。"""
     if plt is None:
@@ -231,6 +303,7 @@ def main():
     plot_curves(reports, Path(args.outdir))
     plot_crosslingual(Path(args.outdir), Path(args.logdir))
     plot_cost_quality(reports, Path(args.outdir))
+    plot_extra(Path(args.logdir), Path(args.outdir))
 
 
 if __name__ == "__main__":
