@@ -617,7 +617,9 @@ class MultiBatchRetriever:
         logger.info(f"[Retriever] 启动多路并发检索 | 总 Query 数: {len(queries)}")
 
         t_embed = time.time()
-        query_vecs = self.embedder.embed_docs(queries)
+        # v8.14-bugfix(2026-08-20): 查询编码必须走 embed_query（带 "query: " 前缀，E5 训练分布
+        # 一致）；此前误用 embed_docs → 查询向量缺前缀，dense 检索整体降分（21 号 l1-004 2/3→3/3）
+        query_vecs = [self.embedder.embed_query(q) for q in queries]
         dt_embed = (time.time() - t_embed) * 1000
 
         if not self.batches and not self.lance_tables:
