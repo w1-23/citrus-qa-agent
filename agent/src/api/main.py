@@ -213,8 +213,11 @@ async def chat_v2(req: ChatRequest):
         # 不设启用门槛）——前端开则本次可联网，关则工具执行层短路为 [DISABLED]
         "web_search_enabled": bool(req.web_search_enabled),
     }
-    from src.core.tracing import set_web_search_enabled
+    from src.core.tracing import set_web_search_enabled, set_original_query
     set_web_search_enabled(bool(req.web_search_enabled))
+    # v8.15.3d: 用户原始问题直传联网工具——deepseek_web_search 把原始问题原样交给
+    # DeepSeek 原生联网（output_text 围绕原始问题作答），检索词仅作"搜索参考关键词"
+    set_original_query(query)
     t0 = time.perf_counter()
 
     async def event_generator():

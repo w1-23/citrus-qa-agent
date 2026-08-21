@@ -23,6 +23,11 @@ _session_id: contextvars.ContextVar = contextvars.ContextVar(
 _web_search_enabled: contextvars.ContextVar = contextvars.ContextVar(
     "web_search_enabled", default=False)
 
+# v8.15.3d: 本次请求的用户原始问题——联网工具把原始问题直传 DeepSeek 原生联网，
+# 让 output_text 围绕原始问题作答（模型给的检索词仅作"搜索参考关键词"）。
+_original_query: contextvars.ContextVar = contextvars.ContextVar(
+    "original_query", default="")
+
 
 def set_web_search_enabled(enabled: bool) -> None:
     _web_search_enabled.set(bool(enabled))
@@ -30,6 +35,14 @@ def set_web_search_enabled(enabled: bool) -> None:
 
 def web_search_enabled() -> bool:
     return _web_search_enabled.get()
+
+
+def set_original_query(query: str) -> None:
+    _original_query.set(str(query or ""))
+
+
+def original_query() -> str:
+    return _original_query.get()
 
 
 def set_request_id(request_id: str) -> None:

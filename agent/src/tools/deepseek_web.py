@@ -161,14 +161,26 @@ def deepseek_web_search(query: str) -> Tuple[str, dict]:
     if len(query) > 500:
         return f"[ERR_PARSE] 查询词过长 ({len(query)}字符)，请精简至 500 字符以内", empty
 
-    # v8.15: 输入附加"带网址引用"指令——DeepSeek 该版本 web_search_call 只回搜索动作、
+    # v8.15.3d: 输入构造——**用户原始问题优先**（chat_v2 经 contextvar 直传）：
+    # DeepSeek 原生联网围绕原始问题作答（output_text 即针对原始问题的综述回答）；
+    # 模型给的检索词降级为"搜索参考关键词"（双保险）。原始问题缺失时回退纯检索词。
+    # 同时附加"带网址引用"指令——DeepSeek 该版本 web_search_call 只回搜索动作、
     # 不返回结构化来源，须让模型在回答里明确写出真实网址（[标题](URL)），
     # 才能被解析进「联网搜索」证据组并在侧栏点击。
-    _input_prompt = (
-        f"{query}\n\n"
-        "如果使用了联网搜索，请在回答中对引用的信息来源标注真实网址，"
-        "格式如：[来源标题](https://...)。只列你实际引用且真实存在的网页地址。"
-    )
+    _orig_q = ""
+    try:
+        from src.core.tracing import original_query as _orig_query
+        _orig_q = (_orig_query() or "").strip()
+    except Exception:
+        _orig_q = ""
+    _ref_cmd = ("如果使用了联网搜索，请在回答中对引用的信息来源标注真实网址，"
+                "格式如：[来源标题](https://...)。只列你实际引用且真实存在的网页地址。")
+    if _orig_q and _orig_q != query:
+        _input_prompt = (f"{_orig_q}\n\n"
+                         f"（搜索参考关键词：{query}）\n\n{_ref_cmd}")
+        logger.info(f"[deepseek_web_search] 原始问题直传：{_orig_q[:80]}...")
+    else:
+        _input_prompt = f"{query}\n\n{_ref_cmd}"
     t0 = time.perf_counter()
     try:
         payload = {
