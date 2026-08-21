@@ -105,6 +105,9 @@ class MultiBatchRetriever:
             self.reranker = Reranker()
             self.batches: Dict[str, Tuple[QdrantClient, str]] = {}
             self.lance_tables: Dict[str, object] = {}   # v8.9 LanceDB 后端: batch -> table
+            # v8.15: 批次 → 证据来源（metadata.json summary.source_type 驱动，可扩展：
+            # "UCR citrus variety"→ucr，其余→rag；将来新批次类型只增映射规则）
+            self.batch_source: Dict[str, str] = {}
             self.lance_db = None
             self.backend = (settings.RETRIEVAL_BACKEND or "auto").strip().lower()
             # v8.9 auto：优先 LanceDB（data/lancedb 有表），否则回退 Qdrant——
@@ -221,6 +224,9 @@ class MultiBatchRetriever:
             if not chunks_path.exists():
                 continue
             batch_name = batch_dir.name
+            # v8.15: 批次来源判定（metadata.json → source_type；读失败按本地文献库兜底）
+            src = self._detect_batch_source(batch_dir)
+            self.batch_source[batch_name] = src
             # 公共：chunks.jsonl → global_chunks（两种后端共用；Qdrant 锁冲突时仅此处可用）
             # v8.11: 二进制逐行扫描并记录每行起始字节偏移（文本模式 tell 返回
             # opaque cookie 不可跨 open seek，必须二进制）——稳态剥离 text，
@@ -236,6 +242,7 @@ class MultiBatchRetriever:
                         continue
                     chunk = json.loads(line.decode("utf-8"))
                     chunk["_batch"] = batch_name
+                    chunk["_src"] = src
                     chunk["_global_idx"] = len(self.global_chunks)
                     self._text_offsets.append((chunks_path, offset))
                     self.global_chunks.append(chunk)
@@ -309,6 +316,24 @@ class MultiBatchRetriever:
             ]
             logger.info(f"[Retriever] 全文懒加载就绪: {len(self._text_offsets)} 条偏移 "
                         f"| 稳态仅保留元数据（text 按需读取）")
+
+    @staticmethod
+    def _detect_batch_source(batch_dir: Path) -> str:
+        """v8.15: 批次证据来源判定（metadata.json → summary.source_type）。
+
+        规则：source_type 含 "UCR" → "ucr"（品种库）；否则 → "rag"（本地文献库）。
+        读取失败/元数据缺失 → "rag" 兜底。将来新增数据类型（web/patent 等）在此加规则。
+        """
+        try:
+            meta_path = batch_dir / "metadata.json"
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                st = str((meta.get("summary") or {}).get("source_type") or "")
+                if st and "UCR" in st.upper():
+                    return "ucr"
+        except Exception as e:
+            logger.debug(f"[Retriever] batch source detect failed for {batch_dir.name}: {e}")
+        return "rag"
 
     def _verify_idx_map(self):
         """AG-11: 映射完整性自检 — 抽样 qdrant 点，按 payload (paper_id, chunk_index) 匹配率告警。"""
@@ -616,29 +641,35 @@ class MultiBatchRetriever:
         _t0 = time.time()
         logger.info(f"[Retriever] 启动多路并发检索 | 总 Query 数: {len(queries)}")
 
-        t_embed = time.time()
-        # v8.14-bugfix(2026-08-20): 查询编码必须走 embed_query（带 "query: " 前缀，E5 训练分布
-        # 一致）；此前误用 embed_docs → 查询向量缺前缀，dense 检索整体降分（21 号 l1-004 2/3→3/3）
-        query_vecs = [self.embedder.embed_query(q) for q in queries]
-        dt_embed = (time.time() - t_embed) * 1000
-
-        if not self.batches and not self.lance_tables:
-            logger.warning("[Retriever] 无可用向量后端，降级为 BM25 纯文本检索")
-        t_vector = time.time()
-        batch_names = list(self.lance_tables.keys()) if self.backend == "lancedb" \
-            else list(self.batches.keys())
-        all_vector_hits: List[Tuple[int, float]] = []
-        workers = max(1, len(batch_names) * len(queries))
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            futures = [ex.submit(self._vector_search, name, vec, settings.TOP_K_VECTOR)
-                       for vec in query_vecs for name in batch_names]
-            for f in as_completed(futures):
-                all_vector_hits.extend(f.result())
-        dt_vector = (time.time() - t_vector) * 1000
-
+        # v8.15 BM25 并行化：BM25 不依赖向量 embedding——先提交独立线程执行，
+        # 与 embed（ONNX 释放 GIL）/向量检索重叠，融合前取回（省 ≈ min(bm25, embed) 延迟）
         t_bm25 = time.time()
-        all_bm25_hits = [hit for q in queries
-                         for hit in self.bm25.top_k(q, k=settings.TOP_K_BM25)]
+        with ThreadPoolExecutor(max_workers=1) as _bm25_ex:
+            _bm25_fut = _bm25_ex.submit(
+                lambda: [hit for q in queries
+                         for hit in self.bm25.top_k(q, k=settings.TOP_K_BM25)])
+
+            t_embed = time.time()
+            # v8.14-bugfix(2026-08-20): 查询编码必须走 embed_query（带 "query: " 前缀，E5 训练分布
+            # 一致）；此前误用 embed_docs → 查询向量缺前缀，dense 检索整体降分（21 号 l1-004 2/3→3/3）
+            query_vecs = [self.embedder.embed_query(q) for q in queries]
+            dt_embed = (time.time() - t_embed) * 1000
+
+            if not self.batches and not self.lance_tables:
+                logger.warning("[Retriever] 无可用向量后端，降级为 BM25 纯文本检索")
+            t_vector = time.time()
+            batch_names = list(self.lance_tables.keys()) if self.backend == "lancedb" \
+                else list(self.batches.keys())
+            all_vector_hits: List[Tuple[int, float]] = []
+            workers = max(1, len(batch_names) * len(queries))
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                futures = [ex.submit(self._vector_search, name, vec, settings.TOP_K_VECTOR)
+                           for vec in query_vecs for name in batch_names]
+                for f in as_completed(futures):
+                    all_vector_hits.extend(f.result())
+            dt_vector = (time.time() - t_vector) * 1000
+
+            all_bm25_hits = _bm25_fut.result()
         dt_bm25 = (time.time() - t_bm25) * 1000
 
         return self._fuse_rerank_select(
@@ -676,34 +707,38 @@ class MultiBatchRetriever:
 
         _emit("向量化查询...")
         t_embed = time.time()
-        orig_vec = self.embedder.embed_query(original_query)
-        hyde_vec = self.embedder.embed_query(hyde_answer)
-        dt_embed = (time.time() - t_embed) * 1000
-
-        batch_names = list(self.lance_tables.keys()) if self.backend == "lancedb" \
-            else list(self.batches.keys())
-        _emit(f"并发检索向量后端 ({len(batch_names)} 批次)...")
-        t_vector = time.time()
-        orig_v_hits: List[Tuple[int, float]] = []
-        hyde_v_hits: List[Tuple[int, float]] = []
-        if batch_names:
-            workers = max(1, len(batch_names) * 2)
-            with ThreadPoolExecutor(max_workers=workers) as ex:
-                futures_orig: list = []
-                futures_hyde: list = []
-                for name in batch_names:
-                    futures_orig.append(ex.submit(
-                        self._vector_search, name, orig_vec, settings.TOP_K_VECTOR))
-                    futures_hyde.append(ex.submit(
-                        self._vector_search, name, hyde_vec, settings.TOP_K_VECTOR))
-                for f in as_completed(futures_orig):
-                    orig_v_hits.extend(f.result())
-                for f in as_completed(futures_hyde):
-                    hyde_v_hits.extend(f.result())
-        dt_vector = (time.time() - t_vector) * 1000
-
+        # v8.15 BM25 并行化：BM25 与 HyDE 双路 embedding 重叠执行（ONNX 释放 GIL）
         t_bm25 = time.time()
-        bm25_hits = self.bm25.top_k(original_query, k=settings.TOP_K_BM25)
+        with ThreadPoolExecutor(max_workers=1) as _bm25_ex:
+            _bm25_fut = _bm25_ex.submit(
+                lambda: self.bm25.top_k(original_query, k=settings.TOP_K_BM25))
+            orig_vec = self.embedder.embed_query(original_query)
+            hyde_vec = self.embedder.embed_query(hyde_answer)
+            dt_embed = (time.time() - t_embed) * 1000
+
+            batch_names = list(self.lance_tables.keys()) if self.backend == "lancedb" \
+                else list(self.batches.keys())
+            _emit(f"并发检索向量后端 ({len(batch_names)} 批次)...")
+            t_vector = time.time()
+            orig_v_hits: List[Tuple[int, float]] = []
+            hyde_v_hits: List[Tuple[int, float]] = []
+            if batch_names:
+                workers = max(1, len(batch_names) * 2)
+                with ThreadPoolExecutor(max_workers=workers) as ex:
+                    futures_orig: list = []
+                    futures_hyde: list = []
+                    for name in batch_names:
+                        futures_orig.append(ex.submit(
+                            self._vector_search, name, orig_vec, settings.TOP_K_VECTOR))
+                        futures_hyde.append(ex.submit(
+                            self._vector_search, name, hyde_vec, settings.TOP_K_VECTOR))
+                    for f in as_completed(futures_orig):
+                        orig_v_hits.extend(f.result())
+                    for f in as_completed(futures_hyde):
+                        hyde_v_hits.extend(f.result())
+            dt_vector = (time.time() - t_vector) * 1000
+
+            bm25_hits = _bm25_fut.result()
         dt_bm25 = (time.time() - t_bm25) * 1000
         _emit(f"BM25 词法检索完成, 共 {len(orig_v_hits)+len(hyde_v_hits)} 个向量命中 + {len(bm25_hits)} 个词法命中")
 

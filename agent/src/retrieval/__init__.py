@@ -36,5 +36,14 @@ def eager_load_rag():
     except Exception as e:
         logger.warning(f"[RAG] Embedder preload skipped: {e}")
 
+    # v8.15: 预热 Reranker ONNX 会话（bge-reranker 模型加载发生在首次 rerank，
+    # 是"首问检索段 +2~5s"的另一根因；预跑一次空 rerank 把会话建好）
+    try:
+        from src.engine.reranker import Reranker
+        Reranker().rerank("warmup", [{"text": "warmup"}], top_k=1)
+        logger.info(f"[RAG] Reranker session preloaded ({time.perf_counter()-t0:.1f}s)")
+    except Exception as e:
+        logger.warning(f"[RAG] Reranker preload skipped: {e}")
+
     total = time.perf_counter() - t0
     logger.info(f"[RAG] Preload complete ({total:.1f}s)")

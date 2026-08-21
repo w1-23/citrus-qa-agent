@@ -19,13 +19,18 @@ from langchain_core.messages import (
 from langchain_openai import ChatOpenAI
 
 from src.config import settings, get_deepseek_model
-from src.core.evidence import render_evidence, EVIDENCE_RENDER_MAX_CHARS
+from src.core.evidence import render_evidence, EVIDENCE_RENDER_MAX_CHARS, src_of, SOURCE_TAG
 from src.core.agent_loop import tc_id as extract_tc_id, last_message_content, invoke_llm_with_retry, emit_llm_usage
 from src.prompts.loader import assemble_agent_prompt
 from src.tools import _TOOL_REGISTRY_BY_NAME
 from src.tools.registry import PartitionedToolNode
 
 logger = logging.getLogger(__name__)
+
+
+def _src_tag(r) -> str:
+    """证据来源徽标（回执前缀用）：rag→RAG / ucr→UCR / web→Web。"""
+    return SOURCE_TAG.get(src_of(r), "RAG")
 
 from src.core.progress_bus import (
     emit_encoded, emit_thinking,
@@ -168,9 +173,11 @@ def build_evidence_report(collected_artifacts: dict, query: str,
         lines.append("未检索到相关文献。")
     for i, r in enumerate(main[:15], 1):
         # v8.13-b4c: 全文经 render_evidence 单一渲染（chunk ≤~2000 字符，3000 安全阀）
+        # v8.15: 每条标注来源前缀 [RAG]/[UCR]（模型感知数据来源，前端徽标同源）
         text = render_evidence(r, max_chars=EVIDENCE_RENDER_MAX_CHARS)
+        src = _src_tag(r)
         lines.append(
-            f"[{i}] {r.get('title', r.get('name', 'Untitled'))} | "
+            f"[{i}][{src}] {r.get('title', r.get('name', 'Untitled'))} | "
             f"{r.get('year', 'N/A')} | DOI: {r.get('doi') or r.get('source_type') or 'N/A'} | "
             f"score: {r.get('score', r.get('rerank_score', 0)) or 0}")
         if text:
@@ -402,9 +409,10 @@ async def run_agent(
         # 重复/高度重叠的角度直接跳过执行并返回占位结果，杜绝重复 HyDE/rerank 浪费
         # v8.4.8: 增加 每轮工具上限（rag≤2/academic≤1）+ 请求级检索预算（rag≤6），
         # 防止模型"多轮刷角度"（实测每请求 rag 4~8 次、半数重复，检索段 60s+）
-        _turn_rag, _turn_aca = 0, 0
+        _turn_rag, _turn_aca, _turn_web = 0, 0, 0
         _MAX_RAG_PER_TURN = 2
         _MAX_ACA_PER_TURN = 1
+        _MAX_WEB_PER_TURN = 1
         _MAX_RAG_PER_REQUEST = 6
         exec_calls: list = []
         placeholder_results: dict = {}
@@ -446,6 +454,17 @@ async def run_agent(
                     logger.info(f"[AgentRunner] {agent_name} 每轮学术检索上限拦截")
                     continue
                 _turn_aca += 1
+            elif agent_name == "retrieve-agent" and _tname == "deepseek_web_search":
+                # v8.15: 联网搜索预算（与学术源同档：每轮 ≤1；请求级上限见 _MAX_WEB_PER_REQUEST）
+                if _turn_web >= _MAX_WEB_PER_TURN:
+                    tc_id = tc_ids[idx] if idx < len(tc_ids) else extract_tc_id(tc)
+                    placeholder_results[idx] = ToolMessage(
+                        content="[SEARCH_BUDGET] 每轮联网搜索上限 1 次，该检索未执行。",
+                        tool_call_id=tc_id, name="deepseek_web_search",
+                        artifact={"main_results": [], "web_results": []})
+                    logger.info(f"[AgentRunner] {agent_name} 每轮联网搜索上限拦截")
+                    continue
+                _turn_web += 1
             exec_calls.append((idx, tc))
 
         t_tool = time.perf_counter()
@@ -681,13 +700,22 @@ def _resolve_tool_names(agent_name: str) -> list[str]:
     mapping = {
         "retrieve-agent": [
             "citrus_rag_search", "academic_search", "fetch_fulltext",
+            "deepseek_web_search",
         ],
         "write-agent": ["write_local_file"],
         "analyze-agent": [
             "statistical_analysis", "experimental_design",
         ],
     }
-    return mapping.get(agent_name, [])
+    names = mapping.get(agent_name, [])
+    # v8.15: 联网工具门控——academic_search/fetch_fulltext 随 ACADEMIC_ENABLED
+    # （默认关，代码保留不删）；deepseek_web_search 随 WEB_SEARCH_ENABLED（主开关）。
+    # 关闭时模型看不到工具 → 不会浪费调用轮；重开只改 config。
+    if not getattr(settings, "ACADEMIC_ENABLED", False):
+        names = [n for n in names if n not in ("academic_search", "fetch_fulltext")]
+    if not getattr(settings, "WEB_SEARCH_ENABLED", False):
+        names = [n for n in names if n != "deepseek_web_search"]
+    return names
 
 
 def _get_max_turns(agent_name: str) -> int:

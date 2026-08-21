@@ -17,7 +17,7 @@ from langgraph.graph import StateGraph, END
 
 from src.graph.state import AgentState
 from src.config import settings, get_deepseek_model, PROJECT_ROOT
-from src.core.evidence import render_evidence, EVIDENCE_SNIPPET_MAX_CHARS
+from src.core.evidence import render_evidence, EVIDENCE_SNIPPET_MAX_CHARS, src_of
 from src.core.agent_loop import (
     tc_id as extract_tc_id, count_unique_docs, dedup_by_doi, emit_llm_usage,
     FINAL_ANSWER_PROMPT, invoke_llm_with_retry, force_final_answer,
@@ -889,6 +889,7 @@ def _assemble_supervisor_answer(*, answer, all_main_results, all_web_results,
         cited_refs.append({
             "ref_id": i + 1,
             "type": "main",
+            "source": src_of(r),                       # v8.15: rag|ucr（前端徽标/手风琴分组）
             "doi": r.get("doi", "N/A"),
             "title": r.get("title", r.get("name", "Untitled")),
             "section_name": r.get("section_name", ""),
@@ -896,14 +897,18 @@ def _assemble_supervisor_answer(*, answer, all_main_results, all_web_results,
             "score": r.get("score", r.get("rerank_score", 0)) or 0,
             "year": r.get("year", ""),
             "authors": r.get("authors", ""),
+            # v8.15: UCR 品种条目专属字段（无 DOI 时前端显示登记号/品种名）
+            "variety_name": r.get("variety_name", ""),
+            "registry_id": r.get("registry_id", ""),
         })
     for i, wr in enumerate(all_web_results[:10]):
         cited_refs.append({
             "ref_id": f"W{i+1}",
             "type": "web",
+            "source": "web",
             "url": wr.get("url", wr.get("link", "")),
             "title": wr.get("title", wr.get("name", "Untitled")),
-            "text_preview": (wr.get("snippet") or wr.get("content") or "")[:300],
+            "text_preview": (wr.get("snippet") or wr.get("content") or wr.get("abstract") or "")[:300],
             "score": 0,
         })
 
@@ -1223,6 +1228,8 @@ async def expert_save_node(state: AgentState) -> dict:
                     "title": str(r.get("title", ""))[:150],
                     "score": r.get("score", r.get("rerank_score", 0)) or 0,
                     "year": str(r.get("year", "")),
+                    # v8.15: 来源随账本持久化（历史证据 H1..Hn 保留来源徽标）
+                    "source": src_of(r),
                     # v8.13-b4c: 账本片段经 render_evidence 单一渲染（2000 安全阀）
                     "snippet": render_evidence(r, max_chars=EVIDENCE_SNIPPET_MAX_CHARS),
                 }

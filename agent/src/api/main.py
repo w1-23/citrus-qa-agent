@@ -129,6 +129,8 @@ class ChatRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=20000)
     client_request_id: Optional[str] = Field(default=None, max_length=64)
     light_mode: Optional[bool] = None
+    # v8.15: 联网搜索开关（前端「联网搜索」按钮——仅后端主开关 web_search.enabled 开启后生效）
+    web_search_enabled: Optional[bool] = None
 
 
 @app.post("/api/v2/chat")
@@ -207,6 +209,8 @@ async def chat_v2(req: ChatRequest):
         "messages": [],
         "answer": "",
         "idempotency_key": idem_key,
+        # v8.15: 联网搜索请求级开关（前端下发；图形内据此提示模型联网工具可用性）
+        "web_search_enabled": bool(req.web_search_enabled) and bool(settings.WEB_SEARCH_ENABLED),
     }
     t0 = time.perf_counter()
 
@@ -586,6 +590,16 @@ async def runtime_config():
         "permission_wait_sec": settings.PERMISSION_WAIT_SEC,
         # v8.5.0 开源版: 只暴露"是否已配置"，永不回传 key 本身
         "has_api_key": bool(settings.RESOLVED_MAIN_API_KEY),
+        # v8.15: 数据源开关状态（前端据此动态显示欢迎语/联网按钮可用性）
+        "academic_enabled": bool(settings.ACADEMIC_ENABLED),
+        "web_search": {
+            "enabled": bool(settings.WEB_SEARCH_ENABLED),
+            # v8.15: provider 纯信息展示；启用时一律走 DeepSeek Responses 原生 web_search。
+            # 注意：旧 .env 残留 WEB_SEARCH_PROVIDER=serper 是历史 Tavily 自建源配置，
+            # 已不参与执行路径（仅作展示兜底）。
+            "provider": ("deepseek_responses" if settings.WEB_SEARCH_ENABLED
+                         else settings.WEB_SEARCH_PROVIDER),
+        },
         "model": {
             "main": settings.RESOLVED_MAIN_MODEL,
             "fast": settings.RESOLVED_FAST_MODEL,
@@ -880,6 +894,7 @@ async def session_citations(session_id: str):
                 items.append({
                     "ref_id": f"R{r['turn_seq']}-{i + 1}",
                     "type": "main",
+                    "source": str(e.get("source") or "rag"),   # v8.15: 历史引用保留来源徽标
                     "doi": doi,
                     "title": str(e.get("title") or "")[:200],
                     "year": str(e.get("year") or ""),
