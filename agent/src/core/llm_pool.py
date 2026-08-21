@@ -76,11 +76,19 @@ def get_llm(
     temperature: float = 0.0,
     timeout: float = 120,
     max_tokens: int | None = None,
+    thinking_off: bool = False,
 ) -> ChatOpenAI:
-    key = (model, api_key, base_url, temperature, timeout, max_tokens)
+    """进程级客户端复用；v8.15.3: thinking_off=True 时经 model_kwargs 下传
+    {"thinking": {"type": "disabled"}}（DeepSeek chat 端点关闭思维链的厂商参数；
+    默认不发送任何参数——由 config model.reasoning_mode 控制，避免未实测前的 400 风险）。
+    """
+    key = (model, api_key, base_url, temperature, timeout, max_tokens, thinking_off)
     with _lock:
         inst = _cache.get(key)
         if inst is None:
+            kw: dict = {}
+            if thinking_off:
+                kw["thinking"] = {"type": "disabled"}
             inst = ChatOpenAI(
                 model=model,
                 api_key=api_key,
@@ -88,6 +96,7 @@ def get_llm(
                 temperature=temperature,
                 timeout=timeout,
                 max_tokens=max_tokens,
+                model_kwargs=kw,
             )
             _cache[key] = inst
         return inst

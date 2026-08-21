@@ -134,10 +134,27 @@ def _dedup_evidence_items(items: list) -> list:
     return out
 
 
+def _web_streak_step(streak: int, content: str) -> int:
+    """v8.15.3: 联网失败熔断状态机（纯函数可单测）。
+
+    - 内容以 [ERR_ 开头（真实工具错误：网络/空返回/参数）→ 失败 +1；
+    - 内容以 [ERR] 开头（熔断占位本身）→ 不变（不重复计失败，也不清零——
+      否则拦截自身会把 streak 复位、熔断失效且 web_unavailable 提示消失）；
+    - 其余（成功 / [DISABLED] / 其他占位）→ 清零。
+    """
+    rc = str(content or "")
+    if rc.startswith("[ERR_"):
+        return streak + 1
+    if rc.startswith("[ERR]"):
+        return streak
+    return 0
+
+
 def build_evidence_report(collected_artifacts: dict, query: str,
                           rag_search_count: int,
                           budget_blocked: int = 0,
-                          dedup_blocked: int = 0) -> str:
+                          dedup_blocked: int = 0,
+                          web_unavailable: bool = False) -> str:
     """确定性证据回执（v8.4.6，纯函数可单测）。
 
     检索回执由代码组装而非模型转述——保证"管道而非漏斗"：
@@ -145,6 +162,8 @@ def build_evidence_report(collected_artifacts: dict, query: str,
       - 每条文献: 编号 / 标题 / 年份 / DOI + chunk 全文（reranker 已按相关性过滤）
       - 全文直接进上下文（追问时历史可见；总量受 retrieve-agent cap 40000 控制）
       - v8.4.8: 回执明示预算/去重拦截次数（supervisor 可见检索被裁减）
+      - v8.15.3: web_unavailable=True 时回执明示联网已熔断（失败无感知的根治：
+        状态线下达给 supervisor，不再让模型盲猜"为什么不查网页"）
     """
     main = _dedup_evidence_items(list(collected_artifacts.get("main_results") or []))
     web = list(collected_artifacts.get("web_results") or [])
@@ -161,6 +180,13 @@ def build_evidence_report(collected_artifacts: dict, query: str,
             f"（每轮 rag≤2/academic≤1，请求级 rag≤6）；"
             f"重复角度跳过: {dedup_blocked} 次。"
             "请基于已有证据收尾，或换实质不同的角度再补充。"
+        )
+        lines.append("")
+    if web_unavailable:
+        lines.append(
+            "- ⚠ 联网搜索本次请求已标记不可用（连续失败自动熔断，未再重试）。"
+            "时效/实时信息未能获取：基于本地证据收尾，或在最终回答中如实声明缺口，"
+            "不要继续尝试联网。"
         )
         lines.append("")
     lines.extend([
@@ -332,6 +358,11 @@ async def run_agent(
         temperature=settings.TEMPERATURE_MAIN,
         max_tokens=max_t,
         timeout=timeout_sec,
+        # v8.15.3: 决策类子代理思维链控制（config model.reasoning_mode="off" 时
+        # 发送 thinking:disabled——决策慢的根因之一是 v4-flash 默认推理；
+        # 默认 "default" 不发送任何参数，等配置项被确认兼容后再开启）
+        thinking_off=(agent_name in ("retrieve-agent",)
+                      and getattr(settings, "MODEL_REASONING_MODE", "default") == "off"),
     )
     llm_with_tools = llm_base.bind_tools(tools) if tools else llm_base
 
@@ -355,6 +386,9 @@ async def run_agent(
     rag_search_count = 0
     # v8.4.8: 代码级收敛——累计唯一证据数与边际收益判定
     _prev_unique = 0
+    # v8.15.3: 联网搜索失败熔断（请求内连续失败 ≥2 停止重试——失败无感知是
+    # "7 次 30s 重试"类等待的根因；成功则清零）
+    _web_fail_streak = 0
 
     for turn in range(max_turns):
         # v8.4.3 指令A: 移除"≥6 篇强制收敛"——动态阈值已过滤 chunk，检索到的
@@ -469,7 +503,17 @@ async def run_agent(
                     continue
                 _turn_aca += 1
             elif agent_name == "retrieve-agent" and _tname == "deepseek_web_search":
-                # v8.15: 联网搜索预算（与学术源同档：每轮 ≤1；请求级上限见 _MAX_WEB_PER_REQUEST）
+                # v8.15.3: 失败熔断——连续失败 ≥2 后直接拦截，不再重复尝试
+                if _web_fail_streak >= 2:
+                    tc_id = tc_ids[idx] if idx < len(tc_ids) else extract_tc_id(tc)
+                    placeholder_results[idx] = ToolMessage(
+                        content="[ERR] 联网搜索已连续失败，系统已停止重试（请勿再调用 "
+                                "deepseek_web_search；基于本地证据收尾或如实声明缺口）。",
+                        tool_call_id=tc_id, name="deepseek_web_search",
+                        artifact={"main_results": [], "web_results": []})
+                    logger.info(f"[AgentRunner] 联网搜索熔断拦截（连续失败 {_web_fail_streak} 次）")
+                    continue
+                # v8.15: 联网搜索预算（与学术源同档：每轮 ≤1 次；连续失败熔断见 _web_fail_streak）
                 if _turn_web >= _MAX_WEB_PER_TURN:
                     tc_id = tc_ids[idx] if idx < len(tc_ids) else extract_tc_id(tc)
                     placeholder_results[idx] = ToolMessage(
@@ -527,6 +571,17 @@ async def run_agent(
             tc_id = tc_ids[idx] if idx < len(tc_ids) else extract_tc_id(tc)
             tc_name = (tc.get("name", "") if isinstance(tc, dict)
                        else getattr(tc, "name", "") if tc else "")
+            # v8.15.3: 联网搜索失败记账（真实工具错误 [ERR_*] 算失败；
+            # 熔断占位 "[ERR] ..." 不计也不清零（否则拦截自身会把 streak 复位、
+            # 熔断失效且 web_unavailable 提示消失）；[DISABLED]/成功清零——
+            # 连续失败 ≥2 后由分派块拦截，杜绝"失败仍反复重试 30s×N"
+            if agent_name == "retrieve-agent" and tc_name == "deepseek_web_search":
+                _rc = str(getattr(tr, "content", "") or "")
+                _prev_streak = _web_fail_streak
+                _web_fail_streak = _web_streak_step(_web_fail_streak, _rc)
+                if _web_fail_streak > _prev_streak:
+                    logger.warning(f"[AgentRunner] deepseek_web_search 失败"
+                                   f"（连续 {_web_fail_streak} 次）: {_rc[:80]}")
             # AG-8: 子 Agent 内工具结果分档截断（与 supervisor 的 TOOL_RESULT_CAPS 一致）
             caps = getattr(settings, "TOOL_RESULT_CAPS", {}) or {}
             cap = caps.get(agent_name, caps.get("default", 100000))
@@ -631,7 +686,8 @@ async def run_agent(
             if str(getattr(m, "content", "") or "").startswith("[DEDUP]"))
         code_report = build_evidence_report(
             collected_artifacts, query, rag_search_count,
-            budget_blocked=budget_blocked, dedup_blocked=dedup_blocked)
+            budget_blocked=budget_blocked, dedup_blocked=dedup_blocked,
+            web_unavailable=(_web_fail_streak >= 2))
         if result_content:
             logger.info(
                 f"[AgentRunner] retrieve-agent 模型自述({len(result_content)} chars) "

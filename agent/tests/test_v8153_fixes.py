@@ -1,0 +1,164 @@
+# -*- coding: utf-8 -*-
+"""v8.15.3 特性回归：联网失败熔断 / 检索统计回传 / 数据源覆盖提示 / 推理控制。
+
+全部离线、无模型、无网络（仅验证逻辑与门控纯函数）。约定见 test_batch1.py。
+覆盖：
+  VF-9   rag_stats_note 检索统计回执（早停阈值 + 并发防串号）
+  VF-10  build_evidence_report web_unavailable 熔断提示（确定性回执）
+  VF-11  model.reasoning_mode 配置默认 + llm_pool thinking_off 接线
+  VF-12  deepseek_web_search HTTP 失败详情（状态码落回执，超时单独分支）
+"""
+import sys
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from src.config import settings
+
+passed, failed = [], []
+
+
+def check(name, cond, detail=""):
+    if cond:
+        passed.append(name)
+    else:
+        failed.append(name)
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            raise AssertionError(name + (f" {detail}" if detail else ""))
+    print(f"  {'PASS' if cond else 'FAIL'}  {name}  {detail}")
+
+
+# ── F-15.3-1 检索统计回执（决策器每轮检索后自审依据）────────────────
+def test_v8153_rag_stats_note():
+    print("[VF-9] rag_stats_note 检索统计回执")
+    from src.tools.search import rag_stats_note
+
+    check("无统计 → 空串", rag_stats_note(None) == "")
+    check("非 dict → 空串", rag_stats_note("x") == "")
+    check("候选 0 → 空串", rag_stats_note({"candidates": 0, "passed": 0, "filtered": 0}) == "")
+    ok_note = rag_stats_note({"candidates": 20, "passed": 12, "filtered": 3, "query": "citrus hlb"})
+    check("通过率高 → 仅统计不提示", "[检索统计]" in ok_note and "相关性低" not in ok_note, ok_note)
+    low_note = rag_stats_note({"candidates": 20, "passed": 4, "filtered": 6, "query": "citrus hlb"})
+    check("过滤占比 60% → 提示相关性低", "相关性低" in low_note, low_note)
+    thin_note = rag_stats_note({"candidates": 20, "passed": 2, "filtered": 1, "query": "citrus hlb"})
+    check("通过 ≤2 → 提示相关性低", "相关性低" in thin_note, thin_note)
+    check("统计数字字面量正确", "候选 20 条" in ok_note and "通过 12 条" in ok_note, ok_note)
+    # 并发防串号：last_stats 归属查询与本次查询不一致 → 不输出
+    mismatch = rag_stats_note({"candidates": 20, "passed": 1, "filtered": 9, "query": "other query"},
+                              expect_query="citrus hlb")
+    check("串号统计被丢弃", mismatch == "", mismatch)
+    match = rag_stats_note({"candidates": 20, "passed": 1, "filtered": 9, "query": "citrus hlb"},
+                           expect_query="citrus hlb")
+    check("同查询统计正常输出", match != "" and "相关性低" in match, match)
+
+
+# ── F-15.3-2 确定性回执的联网熔断提示 ──────────────────────────────
+def test_v8153_evidence_report_web_unavailable():
+    print("[VF-10] build_evidence_report 联网熔断提示")
+    from src.core.agent_runner import build_evidence_report
+
+    arts = {"main_results": [{"title": "P1", "doi": "10.1/x", "year": 2023, "text": "body"}],
+            "web_results": []}
+    base = build_evidence_report(arts, "citrus hlb", 2)
+    check("未熔断默认无提示", "已标记不可用" not in base and "⚠" not in base)
+    broke = build_evidence_report(arts, "citrus hlb", 2, web_unavailable=True)
+    check("熔断后回执明示联网不可用", "⚠ 联网搜索本次请求已标记不可用" in broke, broke)
+    check("熔断提示含不再重试语义", "未再重试" in broke and "如实声明缺口" in broke)
+    # 熔断提示不应影响正常证据条目
+    check("熔断提示下证据完整", "[1]" in broke and "[RAG]" in broke, broke)
+
+
+# ── F-15.3-3 推理控制（配置默认不发送参数，off 时接线 thinking:disabled）──
+def test_v8153_reasoning_mode():
+    print("[VF-11] model.reasoning_mode 接线")
+    check("默认值 = default（不发送任何参数）",
+          getattr(settings, "MODEL_REASONING_MODE", "default") == "default")
+    from src.core.llm_pool import get_llm
+
+    llm_off = get_llm("t-model", "k-1", "https://x", max_tokens=64, thinking_off=True)
+    check("thinking_off → model_kwargs.thinking.type=disabled",
+          llm_off.model_kwargs.get("thinking", {}).get("type") == "disabled",
+          str(llm_off.model_kwargs))
+    llm_on = get_llm("t-model", "k-1", "https://x", max_tokens=64, thinking_off=False)
+    check("默认 → 不发送 thinking 参数", llm_on.model_kwargs == {}, str(llm_on.model_kwargs))
+    check("缓存键区分 thinking_off", llm_off is not llm_on)
+    # 同参数复用同一实例（进程级复用不回退）
+    llm_off2 = get_llm("t-model", "k-1", "https://x", max_tokens=64, thinking_off=True)
+    check("同参数复用实例", llm_off2 is llm_off)
+
+
+# ── F-15.3-4 联网失败详情（HTTP 状态码 / 超时分支）─────────────────
+def test_v8153_web_failure_details():
+    print("[VF-12] deepseek_web_search 失败详情")
+    import src.tools.deepseek_web as dw
+    from src.core.tracing import set_web_search_enabled
+
+    set_web_search_enabled(True)
+
+    class _FakeResp:
+        status_code = 503
+        text = "<html>Service Unavailable</html>"
+
+    class _FakeRequestsHTTP:
+        def post(self, *a, **k):
+            return _FakeResp()
+
+    class _FakeRequestsTimeout(_FakeRequestsHTTP):
+        class exceptions:
+            class Timeout(Exception):
+                pass
+
+        def post(self, *a, **k):
+            raise self.exceptions.Timeout("timed out after 30s")
+
+    old = dw.requests
+    try:
+        dw.requests = _FakeRequestsHTTP()
+        c, a = dw.deepseek_web_search.func("最新柑橘行情")
+        check("HTTP 失败 → [ERR_NETWORK] 且带状态码",
+              c.startswith("[ERR_NETWORK]") and "HTTP 503" in c, c[:80])
+        check("HTTP 失败 artifact 双键空", a == {"main_results": [], "web_results": []}, str(a))
+        dw.requests = _FakeRequestsTimeout()
+        c2, _a2 = dw.deepseek_web_search.func("最新柑橘行情")
+        check("超时 → 单独分支含超时提示", c2.startswith("[ERR_NETWORK]") and "超时" in c2, c2[:80])
+    finally:
+        dw.requests = old
+        set_web_search_enabled(False)
+
+
+# ── F-15.3-5 联网失败熔断状态机（_web_streak_step 纯函数）──────────
+def test_v8153_web_streak_state_machine():
+    print("[VF-13] 联网失败熔断状态机")
+    from src.core.agent_runner import _web_streak_step
+
+    check("[ERR_NETWORK] 失败 +1", _web_streak_step(0, "[ERR_NETWORK] 调用失败") == 1)
+    check("连续失败累计", _web_streak_step(1, "[ERR_EMPTY] 无内容") == 2)
+    check("熔断占位 [ERR] 不计不重置", _web_streak_step(2, "[ERR] 联网搜索已连续失败…") == 2)
+    check("[DISABLED] 清零", _web_streak_step(2, "[DISABLED] 联网搜索未开启") == 0)
+    check("成功结果清零", _web_streak_step(2, "[ToolResult] deepseek_web_search…") == 0)
+    check("空内容清零", _web_streak_step(1, "") == 0)
+
+
+# ── 汇总 ──────────────────────────────────────────────────────────
+def _summary():
+    print(f"\n[VF-15.3] PASS {len(passed)} / FAIL {len(failed)}"
+          f"  ({len(passed) + len(failed)} total)")
+    for f in failed:
+        print(f"  [FAIL] {f}")
+    return len(failed) == 0
+
+
+if __name__ == "__main__":
+    import types as _types
+    _funcs = [v for v in list(globals().values())
+              if isinstance(v, _types.FunctionType)
+              and v.__name__.startswith("test_")]
+    for _f in sorted(_funcs, key=lambda x: x.__name__):
+        try:
+            _f()
+        except Exception as _e:
+            if os.environ.get("PYTEST_CURRENT_TEST"):
+                raise
+            print(f"  {_e}")
+    ok = _summary()
+    sys.exit(0 if ok else 1)
