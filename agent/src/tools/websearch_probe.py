@@ -55,14 +55,46 @@ def _run(query: str, model: str) -> None:
     for it in out:
         if isinstance(it, dict):
             print(f"    - type={it.get('type','?')}")
-    summary, calls = _parse_response_output(out)
+    # v8.15: 打印关键结构辅助核对引用真实位置
+    n_call = sum(1 for it in out if isinstance(it, dict) and it.get("type") == "web_search_call")
+    n_msg = sum(1 for it in out if isinstance(it, dict) and it.get("type") == "message")
+    print(f"  web_search_call 数 = {n_call} | message 数 = {n_msg}")
+    first_call = next((it for it in out if isinstance(it, dict)
+                       and it.get("type") == "web_search_call"), None)
+    if first_call:
+        print("  首个 web_search_call:")
+        print("   ", json.dumps(first_call, ensure_ascii=False)[:400])
+    first_msg = next((it for it in out if isinstance(it, dict)
+                      and it.get("type") == "message"), None)
+    if first_msg:
+        print("  首个 message 完整结构（关键：看引用/URL 挂在哪）:")
+        print("   ", json.dumps(first_msg, ensure_ascii=False)[:1500])
+    # 统计全响应含 http 的字段位置
+    import re as _re
+    _url_hits = []
+    def _scan(o, path=""):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if isinstance(v, str) and _re.search(r'https?://', v):
+                    _url_hits.append(f"{path}.{k}: {v[:90]}")
+                else:
+                    _scan(v, f"{path}.{k}")
+        elif isinstance(o, list):
+            for i, v in enumerate(o):
+                _scan(v, f"{path}[{i}]")
+    _scan(body)
+    print(f"  全响应含 URL 的字段数 = {len(_url_hits)}")
+    for h in _url_hits[:12]:
+        print("    ", h)
+    summary, calls, meta = _parse_response_output(out)
     print(f"  解析总结文本长度 = {len(summary)}")
     print(f"  解析引用条目数   = {len(calls)}")
+    print(f"  模型检索关键词   = {meta.get('queries', [])[:5]}")
     for c in calls[:8]:
         print(f"    [W] {c['title'][:60]} — {c['url'][:80]}")
     if not calls:
-        print("  ⚠️ 未解析到 web_search_call 条目——请对照官方文档核对字段名，")
-        print("     并在 src/tools/deepseek_web.py:_parse_response_output 中修正。")
+        print("  ⚠️ 未提取到 URL 引用——如果上面 message 结构里根本没有 url/citation/annotations,")
+        print("     说明 DeepSeek 该版本不返回结构化引用，只返回文本+搜索动作；方案见对话说明。")
     # 打印原始结构供人工核对（截断）
     print("\n── 原始 output 精简结构（前 3 项，校验用）──")
     for it in out[:3]:

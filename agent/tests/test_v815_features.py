@@ -167,7 +167,7 @@ def test_v815_rag_cache():
             _RAG_CACHE.clear()
 
 
-# ── F-15-6 参数解析（Responses web_search_call 防御式解析）─────────
+# ── F-15-6 参数解析（Responses web_search_call 防御式解析，含实测结构）───
 def test_v815_web_response_parse():
     print("[VF-6] Responses 引用解析")
     from src.tools.deepseek_web import _parse_response_output
@@ -178,12 +178,41 @@ def test_v815_web_response_parse():
         {"type": "web_search_call", "title": "T2", "url": "", "content": {"url": "https://x/2", "title": "T2"}},
         {"type": "other"},
     ]
-    summary, calls = _parse_response_output(out)
+    summary, calls, meta = _parse_response_output(out)
     check("text 块聚合", summary == "摘要…", summary)
     check("引用解析 2 条", len(calls) == 2, str(calls))
     check("引用字段 title/url/abstract", calls[0]["title"] == "T1"
           and calls[0]["url"] == "https://example.com/1")
     check("兼容 content 内嵌 url", calls[1]["url"] == "https://x/2")
+
+
+def test_v815_web_response_parse_real_shape():
+    """复刻 2026-08 真机探测的真实结构：web_search_call 只含 action.queries，
+    URL 来自 message 行内 MD 链接 / 裸 URL / content.annotations。"""
+    print("[VF-7] Responses 引用解析（真机结构）")
+    from src.tools.deepseek_web import _parse_response_output
+    out = [
+        {"type": "reasoning",
+         "content": [{"type": "reasoning_text", "text": "thinking…"}]},
+        {"type": "web_search_call", "id": "c1", "status": "completed",
+         "action": {"type": "search", "queries": ["柑橘黄龙病 防治 2024", "citrus hlb 2025"]}},
+        {"type": "message", "content": [
+            {"type": "output_text",
+             "text": "最新进展见 [中国农学通报综述](https://www.cjab.org.cn/x) "
+                     "和 https://pubmed.ncbi.nlm.nih.gov/12345 …"}]},
+        {"type": "message", "content": [
+            {"type": "output_text", "text": "华中农大纳米酶研究…", "annotations": [
+                {"type": "url_citation", "title": "纳米酶综述", "url": "https://nature.com/articles/123"}]}]},
+    ]
+    summary, calls, meta = _parse_response_output(out)
+    check("检索关键词提取", meta.get("queries", [])[:2] == ["柑橘黄龙病 防治 2024", "citrus hlb 2025"],
+          str(meta.get("queries")))
+    check("URL 去重 3 条", len(calls) == 3, str([c["url"] for c in calls]))
+    urls = [c["url"] for c in calls]
+    check("MD 链接标题+url", any(u == "https://www.cjab.org.cn/x" for u in urls))
+    check("裸 URL 兜底", any(u == "https://pubmed.ncbi.nlm.nih.gov/12345" for u in urls))
+    check("annotations 深扫", any(u == "https://nature.com/articles/123" for u in urls))
+    check("text 聚合", len(summary) > 10, summary[:30])
 
 
 # ── 汇总 ──────────────────────────────────────────────────────────
