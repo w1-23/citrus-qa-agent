@@ -15,7 +15,9 @@ retrieval:
   dynamic_threshold_ratio: 0.60  # 动态阈值 = top_score * ratio
   web_relevance_threshold: 0.3   # Web 语义过滤阈值（BGE reranker 分数，0=不相关 1=完美匹配）
   rag_hyde_enabled: true         # HyDE: 本地RAG检索前生成英文假想答案提升召回
-  hyde_max_tokens: 512           # HyDE 假想答案输出上限（与 prompt 250词约束配套，防截断）
+  # v8.15.3c: 假想答案输出上限 512→1024 —— v4-flash 默认思维链偶发把 512 预算
+  # 吃光、返回空 content（8-21 19:45 连续两轮"生成结果为空"即此），1024 留余量
+  hyde_max_tokens: 1024          # HyDE 假想答案输出上限（与 prompt 250词约束配套，防截断）
   # v8.15 查询级结果缓存：相同/高度相似问题直接复用上次检索结果（毫秒级返回）。
   # 键 = 规范化 query + HyDE 开关 + 语料指纹(批次数+总块数)，语料增删/重启自动失效。
   rag_cache_enabled: true        # 总开关（默认开；不影响 HyDE/embed 内部缓存）
