@@ -12,7 +12,8 @@ from langgraph.graph import StateGraph, END
 
 from src.graph.state import AgentState
 from src.config import settings, get_deepseek_model
-from src.core.evidence import render_evidence, EVIDENCE_SNIPPET_MAX_CHARS, src_of
+from src.core.evidence import (render_evidence, EVIDENCE_SNIPPET_MAX_CHARS,
+                               src_of, filter_refs_by_answer)
 from src.core.agent_loop import (
     dedup_by_doi, emit_llm_usage, FINAL_ANSWER_PROMPT,
     invoke_llm_with_retry, force_final_answer,
@@ -356,6 +357,12 @@ async def light_supervisor_node(state: AgentState) -> dict:
             "text_preview": (wr.get("snippet") or wr.get("content") or wr.get("abstract") or "")[:300],
             "score": 0,
         })
+
+    # v8.15: 侧栏引用只显示回答真实引用的证据（严格过滤 + 按回答首次出现顺序重排）
+    try:
+        cited_refs = filter_refs_by_answer(answer, cited_refs)
+    except Exception as e:
+        logger.debug(f"[LightGraph] filter_refs_by_answer skipped: {e}")
 
     references_data = {"cited": cited_refs, "uncited": [], "total": len(cited_refs)}
 
