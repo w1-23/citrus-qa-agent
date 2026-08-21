@@ -2324,6 +2324,41 @@ function toggleRound(id) {
   body.style.display = body.style.display === 'none' ? 'block' : 'none';
   icon.classList.toggle('collapsed');
 }
+/* v8.15.2: 证据来源组手风琴（全局版本——内联 onclick 需要全局解析；
+   此前定义在 streamOnce 内导致 RAG/UCR 组无法展开收缩） */
+function toggleSrcGroup(id) {
+  var g = document.getElementById('srcgroup-' + id);
+  if (!g) return;
+  var willOpen = g.style.display === 'none';
+  var box = g.parentNode;
+  // 收起同 Round 内的其他来源组（手风琴语义）
+  var siblings = box.querySelectorAll('.src-group-body');
+  for (var i = 0; i < siblings.length; i++) {
+    siblings[i].style.display = 'none';
+    var sibIcon = siblings[i].previousElementSibling &&
+      siblings[i].previousElementSibling.querySelector('.toggle-icon');
+    if (sibIcon) sibIcon.classList.add('collapsed');
+  }
+  if (willOpen) {
+    g.style.display = 'block';
+    var myIcon = g.previousElementSibling &&
+      g.previousElementSibling.querySelector('.toggle-icon');
+    if (myIcon) myIcon.classList.remove('collapsed');
+  }
+}
+/* v8.15.2: 引用编号自然排序（[1]..[13] 升序；[W1] 组在数字之后） */
+function _refIdKey(id) {
+  var s = String(id == null ? '' : id);
+  var m = s.match(/^([WH])?(\d+)$/i);
+  if (!m) return 'ZZ' + s;
+  return (m[1] ? m[1].toUpperCase() : 'N') + ('0000' + m[2]).slice(-4);
+}
+function _refIdSort(items) {
+  return (items || []).slice().sort(function (a, b) {
+    var ka = _refIdKey(a && a.ref_id), kb = _refIdKey(b && b.ref_id);
+    return ka < kb ? -1 : (ka > kb ? 1 : 0);
+  });
+}
 
 async function sendMsg(isFollowUp) {
   if (isFollowUp === undefined) isFollowUp = false;
@@ -2570,7 +2605,9 @@ async function sendMsg(isFollowUp) {
         if (cited.length>0) {
           var c=document.createElement('div'); c.style.cssText='margin-top:10px;padding-top:10px;border-top:1px solid var(--border-hairline)';
           c.innerHTML='<div style="font-size:11px;color:var(--text-muted);margin-bottom:5px">引用 ('+cited.length+'篇)</div>';
-          for (var k=0;k<cited.length;k++) c.innerHTML+='<span style="display:inline-block;font-family:var(--font-mono);font-size:10px;background:var(--success-glow);color:var(--success);padding:1px 5px;border-radius:3px;margin:2px;font-weight:600">['+escapeHtml(cited[k].ref_id)+']</span>';
+          // v8.15.2: 徽章条按 ref_id 升序（此前按回答出现顺序显得混乱）
+          var order = _refIdSort(cited);
+          for (var k=0;k<order.length;k++) c.innerHTML+='<span style="display:inline-block;font-family:var(--font-mono);font-size:10px;background:var(--success-glow);color:var(--success);padding:1px 5px;border-radius:3px;margin:2px;font-weight:600">['+escapeHtml(order[k].ref_id)+']</span>';
           citationsDiv.appendChild(c);
         }
         break;
@@ -2684,22 +2721,8 @@ async function sendMsg(isFollowUp) {
     return h;
   }
   // v8.15: 来源分组手风琴（同一 Round 内同时只展开一组）
-  function toggleSrcGroup(id) {
-    var g = document.getElementById('srcgroup-' + id);
-    if (!g) return;
-    var willOpen = g.style.display === 'none';
-    var box = g.parentNode;
-    // 收起同 Round 内的其他来源组（手风琴语义）
-    var siblings = box.querySelectorAll('.src-group-body');
-    for (var i = 0; i < siblings.length; i++) {
-      siblings[i].style.display = 'none';
-      siblings[i].previousElementSibling.querySelector('.toggle-icon').classList.add('collapsed');
-    }
-    if (willOpen) {
-      g.style.display = 'block';
-      g.previousElementSibling.querySelector('.toggle-icon').classList.remove('collapsed');
-    }
-  }
+  // v8.15.2: toggleSrcGroup 已提升为全局函数（见 toggleRound 下方）——
+  // 此前的内部定义导致内联 onclick 全局解析失败，RAG/UCR 来源组无法展开收缩。
   function renderRoundSidebar() {
     if (roundHistory.length === 0) {
       sidebarContent.innerHTML = '<div class="empty-sidebar">提交问题后文献将在此展示</div>';
@@ -2753,8 +2776,10 @@ async function sendMsg(isFollowUp) {
         html += '<span class="round-title" style="font-size:11px">' + escapeHtml(sm2.name) + '</span>';
         html += '<span class="round-count">' + groups[gk].length + '</span></div>';
         html += '<div class="src-group-body" id="srcgroup-' + gid + '"' + (gOpen ? '' : ' style="display:none"') + '>';
-        for (var m2 = 0; m2 < groups[gk].length; m2++) {
-          html += renderCitationItem(groups[gk][m2]);
+        // v8.15.2: 组内按 ref_id 升序（回答乱序引用时侧栏保持编号顺序整齐）
+        var gItems = _refIdSort(groups[gk]);
+        for (var m2 = 0; m2 < gItems.length; m2++) {
+          html += renderCitationItem(gItems[m2]);
         }
         html += '</div></div>';
       }

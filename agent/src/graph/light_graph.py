@@ -196,15 +196,7 @@ async def light_supervisor_node(state: AgentState) -> dict:
     tools = [t for t_name in LIGHT_TOOL_NAMES
              if t_name in _TOOL_REGISTRY_BY_NAME
              for t in [_TOOL_REGISTRY_BY_NAME[t_name]]]
-    # v8.15: light 模式联网工具——请求开启「联网」开关时动态追加（模型可自行调用；
-    # 开关未开则不可见，与 expert 语义一致）
-    try:
-        from src.core.tracing import web_search_enabled as _req_web_on
-        if _req_web_on() and "deepseek_web_search" in _TOOL_REGISTRY_BY_NAME:
-            tools.append(_TOOL_REGISTRY_BY_NAME["deepseek_web_search"])
-            logger.info("[LightGraph] 联网开关开启，已追加 deepseek_web_search 工具")
-    except Exception:
-        pass
+    # v8.15.2: light 模式不分配联网工具（用户决定：轻量模式走纯本地检索）
 
     llm = _build_light_llm(bind_tools=tools) if tools else _build_light_llm()
 
@@ -375,16 +367,8 @@ async def light_supervisor_node(state: AgentState) -> dict:
 
     references_data = {"cited": cited_refs, "uncited": [], "total": len(cited_refs)}
 
-    # v8.4.6 F2: 历史证据引用进侧栏（回答基于 [历史检索证据] 作答时不再空面板）
-    try:
-        from src.session.manager import session_manager
-        historical = session_manager.get_evidence_refs(
-            state.get("session_id", ""), limit=20)
-        if historical:
-            references_data["historical"] = historical
-            references_data["total"] = len(cited_refs) + len(historical)
-    except Exception:
-        pass
+    # v8.15.2: 不再注入历史证据引用（H1..Hn）——侧栏只显示本轮回答真实引用的证据，
+    # 防止侧栏膨胀。（原 v8.4.6 F2 行为已移除）
 
     # v8.4.13: 回答已由流式逐 token 上屏（text 事件），不再模拟打字机推送
     logger.info(
