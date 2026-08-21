@@ -209,9 +209,12 @@ async def chat_v2(req: ChatRequest):
         "messages": [],
         "answer": "",
         "idempotency_key": idem_key,
-        # v8.15: 联网搜索请求级开关（前端下发；图形内据此提示模型联网工具可用性）
-        "web_search_enabled": bool(req.web_search_enabled) and bool(settings.WEB_SEARCH_ENABLED),
+        # v8.15: 联网搜索由前端开关逐请求决定（config web_search.enabled 仅作部署默认值，
+        # 不设启用门槛）——前端开则本次可联网，关则工具执行层短路为 [DISABLED]
+        "web_search_enabled": bool(req.web_search_enabled),
     }
+    from src.core.tracing import set_web_search_enabled
+    set_web_search_enabled(bool(req.web_search_enabled))
     t0 = time.perf_counter()
 
     async def event_generator():

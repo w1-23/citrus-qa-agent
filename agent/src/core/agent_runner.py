@@ -265,6 +265,20 @@ async def run_agent(
     tool_names = _resolve_tool_names(agent_name)
     tools = [_TOOL_REGISTRY_BY_NAME[n] for n in tool_names if n in _TOOL_REGISTRY_BY_NAME]
 
+    # v8.15: 联网搜索状态提示——向检索子代理明示本次请求是否开启联网（前端「联网」开关）。
+    # 开关关时模型应避免空调用 deepseek_web_search（即便误调用，工具执行层也会短路 [DISABLED]）。
+    try:
+        if agent_name == "retrieve-agent":
+            from src.core.tracing import web_search_enabled as _req_web_on
+            _web_hint = ("<web_search_status>\n本次联网搜索已开启：本地覆盖不足的最新/实时信息可使用 "
+                         "deepseek_web_search（每轮 ≤1 次）；引用会带网址进入「联网搜索」证据组。\n"
+                         "</web_search_status>\n" if _req_web_on() else
+                         "<web_search_status>\n本次联网搜索未开启（前端「联网」开关关闭）：请勿调用 "
+                         "deepseek_web_search，本地不足时如实声明缺口。\n</web_search_status>\n")
+            _extra_block = (_web_hint + _extra_block) if _extra_block else _web_hint
+    except Exception:
+        pass
+
     goal = task.get("goal", "")
     query = task.get("query", "")
     output_path = task.get("output_path", "")
@@ -708,13 +722,11 @@ def _resolve_tool_names(agent_name: str) -> list[str]:
         ],
     }
     names = mapping.get(agent_name, [])
-    # v8.15: 联网工具门控——academic_search/fetch_fulltext 随 ACADEMIC_ENABLED
-    # （默认关，代码保留不删）；deepseek_web_search 随 WEB_SEARCH_ENABLED（主开关）。
-    # 关闭时模型看不到工具 → 不会浪费调用轮；重开只改 config。
+    # v8.15: 学术联网门控——academic_search/fetch_fulltext 随 ACADEMIC_ENABLED
+    # （默认关，代码保留不删）。deepseek_web_search 始终注册：启用与否由
+    # 前端「联网」开关逐请求决定（工具执行层读取请求 contextvar 短路）。
     if not getattr(settings, "ACADEMIC_ENABLED", False):
         names = [n for n in names if n not in ("academic_search", "fetch_fulltext")]
-    if not getattr(settings, "WEB_SEARCH_ENABLED", False):
-        names = [n for n in names if n != "deepseek_web_search"]
     return names
 
 
