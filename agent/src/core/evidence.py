@@ -10,11 +10,49 @@ chunk 全文此前在 ToolMessage / artifact / 检索回执 / 证据账本 / 历
   - 具名预算常量       工具上下文 / 账本片段 / 回执与材料全文，按用途各一个语义名
 """
 import hashlib
+import re
 
 # 单条渲染预算（语义名，替换散落各文件的 1000/2000/3000 魔数）
 EVIDENCE_TOOL_MAX_CHARS = 1000     # 检索工具上下文逐条（retrieve-agent 无 read 工具，预算敏感）
 EVIDENCE_SNIPPET_MAX_CHARS = 2000  # 证据账本 snippet（跨轮复用/侧栏回查）
 EVIDENCE_RENDER_MAX_CHARS = 3000   # 检索回执 / 写作材料包的"完整片段"安全阀
+
+# 回答内引用编号提取（[n] 与 [Wn]/[Hn]，v8.15 引用过滤用）
+_REF_NUM_RE = re.compile(r"\[(\d{1,3})\]")
+_REF_WH_RE = re.compile(r"\[([WH])(\d{1,3})\]", re.IGNORECASE)
+
+
+def filter_refs_by_answer(answer: str, cited_refs: list) -> list:
+    """v8.15: 只保留回答文本中真实引用的证据条目，并按首次出现顺序重排。
+
+    - 提取回答中出现的引用编号（[n] + [Wn]/[Hn]），按首次出现记序；
+    - cited_refs 仅保留 ref_id ∈ 引用集合的条目，顺序 = 回答中首次出现顺序；
+    - 回答中未出现的条目一律舍弃（侧栏 RAG/UCR/Web 组只显示真实引用）；
+    - 回答为空 → 原样返回（防御，不误伤）。
+    """
+    if not answer or not cited_refs:
+        return cited_refs
+    order: list[str] = []
+    seen: set = set()
+    for m in _REF_NUM_RE.finditer(answer):
+        rid = m.group(1)
+        if rid not in seen:
+            seen.add(rid)
+            order.append(rid)
+    for m in _REF_WH_RE.finditer(answer):
+        rid = f"{m.group(1).upper()}{m.group(2)}"
+        if rid not in seen:
+            seen.add(rid)
+            order.append(rid)
+    if not order:
+        return cited_refs  # 无任何引用编号 → 保持原样（防御路径）
+    by_id = {str(it.get("ref_id")): it for it in cited_refs}
+    out: list = []
+    for rid in order:
+        it = by_id.get(rid)
+        if it is not None and it not in out:
+            out.append(it)
+    return out
 
 # 证据全文的字段回退顺序（text 含机制/数字细节，优先；摘要/片段次之）
 _TEXT_KEYS = ("text", "abstract", "snippet")

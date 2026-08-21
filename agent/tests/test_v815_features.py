@@ -230,6 +230,37 @@ def test_v815_web_response_parse_real_shape():
     check("text 聚合", len(summary) > 10, summary[:30])
 
 
+# ── F-15-8 引用过滤（侧栏只显示回答真实引用，按首次出现顺序重排）───
+def test_v815_filter_refs_by_answer():
+    print("[VF-8] 引用过滤与重排（只显示回答真实引用）")
+    from src.core.evidence import filter_refs_by_answer
+    cited = [
+        {"ref_id": "1", "source": "rag", "title": "P1"},
+        {"ref_id": "2", "source": "rag", "title": "P2"},
+        {"ref_id": "3", "source": "ucr", "title": "U3"},
+        {"ref_id": "W1", "source": "web", "title": "W1"},
+        {"ref_id": "W2", "source": "web", "title": "W2"},
+        {"ref_id": "H1", "source": "historical", "title": "H1"},
+    ]
+    # 回答引用顺序 [3] → [1] → [W2]（注意与 ref_id 顺序不同）
+    out = filter_refs_by_answer("先看 [3] 再看 [1]，辅以 [W2] 与 [3] 重复引用", cited)
+    check("只保留被引用条目", [r["ref_id"] for r in out] == ["3", "1", "W2"],
+          str([r["ref_id"] for r in out]))
+    check("未引用条目舍弃(P2/W1/H1)", all(r["ref_id"] not in ("2", "W1", "H1")
+                                          for r in out), str(out))
+    # 仅数字引用
+    out2 = filter_refs_by_answer("依据 [1] 与 [2] 结论一致", cited)
+    check("数字引用过滤", [r["ref_id"] for r in out2] == ["1", "2"], str(out2))
+    # 防御：空回答 / 无引用编号 / 无条目 → 原样
+    check("空回答原样返回", filter_refs_by_answer("", cited) == cited)
+    check("空列表原样返回", filter_refs_by_answer("x [1]", []) == [])
+    no_ref = filter_refs_by_answer("没有任何编号引用的自然回答", cited)
+    check("无引用编号 → 原样返回(防御)", no_ref == cited)
+    # 编号不存在于列表 → 忽略
+    out3 = filter_refs_by_answer("引用 [99] 和 [1]", cited)
+    check("不存在编号忽略", [r["ref_id"] for r in out3] == ["1"], str(out3))
+
+
 # ── 汇总 ──────────────────────────────────────────────────────────
 def _summary():
     print(f"\n[VF-15] PASS {len(passed)} / FAIL {len(failed)}"
