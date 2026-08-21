@@ -139,6 +139,24 @@ def test_v8153_web_streak_state_machine():
     check("空内容清零", _web_streak_step(1, "") == 0)
 
 
+# ── F-15.3-6 提示词机制回归（防未来清理误删 v8.15.3 机制标记）──────
+def test_v8153_prompt_mechanisms():
+    print("[VF-14] 提示词机制标记存在性")
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]  # agent/
+    ra = (root / "src/prompts/agents/retrieve-agent.md").read_text(encoding="utf-8")
+    dg = (root / "src/prompts/system/decision_guide.md").read_text(encoding="utf-8")
+
+    check("retrieve-agent 含数据源覆盖边界", "数据源覆盖边界" in ra)
+    check("retrieve-agent 覆盖表(政策/新闻=本地不覆盖)",
+          "政府工作报告" in ra and "最新新闻" in ra)
+    check("retrieve-agent 早停阈值规则(通过≤2/过滤≥50%)",
+          "通过 ≤2 条" in ra and "过滤占比 ≥50%" in ra)
+    check("retrieve-agent 联网失败禁再调", "[ERR_NETWORK]" in ra and "禁止再次调用" in ra)
+    check("decision_guide 含覆盖表+自审", "数据源覆盖边界与检索前自审" in dg)
+    check("decision_guide 含回答前自审(引用对齐)", "回答前自审" in dg and "引用对齐" in dg)
+
+
 # ── 汇总 ──────────────────────────────────────────────────────────
 def _summary():
     print(f"\n[VF-15.3] PASS {len(passed)} / FAIL {len(failed)}"
