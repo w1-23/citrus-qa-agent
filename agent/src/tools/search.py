@@ -503,7 +503,13 @@ def _is_english_answer(text: str) -> bool:
 
 
 def _generate_hyde_answer(query: str) -> str | None:
-    """Generate a HyDE (Hypothetical Document Embedding) answer via fast LLM."""
+    """Generate a HyDE (Hypothetical Document Embedding) answer via fast LLM.
+
+    v8.15.3c: 空内容重试一次——v4-flash 默认思维链偶发把 max_tokens 预算吃光、
+    返回空 content（agent.log 2026-08-21 19:45 同请求连续两轮"生成结果为空"即此现象，
+    相邻轮次 1591/1476 chars 均成功 → 偶发而非系统性故障）。重试后仍空才降级
+    基础检索；异常/非英文不重试（确定性失败，重试无意义）。
+    """
     try:
         from openai import OpenAI
         client = OpenAI(
@@ -511,19 +517,24 @@ def _generate_hyde_answer(query: str) -> str | None:
             base_url=settings.RESOLVED_FAST_BASE_URL,
             timeout=15,  # v8.3.1: 3s 太短导致 flash 生成假想答案频繁超时降级（每次检索白等+丢 hyde_dense 一路）
         )
-        resp = client.chat.completions.create(
-            model=settings.RESOLVED_FAST_MODEL,
-            messages=[
-                {"role": "system", "content": _HYDE_PROMPT},
-                {"role": "user", "content": f"User question:\n{query}\n\nHypothetical answer paragraph:"},
-            ],
-            temperature=0.2,
-            max_tokens=settings.HYDE_MAX_TOKENS,
-        )
-        answer = resp.choices[0].message.content.strip()
+        answer = ""
+        for attempt in (1, 2):
+            resp = client.chat.completions.create(
+                model=settings.RESOLVED_FAST_MODEL,
+                messages=[
+                    {"role": "system", "content": _HYDE_PROMPT},
+                    {"role": "user", "content": f"User question:\n{query}\n\nHypothetical answer paragraph:"},
+                ],
+                temperature=0.2,
+                max_tokens=settings.HYDE_MAX_TOKENS,
+            )
+            answer = (resp.choices[0].message.content or "").strip()
+            if answer:
+                break
+            logger.warning(f"[HyDE] 第 {attempt} 次生成结果为空，重试一次")
         # v8.4.2: 强制英文校验（中文 query 时常跟随生成中文，破坏英文向量匹配）
         if not answer:
-            logger.warning("[HyDE] 生成结果为空，回退基础检索")
+            logger.warning("[HyDE] 两次生成均为空，回退基础检索")
             return None
         if not _is_english_answer(answer):
             logger.warning(

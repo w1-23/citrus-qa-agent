@@ -39,6 +39,8 @@ def test_v815_config_defaults():
     check("RAG_CACHE_ENABLED 默认开", settings.RAG_CACHE_ENABLED is True)
     check("RAG_CACHE_SIZE=300", settings.RAG_CACHE_SIZE == 300)
     check("RAG_CACHE_TTL_HOURS=24", settings.RAG_CACHE_TTL_HOURS == 24)
+    # v8.15.3c: HyDE 输出上限 1024（v4-flash 思维链吃光 512 → 空 content 偶发）
+    check("HYDE_MAX_TOKENS=1024", settings.HYDE_MAX_TOKENS == 1024)
     # v8.15: web_search.enabled 仅部署展示默认（非启用门槛，前端开关才是总开关）；
     # 关闭时前端按钮显示关、请求不带联网标志、工具执行层短路。
     check("WEB_SEARCH_RESPONSES_PATH 默认 /v1/responses",
