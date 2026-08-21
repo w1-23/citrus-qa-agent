@@ -209,6 +209,20 @@ def build_evidence_report(collected_artifacts: dict, query: str,
         if text:
             quoted = "\n".join(f"> {ln}" for ln in text.splitlines())
             lines.append(f"    证据全文: \n{quoted}")
+    # v8.15.3f: 联网综述正文单独成段（此前 summary 只进工具 content、不进回执，
+    # supervisor 只看到 URL 无正文 → cited=0 短回答）。综述是 DeepSeek 原生联网
+    # 读完全网后生成的回答正文，是联网证据的核心正文，必须在回执里可见。
+    _summaries = [str(s).strip() for s in (collected_artifacts.get("web_summaries") or [])
+                  if s and str(s).strip()]
+    if _summaries:
+        lines.append("")
+        lines.append("## 网络综述（DeepSeek 原生联网回答正文）")
+        for _si, _s in enumerate(_summaries[:3], 1):
+            _body = _s if len(_s) <= 4000 else _s[:4000] + " …"
+            _quoted = "\n".join(f"> {ln}" for ln in _body.splitlines())
+            lines.append(f"### 综述 {_si}")
+            lines.append(_quoted)
+        lines.append("（以下 [Wn] 为综述对应的可点击网页来源）")
     if web:
         lines.append("")
         lines.append("## 学术源补充条目")
@@ -221,8 +235,8 @@ def build_evidence_report(collected_artifacts: dict, query: str,
             if text:
                 lines.append(f"    片段: {text}")
     lines.append("")
-    lines.append("引用编号请使用上述 [n] 清单；追问可直接引用上文证据，"
-                 "无需重复检索已覆盖的角度。")
+    lines.append("引用编号请使用上述 [n]（本地文献/品种库）与 [Wn]（联网来源）清单；"
+                 "联网事实必须挂 [Wn]。追问可直接引用上文证据，无需重复检索已覆盖的角度。")
     return "\n".join(lines)
 
 
@@ -368,7 +382,7 @@ async def run_agent(
 
     max_turns = _get_max_turns(agent_name)
     tool_count = 0
-    collected_artifacts = {"main_results": [], "web_results": []}
+    collected_artifacts = {"main_results": [], "web_results": [], "web_summaries": []}
     llm_error: str = ""
     t_start = time.perf_counter()
 
@@ -564,6 +578,10 @@ async def run_agent(
                 collected_artifacts["web_results"].extend(
                     art.get("web_results", [])
                 )
+                # v8.15.3f: 联网综述正文进 artifact（此前只进 content，代码回执拿不到）
+                _ws = str(art.get("web_summary") or "").strip()
+                if _ws:
+                    collected_artifacts["web_summaries"].append(_ws)
 
             tc = response.tool_calls[idx] if idx < len(response.tool_calls) else None
             # v8.3.5: 复用 tc_ids 单一来源（此前两次独立提取 → dict 形态 UUID 不匹配，

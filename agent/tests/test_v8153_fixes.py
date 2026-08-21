@@ -232,6 +232,76 @@ def test_v8153d_original_query_direct():
     check("返回内容含 [W1] 引用", "[W1]" in c, c[:120])
     ok_url = (a.get("web_results") or [{}])[0].get("url") == "https://gov.example.com/report"
     check("artifact 带 URL", bool(a.get("web_results")) and ok_url, str(a))
+    # v8.15.3f: 正文 summary 必须进 artifact（此前只进 content，回执拿不到 → 只有 URL 无正文）
+    check("artifact 带 web_summary 正文", bool(a.get("web_summary")), str(a.get("web_summary")))
+
+
+# ── F-15.3-10 网络综述正文进确定性回执（根治"只有 URL 无正文"）──
+def test_v8153f_web_summary_in_report():
+    print("[VF-18] 网络综述正文进回执")
+    from src.core.agent_runner import build_evidence_report
+
+    arts = {
+        "main_results": [],
+        "web_results": [{"ref_id": "W1", "title": "2026柑橘产业报告",
+                         "url": "https://gov.example.com/report", "source": "web"}],
+        "web_summaries": ["2026年柑橘产业政府工作报告指出，全年产量同比增长……"],
+    }
+    rep = build_evidence_report(arts, "2026柑橘政府报告", 0)
+    check("回执含网络综述段", "## 网络综述（DeepSeek 原生联网回答正文）" in rep, rep[:200])
+    check("回执含综述正文", "2026年柑橘产业政府工作报告指出" in rep, rep[:300])
+    check("回执仍含 [W1] 来源清单",
+          "[W1] 2026柑橘产业报告" in rep and "https://gov.example.com/report" in rep, rep)
+    check("回执引导 [n]/[Wn] 引用", "联网事实必须挂 [Wn]" in rep, rep[-200:])
+
+    rep2 = build_evidence_report(
+        {"main_results": [], "web_results": arts["web_results"]}, "q", 0)
+    check("无摘要时不渲染综述段", "网络综述" not in rep2)
+
+
+# ── F-15.3-9 加载阶段状态推送（消除静默期，前端零改动复用现有事件）──
+def test_v8153e_load_progress_events():
+    print("[VF-17] load 阶段进度事件")
+    import asyncio
+    import json
+    from pathlib import Path
+    from src.core.progress_bus import (
+        set_request_queue, clear_request_queue, emit_status, emit_progress)
+
+    q = asyncio.Queue()
+    set_request_queue(q)
+    try:
+        emit_status("step_active", step_id="load")
+        emit_progress("tool_progress", {
+            "message": "已加载历史 12 条，正在理解问题并规划检索…", "tool_call_id": ""})
+        emit_status("step_done", step_id="load")
+        items = [q.get_nowait() for _ in range(3)]
+    finally:
+        clear_request_queue()
+
+    check("事件入队 3 条", len(items) == 3, str(items))
+    first = json.loads(items[0]["data"]) if isinstance(items[0].get("data"), str) else {}
+    check("step_active 载荷(event=status, stage=step_active)",
+          items[0]["event"] == "status" and first.get("stage") == "step_active"
+          and first.get("step_id") == "load", str(items[0]))
+    second = json.loads(items[1]["data"]) if isinstance(items[1].get("data"), str) else {}
+    check("tool_progress 带自定义文案（前端 updateStatus 直显）",
+          items[1]["event"] == "tool_progress"
+          and "正在理解问题并规划检索" in second.get("message", ""), str(items[1]))
+    third = json.loads(items[2]["data"]) if isinstance(items[2].get("data"), str) else {}
+    check("step_done 载荷", items[2]["event"] == "status" and third.get("stage") == "step_done",
+          str(items[2]))
+
+    # 源码断言：expert/light 两个 load 节点都已接上推送（防静默期回归）
+    root = Path(__file__).resolve().parents[1]  # agent/
+    ex = (root / "src/graph/expert_graph.py").read_text(encoding="utf-8")
+    lg = (root / "src/graph/light_graph.py").read_text(encoding="utf-8")
+    check("expert load 节点含 step_active+tool_progress 推送",
+          'emit_status("step_active", step_id="load")' in ex
+          and 'emit_status("step_done", step_id="load")' in ex
+          and "正在理解问题并规划检索" in ex)
+    check("light load 节点含完成推送", 'emit_status("step_done", step_id="load")' in lg
+          and "已加载历史" in lg)
 
 
 # ── 汇总 ──────────────────────────────────────────────────────────

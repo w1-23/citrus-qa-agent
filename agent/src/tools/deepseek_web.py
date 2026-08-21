@@ -242,7 +242,15 @@ def deepseek_web_search(query: str) -> Tuple[str, dict]:
                                           elapsed_ms=elapsed)
         logger.info(f"[deepseek_web_search] done: {len(calls)} 引用, {len(summary)} 字摘要, "
                     f"{len(meta.get('queries', []))} 检索词, {elapsed:.0f}ms")
-        return content, {"main_results": [], "web_results": items}
+        # v8.15.3f: 摘要必须进 artifact——此前 summary 只进 content（retrieve-agent 自己看得到，
+        # 但 call_retrieve_agent 的回执是代码用 collected_artifacts 组装的，只读 web_results=
+        # 纯 URL 条目 → supervisor 只看到 8 个网址、无正文，落得 cited=0 的短回答）。
+        # web_summary 单列一字段，经 collect→build_evidence_report 渲染进「网络综述」段。
+        return content, {
+            "main_results": [],
+            "web_results": items,
+            "web_summary": summary[:4000],
+        }
     except requests.exceptions.Timeout as e:
         # v8.15.3: 超时单独分支（超时 ≠ 403/429——盲重试与误改配置都源于此混为一谈）
         _to = _web_http_timeout()
