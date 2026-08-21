@@ -597,6 +597,10 @@ async def run_agent(
                     _summary = "重复检索角度，已跳过"
                 elif result_text.startswith("[SEARCH_BUDGET]"):
                     _summary = "检索预算拦截，未执行"
+                elif result_text.startswith("[ERR_"):
+                    # v8.15.3b: 失败类别前置到前端摘要（旧显示"0 条结果"让人误判"没搜到"）
+                    _first = result_text.split("\n", 1)[0][:40]
+                    _summary = f"执行失败 ({_first})"
                 emit_tool_result(
                     tc_name[:30],
                     result_text,

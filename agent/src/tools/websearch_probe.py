@@ -44,7 +44,9 @@ def _run(query: str, model: str) -> None:
     t0 = time.perf_counter()
     print(f"POST {url}")
     print(f"  payload.model = {model}")
-    resp = requests.post(url, headers=headers, json=payload, timeout=60)
+    # v8.15.3b: 与生产工具同源超时（config web_search.timeout_sec，默认 90s——实测 33-50s）
+    _to = int(getattr(settings, "WEB_SEARCH_TIMEOUT", 90) or 90)
+    resp = requests.post(url, headers=headers, json=payload, timeout=_to)
     print(f"  HTTP {resp.status_code} ({time.perf_counter()-t0:.1f}s)")
     if resp.status_code != 200:
         print("  响应体:", resp.text[:2000])

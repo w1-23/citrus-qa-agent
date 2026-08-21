@@ -43,6 +43,10 @@ web_search:
   provider: deepseek_responses    # deepseek_responses | builtin(预留 Tavily/Serper 自建源)
   responses_path: /v1/responses   # Responses 端点路径（官方文档待核实，probe 可验证）
   probe_enabled: false            # 是否启用配套探测脚本（websearch_probe.py --run）
+  # v8.15.3b: 联网调用 HTTP 读取超时（秒）。DeepSeek 原生联网实测 33-50s——
+  # 曾设 30s 导致"本会成功的慢响应被自掐"→ 伪失败 → 熔断 → 7 次全败白等 210s。
+  # 90s 覆盖实测区间并留余量；执行层对应预算见 agent.tool_timeouts。
+  timeout_sec: 90
 
 model:
   main: "deepseek-v4-flash"   # v8.3.1: 全部切换 Flash 正式版（V4 Pro 已移除）
@@ -111,6 +115,10 @@ agent:
   agents_dir: "src/prompts/agents"
   workspace_dir: "workspace"     # 文件读写工作目录
   tool_exec_timeout_sec: 60      # 单个工具执行整体超时（超时返回 [ERR_TIMEOUT]）
+  # v8.15.3b: 单工具超时覆盖（秒）。deepseek_web_search 走官方 Responses 原生联网，
+  # 实测 33-50s，默认 60s 上限会误杀 → 单独放行至 120s（HTTP 读取预算见 web_search.timeout_sec）
+  tool_timeouts:
+    deepseek_web_search: 120
   tool_result_caps:              # 子Agent结果回传supervisor的分档截断(字符)
     write-agent: 1000            #   write-agent 只回传保存摘要
     retrieve-agent: 40000        #   v8.3.4: 检索证据清单完整回传（原 15000 截掉关键证据细节）

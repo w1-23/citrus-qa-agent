@@ -243,6 +243,22 @@ async def _invoke_tool_with_ctx(ctx: contextvars.Context, tool: BaseTool, args: 
         None, lambda: ctx.run(lambda: tool.invoke(args)))
 
 
+def _tool_exec_timeout(tool_name: str) -> int:
+    """v8.15.3b: 单工具执行超时（秒）——config agent.tool_timeouts 可按工具名覆盖
+    默认 TOOL_EXEC_TIMEOUT_SEC。deepseek_web_search 走官方 Responses 原生联网
+    （实测 33-50s），默认 60s 硬上限会误杀；钳制 1~600s 防误配（下限 1s：
+    AG-7 测试以 1s 验证超时契约，不得抬升）。"""
+    base = getattr(settings, "TOOL_EXEC_TIMEOUT_SEC", 60) or 60
+    try:
+        overrides = getattr(settings, "TOOL_TIMEOUTS", None) or {}
+        if not isinstance(overrides, dict):
+            overrides = {}
+        t = int(overrides.get(tool_name, base) or base)
+        return min(max(t, 1), 600)
+    except (TypeError, ValueError):
+        return int(base)
+
+
 async def _run_single_tool(tool: BaseTool, tool_call: dict) -> ToolMessage:
     tool_name = tool_call.get("name", tool.name)
     args = tool_call.get("args", {})
@@ -251,7 +267,7 @@ async def _run_single_tool(tool: BaseTool, tool_call: dict) -> ToolMessage:
     if reject_reason:
         return ToolMessage(content=reject_reason, tool_call_id=tool_call["id"], name=tool_name, artifact={})
 
-    exec_timeout = getattr(settings, "TOOL_EXEC_TIMEOUT_SEC", 60) or 60
+    exec_timeout = _tool_exec_timeout(tool_name)
 
     # 注意：对于 response_format="content_and_artifact" 的工具，tool.ainvoke()
     # 会丢弃 artifact 只返回 content 字符串。
@@ -326,7 +342,7 @@ async def run_tool_checked(tool: BaseTool, args: dict) -> str:
     if reject_reason:
         return reject_reason
 
-    exec_timeout = getattr(settings, "TOOL_EXEC_TIMEOUT_SEC", 60) or 60
+    exec_timeout = _tool_exec_timeout(tool_name)
     ctx = contextvars.copy_context()
     raw_func = getattr(tool, "func", None)
     response_format = getattr(tool, "response_format", None)

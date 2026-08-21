@@ -43,6 +43,11 @@ def test_v815_config_defaults():
     # 关闭时前端按钮显示关、请求不带联网标志、工具执行层短路。
     check("WEB_SEARCH_RESPONSES_PATH 默认 /v1/responses",
           settings.WEB_SEARCH_RESPONSES_PATH == "/v1/responses")
+    # v8.15.3b: 联网 HTTP 超时默认 90s（官方原生联网实测 33-50s；旧 30s 自掐成功响应）
+    check("WEB_SEARCH_TIMEOUT 默认 90", settings.WEB_SEARCH_TIMEOUT == 90)
+    check("TOOL_TIMEOUTS 联网工具放行 120s",
+          (settings.TOOL_TIMEOUTS or {}).get("deepseek_web_search") == 120,
+          str(settings.TOOL_TIMEOUTS))
 
 
 # ── F-15-2 来源判定纯函数 ──────────────────────────────────────────
