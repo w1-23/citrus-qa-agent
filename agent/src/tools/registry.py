@@ -467,6 +467,17 @@ def init_tool_registry():
             if registrations:
                 for reg in registrations:
                     name = reg.get("name")
+                    # v8.15: 联网工具门控（与 agent 工具列表同源）——acetopic 开关关闭时
+                    # 不注册：academic_search/fetch_fulltext 随 ACADEMIC_ENABLED（默认关），
+                    # deepseek_web_search 随 WEB_SEARCH_ENABLED（主开关，默认关）
+                    if name in ("academic_search", "fetch_fulltext") and \
+                            not getattr(settings, "ACADEMIC_ENABLED", False):
+                        logger.info(f"[ToolRegistry] 跳过联网学术工具 {name}（academic_search.enabled=false）")
+                        continue
+                    if name == "deepseek_web_search" and \
+                            not getattr(settings, "WEB_SEARCH_ENABLED", False):
+                        logger.info(f"[ToolRegistry] 跳过联网搜索工具 {name}（web_search.enabled=false）")
+                        continue
                     tool = _TOOL_REGISTRY_BY_NAME.get(name)
                     if tool:
                         register_tool(tool, category=reg.get("category", "general"),

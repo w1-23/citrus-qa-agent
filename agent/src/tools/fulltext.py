@@ -328,6 +328,12 @@ def fetch_fulltext(doi: str, query: str, pmid: str = "", top_k: int = 8) -> Tupl
     返回格式: content_and_artifact —— content 为拼接后的正文证据文本；
               artifact["main_results"] 为该篇文献的单条证据（结构与检索回执一致）。
     """
+    # v8.15: fetch_fulltext 是纯联网工具（OA 全文抓取），随学术检索开关一并默认关闭
+    if not getattr(settings, "ACADEMIC_ENABLED", False):
+        logger.info("[fetch_fulltext] 已关闭（config academic_search.enabled=false），请求被短路")
+        return ("[DISABLED] OA 全文抓取已关闭（随联网学术检索开关；config academic_search.enabled=false）。"
+                "\n建议: 使用 citrus_rag_search（本地文献全文已入证据全文）或 read_local_file 读取本地 PDF。",
+                {"main_results": [], "web_results": []})
     t0 = time.perf_counter()
     doi = (doi or "").strip()
     query = (query or "").strip()

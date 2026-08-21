@@ -69,11 +69,6 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL: str = Field(default_factory=lambda: _yaml_val("model", "embedding", default="intfloat/multilingual-e5-large"))
     RERANKER_MODEL: str = Field(default_factory=lambda: _yaml_val("model", "reranker", default="BAAI/bge-reranker-v2-m3"))
 
-    # 5. Web Search Provider
-    WEB_SEARCH_API_KEY: str = ""
-    WEB_SEARCH_PROVIDER: str = "tavily"
-    SERPER_API_KEY: str = ""
-
     # 3. Retrieval Parameters (核心检索阈值)
     TOP_K_VECTOR: int = Field(default_factory=lambda: _yaml_val("retrieval", "top_k_vector", default=40))
     TOP_K_BM25: int = Field(default_factory=lambda: _yaml_val("retrieval", "top_k_bm25", default=40))
@@ -93,6 +88,18 @@ class Settings(BaseSettings):
     # Academic search settings
     ACADEMIC_SOURCES: list = Field(default_factory=lambda: _yaml_val("academic_search", "enabled_sources", default=["crossref", "pubmed"]))
     ACADEMIC_TIMEOUT: int = Field(default_factory=lambda: _yaml_val("academic_search", "timeout_per_source", default=8))
+    # v8.15: 联网学术检索总开关（默认关闭——质量差+延迟高；工具与代码保留不删，重开只改 config）
+    ACADEMIC_ENABLED: bool = Field(default_factory=lambda: _yaml_val("academic_search", "enabled", default=False))
+
+    # v8.15: 查询级结果缓存（citrus_rag_search 全链路；键=规范化query+HyDE开关+语料指纹）
+    RAG_CACHE_ENABLED: bool = Field(default_factory=lambda: _yaml_val("retrieval", "rag_cache_enabled", default=True))
+    RAG_CACHE_SIZE: int = Field(default_factory=lambda: _yaml_val("retrieval", "rag_cache_size", default=300))
+    RAG_CACHE_TTL_HOURS: int = Field(default_factory=lambda: _yaml_val("retrieval", "rag_cache_ttl_hours", default=24))
+
+    # v8.15: 联网搜索（DeepSeek 原生 Responses API web_search tool）主开关
+    WEB_SEARCH_ENABLED: bool = Field(default_factory=lambda: _yaml_val("web_search", "enabled", default=False))
+    WEB_SEARCH_PROVIDER: str = Field(default_factory=lambda: _yaml_val("web_search", "provider", default="deepseek_responses"))
+    WEB_SEARCH_RESPONSES_PATH: str = Field(default_factory=lambda: _yaml_val("web_search", "responses_path", default="/v1/responses"))
 
     # 4. Chat Parameters (centralized)
     TEMPERATURE_MAIN: float = Field(default_factory=lambda: _yaml_val("chat", "temperature_main", default=0.2))

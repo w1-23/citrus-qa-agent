@@ -19,6 +19,30 @@ EVIDENCE_RENDER_MAX_CHARS = 3000   # 检索回执 / 写作材料包的"完整片
 # 证据全文的字段回退顺序（text 含机制/数字细节，优先；摘要/片段次之）
 _TEXT_KEYS = ("text", "abstract", "snippet")
 
+# v8.15 证据来源体系（可扩展：将来加 web/patent 等只增一行）
+# key = 证据 source 标识；tag = 卡片徽标/回执前缀；label = 中文展示名（手风琴组名）
+SOURCE_TAG = {"rag": "RAG", "ucr": "UCR", "web": "Web", "historical": "历史"}
+SOURCE_LABEL = {
+    "rag": "本地文献库",
+    "ucr": "UCR品种库",
+    "web": "联网搜索",
+    "historical": "历史证据",
+}
+# 来源分组展示顺序（前端侧栏手风琴固定顺序）
+SOURCE_ORDER = ("rag", "ucr", "web", "historical")
+
+
+def src_of(r) -> str:
+    """证据来源解析：优先 chunk 上的显式字段，退化为 'rag'。"""
+    if not isinstance(r, dict):
+        return "rag"
+    v = r.get("_src") or r.get("source") or ""
+    if v:
+        return str(v).strip() or "rag"
+    # 兼容 UCR 品种库 chunk（无 _src 时按 source_type 判定）
+    st = str(r.get("source_type") or "")
+    return "ucr" if "UCR" in st else "rag"
+
 
 def evidence_id(r) -> str:
     """稳定证据键：优先 ``paper_id:chunk_index``，缺省退化为标题+全文内容哈希。

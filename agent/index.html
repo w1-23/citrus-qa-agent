@@ -141,6 +141,8 @@ header h1 { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
 .perm-badge .perm-ico { display: inline-flex; line-height: 1; }
 .perm-badge .perm-ico svg { width: 14px; height: 14px; display: block; }
 .perm-badge:hover { border-color: var(--accent); color: var(--accent); }
+.perm-badge.active { color: var(--success); border-color: rgba(76,175,80,.55); background: rgba(76,175,80,.08); }
+.perm-badge.disabled { opacity: .45; cursor: not-allowed; }
 .perm-badge.ask { color: #e8a33d; border-color: rgba(232,163,61,.5); background: rgba(232,163,61,.08); }
 .perm-badge.deny { color: var(--error); border-color: rgba(220,80,80,.5); background: rgba(220,80,80,.08); }
 .perm-menu {
@@ -807,6 +809,23 @@ footer {
 .citation-score { margin-left: auto; font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); }
 .citation-doi { font-size: 11px; color: var(--accent); text-decoration: none; word-break: break-all; display: block; margin-bottom: 2px; }
 .citation-text { font-size: 11px; color: var(--text-secondary); line-height: 1.4; }
+/* v8.15 证据来源：条目徽标 + 来源分组手风琴（本地文献库/UCR品种库/联网搜索/历史证据） */
+.src-badge {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 700;
+  padding: 1px 5px; border-radius: 4px; letter-spacing: .2px;
+}
+.src-badge.rag { background: var(--success-glow); color: var(--success); }
+.src-badge.ucr { background: rgba(96,165,250,.15); color: #60a5fa; }
+.src-badge.web { background: var(--accent-muted); color: var(--accent); }
+.src-badge.historical { background: var(--bg-hover); color: var(--text-muted); }
+.src-group { border: 1px dashed var(--border-hairline); border-radius: 6px; margin-bottom: 5px; overflow: hidden; }
+.src-group-header {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 8px; cursor: pointer; font-size: 11px;
+  transition: background 0.15s var(--ease-out-quint);
+}
+.src-group-header:hover { background: var(--bg-hover); }
+.src-group-body { padding: 6px; }
 
 
 
@@ -1216,7 +1235,7 @@ footer {
         <div class="avatar">◆</div>
         <div class="content">
           您好，我是 <span id="welcomeVersion">Citrus QA Agent v8.14.1</span>。<br>
-          <span style="color:var(--text-muted);font-size:13px">本地 RAG 检索 · PubMed 学术检索 · OA 全文证据 · 文献综述写作 · 实验设计 · 文件读写</span>
+          <span style="color:var(--text-muted);font-size:13px">本地 RAG 检索（文献+UCR 品种库） · 文献综述写作 · 实验设计 · 文件读写</span>
         </div>
       </div>
     </div>
@@ -1240,6 +1259,13 @@ footer {
             <div class="perm-menu-item" data-mode="deny" onclick="setPermMode('deny')"><span class="perm-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 2.8v5.2c0 4.3-2.9 7.8-7 9.5-4.1-1.7-7-5.2-7-9.5V5.8z"/><path d="M12 8.2v5.2"/><path d="M12 16.6h.01"/></svg></span><span>只读 — 一律拒绝危险操作</span></div>
             <div class="perm-menu-note">重启后回落到 config.yaml 配置值</div>
           </div>
+          <!-- v8.15: 联网搜索开关——开启后由 DeepSeek 自行联网检索（仅后端主开关
+               web_search.enabled 开启后可用；配置未开启时按钮置灰并提示）。
+               有效值 = 前端开关 && config web_search.enabled，随请求逐条下发 -->
+          <button class="perm-badge" id="webSearchBtn" onclick="toggleWebSearch(event)" title="联网搜索（DeepSeek 原生联网检索，默认关闭）">
+            <span class="perm-ico" id="webSearchIco">🌐</span>
+            <span class="perm-name" id="webSearchName">联网</span>
+          </button>
           <div class="input-actions">
             <!-- v8.7: 小巧圆形图标按钮；运行中由 JS 隐藏本按钮、显示停止按钮 -->
             <button class="send-btn" id="send-btn" onclick="sendMsg()" title="发送 (Enter)">↑</button>
@@ -1323,6 +1349,9 @@ footer {
 
 <script>
 var API_URL = '/api/v2/chat';
+// v8.15: 联网搜索开关状态（会话持久化到 localStorage；可用性由后端主开关决定）
+var _webSearchEnabled = localStorage.getItem('citrus_web_search') === '1';
+var _webSearchAvailable = false;
 var sessionId = localStorage.getItem('citrus_session_id');
 var chatContainer = document.getElementById('chat-container');
 var userInput = document.getElementById('user-input');
@@ -1486,6 +1515,9 @@ function loadRuntimeConfig() {
     .then(function(cfg) {
       _runtimeConfig = cfg;
       if (cfg.permission_wait_sec) _permWaitSec = cfg.permission_wait_sec;
+      // v8.15: 联网搜索底座主开关（前端开关仅在该主开关开启后真正可用）
+      _webSearchAvailable = !!(cfg.web_search && cfg.web_search.enabled);
+      renderWebSearchBtn();
       applyAppVersion();
       maybeShowApiSetup(cfg);
     })
@@ -1503,6 +1535,38 @@ function applyAppVersion() {
   if (w) w.textContent = 'Citrus QA Agent v' + v;
   if (document.title) document.title = document.title.replace(/v\d+(\.\d+)+/, 'v' + v);
   updatePermBadge();
+}
+/* v8.15: 联网搜索开关——render/toggle/persist
+   - 前端开关只是 UI 意愿；真正可用还需后端 config web_search.enabled=true（主开关）。
+   - 开启时请求带上 web_search_enabled=true，由 DeepSeek 自主联网检索。 */
+function renderWebSearchBtn() {
+  var btn = document.getElementById('webSearchBtn');
+  if (!btn) return;
+  var on = _webSearchEnabled && _webSearchAvailable;
+  var name = document.getElementById('webSearchName');
+  var ico = document.getElementById('webSearchIco');
+  btn.classList.toggle('active', on);
+  if (!_webSearchAvailable) {
+    btn.classList.add('disabled');
+    btn.title = '联网搜索：后端主开关未开启（config web_search.enabled=false），前端不可用';
+    if (name) name.textContent = '联网×';
+  } else {
+    btn.classList.remove('disabled');
+    btn.title = on ? '联网搜索已开启（DeepSeek 原生联网，模型自主决定是否检索）' : '联网搜索已关闭：点击开启';
+    if (name) name.textContent = on ? '联网●' : '联网';
+  }
+  if (ico) ico.textContent = on ? '✅' : '🌐';
+}
+function toggleWebSearch(e) {
+  if (e) { e.stopPropagation(); }
+  if (!_webSearchAvailable) {
+    showBanner('⚠ 联网搜索后端主开关未开启（config.yaml web_search.enabled=false），前端暂不可用');
+    return;
+  }
+  _webSearchEnabled = !_webSearchEnabled;
+  try { localStorage.setItem('citrus_web_search', _webSearchEnabled ? '1' : '0'); } catch (err) {}
+  renderWebSearchBtn();
+  appendTerminal(_webSearchEnabled ? '🌐 联网搜索已开启（DeepSeek 自主联网检索）' : '🌐 联网搜索已关闭');
 }
 /* v8.4.8 HITL 服务端化：权限模式徽标与 WebUI 切换
    v8.10f: SVG 简笔线条图标——护盾+对号(全权)/护盾+笔(询问)/护盾+感叹号(只读)，
@@ -2234,7 +2298,7 @@ async function clearSession(silent) {
   if (!silent && !confirm('确定清空当前会话？')) return;
   try {
     await fetch('/api/v1/session/' + sessionId + '/clear', { method: 'POST' });
-    chatContainer.innerHTML = '<div class="message bot"><div class="avatar">◆</div><div class="content">您好，我是 <span id="welcomeVersion">Citrus QA Agent v' + _appVersion() + '</span>。<br><span style="color:var(--text-muted);font-size:13px">本地 RAG 检索 · PubMed 学术检索 · OA 全文证据 · 文献综述写作 · 实验设计 · 文件读写</span></div></div>';
+    chatContainer.innerHTML = '<div class="message bot"><div class="avatar">◆</div><div class="content">您好，我是 <span id="welcomeVersion">Citrus QA Agent v' + _appVersion() + '</span>。<br><span style="color:var(--text-muted);font-size:13px">本地 RAG 检索（文献+UCR 品种库） · 文献综述写作 · 实验设计 · 文件读写</span></div></div>';
     sidebarContent.innerHTML = '<div class="empty-sidebar">提交问题后文献将在此展示</div>';
     citationCount.textContent = '0';
     roundHistory = [];
@@ -2567,7 +2631,7 @@ async function sendMsg(isFollowUp) {
 
     (async function() {
       try {
-        var response = await fetch(API_URL, {method:'POST',headers:{'Content-Type':'application/json'},signal:currentAbortController.signal,body:JSON.stringify({session_id:sessionId,query:query,client_request_id:clientRequestId,light_mode:currentMode==='light'})});
+        var response = await fetch(API_URL, {method:'POST',headers:{'Content-Type':'application/json'},signal:currentAbortController.signal,body:JSON.stringify({session_id:sessionId,query:query,client_request_id:clientRequestId,light_mode:currentMode==='light',web_search_enabled:!!(_webSearchEnabled&&_webSearchAvailable)})});
         if (!response.ok) { clearTimeout(spinnerTimeout);isCancelled=true;clearStatus();answerDiv.style.display='';answerDiv.innerHTML='<div style="color:var(--error);font-weight:500">⚠ 服务器错误 ('+response.status+')</div>';setSendDisabled(false);userInput.focus();return; }
         var reader=response.body.getReader(),decoder=new TextDecoder(),buffer='',curEvt='message';
         while(true){var chunk=await reader.read();if(chunk.done)break;buffer+=decoder.decode(chunk.value,{stream:true});var lines=buffer.split('\n');buffer=lines.pop();
@@ -2586,8 +2650,128 @@ async function sendMsg(isFollowUp) {
   _lastStreamOnce = streamOnce;
   streamOnce();
 
-  function renderCitationItem(item){var du=item.doi&&item.doi!=='N/A'?'https://doi.org/'+encodeURIComponent(item.doi):'#';var b=item.type==='main'?'citation-badge':item.type==='dynamic'?'citation-badge uncited':'citation-badge uncited';var sl=item.type==='dynamic'?'Agent 发现':item.type==='web'?'Web':item.type==='historical'?'历史证据':(item.score?'CE='+item.score.toFixed(3):'');var h='<div class="citation-item" onclick="this.classList.toggle(\'expanded\')">';h+='<div class="citation-header"><span class="'+b+'">['+escapeHtml(item.ref_id)+']</span><span class="citation-score">'+escapeHtml(sl)+'</span></div>';if(item.type==='web'){if(item.url)h+='<a href="'+escapeHtml(item.url)+'" target="_blank" class="citation-doi" onclick="event.stopPropagation()">'+escapeHtml(item.url)+'</a>'}else if(item.doi&&item.doi!=='N/A'){h+='<a href="'+du+'" target="_blank" class="citation-doi" onclick="event.stopPropagation()">'+escapeHtml(item.doi)+'</a>'}if(item.section_name)h+='<div class="citation-text"><strong>Section:</strong> '+escapeHtml(item.section_name)+'</div>';if(item.text_preview)h+='<div class="citation-text">'+escapeHtml((item.text_preview||'').substring(0,250))+'</div>';h+='<div class="citation-detail">';if(item.title)h+='<div class="citation-text"><strong>Title:</strong> '+escapeHtml((item.title||'').substring(0,200))+'</div>';if(item.authors)h+='<div class="citation-text"><strong>Authors:</strong> '+escapeHtml(item.authors)+'</div>';if(item.year)h+='<div class="citation-text"><strong>Year:</strong> '+escapeHtml(item.year)+'</div>';if(item.chunk_id)h+='<div class="citation-text"><strong>Chunk:</strong> '+escapeHtml(item.chunk_id)+'</div>';h+='</div></div>';return h}
-  function renderRoundSidebar(){if(roundHistory.length===0){sidebarContent.innerHTML='<div class="empty-sidebar">提交问题后文献将在此展示</div>';citationCount.textContent='0';return}var tC=0,tU=0;for(var i=0;i<roundHistory.length;i++){tC+=roundHistory[i].cited.length;tU+=roundHistory[i].uncited.length}citationCount.textContent=(tC+tU);if(sidebarContent.classList.contains('collapsed')){applySidebar('citation')}var html='';for(var i=roundHistory.length-1;i>=0;i--){var round=roundHistory[i];var all=[];for(var k=0;k<round.cited.length;k++){if(round.cited[k].type!=='web')all.push(round.cited[k])}for(var k=0;k<round.uncited.length;k++){if(round.uncited[k].type!=='web')all.push(round.uncited[k])}for(var k=0;k<(round.historical||[]).length;k++){all.push(round.historical[k])}if(all.length===0)continue;var qp=round.query.length>25?round.query.substring(0,25)+'...':round.query;var open=i===roundHistory.length-1;html+='<div class="round-group">';html+='<div class="round-header" onclick="toggleRound(\'round-'+round.roundId+'\')">';html+='<span class="toggle-icon" id="round-'+round.roundId+'-icon">▶</span>';html+='<span class="round-title">Round '+round.roundId+': '+qp+'</span>';html+='<span class="round-count">'+all.length+'</span></div>';html+='<div class="round-body" id="round-'+round.roundId+'"'+(open?'':' style="display:none"')+'>';for(var m=0;m<all.length;m++){html+=renderCitationItem(all[m])}html+='</div></div>'}sidebarContent.innerHTML=html||'<div class="empty-sidebar">本轮未检索到相关文献</div>'}
+  // v8.15: 证据来源展示元数据（来源分组手风琴 + 条目徽标；新增来源只加一行）
+  var SOURCE_META = {
+    rag:  { tag: 'RAG',  name: '本地文献库', cls: 'rag' },
+    ucr:  { tag: 'UCR',  name: 'UCR品种库',  cls: 'ucr' },
+    web:  { tag: 'Web',  name: '联网搜索',   cls: 'web' },
+    historical: { tag: '历史', name: '历史证据', cls: 'historical' }
+  };
+  function srcMeta(item) {
+    var s = (item && (item.source || item._src)) || '';
+    return SOURCE_META[s] || SOURCE_META.rag;
+  }
+  // v8.15: 条目渲染——加来源徽标 + UCR 专属字段（无 DOI 时显示登记号/品种名）
+  function renderCitationItem(item) {
+    var sm = srcMeta(item);
+    var isUcr = sm.cls === 'ucr';
+    var du = item.doi && item.doi !== 'N/A' ? 'https://doi.org/' + encodeURIComponent(item.doi) : '#';
+    var b = item.type === 'main' ? 'citation-badge' : 'citation-badge uncited';
+    var sl = item.type === 'dynamic' ? 'Agent 发现' : (item.type === 'web' ? 'Web' : (item.type === 'historical' ? '历史证据' : (item.score ? 'CE=' + item.score.toFixed(3) : '')));
+    var h = '<div class="citation-item" onclick="this.classList.toggle(\'expanded\')">';
+    h += '<div class="citation-header"><span class="' + b + '">[' + escapeHtml(item.ref_id) + ']</span>';
+    h += '<span class="src-badge ' + sm.cls + '">' + escapeHtml(sm.tag) + ':</span>';
+    h += '<span class="citation-score">' + escapeHtml(sl) + '</span></div>';
+    // 链接：web→URL；UCR（多无 DOI）→显示登记号文本；其余→DOI
+    if (item.type === 'web' && item.url) {
+      h += '<a href="' + escapeHtml(item.url) + '" target="_blank" class="citation-doi" onclick="event.stopPropagation()">' + escapeHtml(item.url) + '</a>';
+    } else if (isUcr && item.registry_id) {
+      h += '<div class="citation-doi" style="color:var(--accent)">登记号: ' + escapeHtml(item.registry_id) + '</div>';
+    } else if (item.doi && item.doi !== 'N/A') {
+      h += '<a href="' + du + '" target="_blank" class="citation-doi" onclick="event.stopPropagation()">' + escapeHtml(item.doi) + '</a>';
+    }
+    if (isUcr && item.variety_name) {
+      h += '<div class="citation-text"><strong>品种:</strong> ' + escapeHtml(item.variety_name) + '</div>';
+    }
+    if (item.section_name) h += '<div class="citation-text"><strong>Section:</strong> ' + escapeHtml(item.section_name) + '</div>';
+    if (item.text_preview) h += '<div class="citation-text">' + escapeHtml((item.text_preview || '').substring(0, 250)) + '</div>';
+    h += '<div class="citation-detail">';
+    if (item.title) h += '<div class="citation-text"><strong>' + (isUcr ? 'Variety:' : 'Title:') + '</strong> ' + escapeHtml((item.title || '').substring(0, 200)) + '</div>';
+    if (item.authors) h += '<div class="citation-text"><strong>Authors:</strong> ' + escapeHtml(item.authors) + '</div>';
+    if (item.year) h += '<div class="citation-text"><strong>Year:</strong> ' + escapeHtml(item.year) + '</div>';
+    if (item.chunk_id) h += '<div class="citation-text"><strong>Chunk:</strong> ' + escapeHtml(item.chunk_id) + '</div>';
+    h += '</div></div>';
+    return h;
+  }
+  // v8.15: 来源分组手风琴（同一 Round 内同时只展开一组）
+  function toggleSrcGroup(id) {
+    var g = document.getElementById('srcgroup-' + id);
+    if (!g) return;
+    var willOpen = g.style.display === 'none';
+    var box = g.parentNode;
+    // 收起同 Round 内的其他来源组（手风琴语义）
+    var siblings = box.querySelectorAll('.src-group-body');
+    for (var i = 0; i < siblings.length; i++) {
+      siblings[i].style.display = 'none';
+      siblings[i].previousElementSibling.querySelector('.toggle-icon').classList.add('collapsed');
+    }
+    if (willOpen) {
+      g.style.display = 'block';
+      g.previousElementSibling.querySelector('.toggle-icon').classList.remove('collapsed');
+    }
+  }
+  function renderRoundSidebar() {
+    if (roundHistory.length === 0) {
+      sidebarContent.innerHTML = '<div class="empty-sidebar">提交问题后文献将在此展示</div>';
+      citationCount.textContent = '0';
+      return;
+    }
+    var tC = 0, tU = 0;
+    for (var i = 0; i < roundHistory.length; i++) {
+      tC += roundHistory[i].cited.length; tU += roundHistory[i].uncited.length;
+    }
+    citationCount.textContent = (tC + tU);
+    if (sidebarContent.classList.contains('collapsed')) { applySidebar('citation'); }
+    var html = '';
+    for (var i = roundHistory.length - 1; i >= 0; i--) {
+      var round = roundHistory[i];
+      // v8.15: 不再过滤 web 条目——按来源分组展示（本地文献库/UCR品种库/联网搜索/历史）
+      var all = [];
+      for (var k = 0; k < round.cited.length; k++) all.push(round.cited[k]);
+      for (var k = 0; k < round.uncited.length; k++) all.push(round.uncited[k]);
+      for (var k = 0; k < (round.historical || []).length; k++) all.push(round.historical[k]);
+      if (all.length === 0) continue;
+      var qp = round.query.length > 25 ? round.query.substring(0, 25) + '...' : round.query;
+      var open = i === roundHistory.length - 1;
+      html += '<div class="round-group">';
+      html += '<div class="round-header" onclick="toggleRound(\'round-' + round.roundId + '\')">';
+      html += '<span class="toggle-icon" id="round-' + round.roundId + '-icon">▶</span>';
+      html += '<span class="round-title">Round ' + round.roundId + ': ' + qp + '</span>';
+      html += '<span class="round-count">' + all.length + '</span></div>';
+      html += '<div class="round-body" id="round-' + round.roundId + '"' + (open ? '' : ' style="display:none"') + '>';
+      // v8.15: 按来源分组（固定顺序：本地文献库→UCR品种库→联网搜索→历史证据）
+      var groups = {};
+      for (var m = 0; m < all.length; m++) {
+        var sm = srcMeta(all[m]);
+        var key = sm.cls === 'historical' ? 'historical' : (sm.cls === 'web' ? 'web' : (sm.cls === 'ucr' ? 'ucr' : 'rag'));
+        if (!groups[key]) groups[key] = [];
+        groups[key].push(all[m]);
+      }
+      var groupOrder = ['rag', 'ucr', 'web', 'historical'];
+      var firstOpen = true;
+      for (var gi = 0; gi < groupOrder.length; gi++) {
+        var gk = groupOrder[gi];
+        if (!groups[gk] || groups[gk].length === 0) continue;
+        var sm2 = SOURCE_META[gk];
+        var gid = round.roundId + '-' + gk;
+        var gOpen = open && firstOpen;
+        firstOpen = false;
+        html += '<div class="src-group">';
+        html += '<div class="src-group-header" onclick="toggleSrcGroup(\'' + gid + '\')">';
+        html += '<span class="toggle-icon' + (gOpen ? '' : ' collapsed') + '">▶</span>';
+        html += '<span class="src-badge ' + sm2.cls + '">' + escapeHtml(sm2.tag) + ':</span>';
+        html += '<span class="round-title" style="font-size:11px">' + escapeHtml(sm2.name) + '</span>';
+        html += '<span class="round-count">' + groups[gk].length + '</span></div>';
+        html += '<div class="src-group-body" id="srcgroup-' + gid + '"' + (gOpen ? '' : ' style="display:none"') + '>';
+        for (var m2 = 0; m2 < groups[gk].length; m2++) {
+          html += renderCitationItem(groups[gk][m2]);
+        }
+        html += '</div></div>';
+      }
+      html += '</div></div>';
+    }
+    sidebarContent.innerHTML = html || '<div class="empty-sidebar">本轮未检索到相关文献</div>';
+  }
   }
 
 /* v8.4.9 会话持久化：刷新/关闭重开后恢复历史对话渲染（数据在 sessions.db，只缺读取通道）

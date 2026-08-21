@@ -16,12 +16,32 @@ retrieval:
   web_relevance_threshold: 0.3   # Web 语义过滤阈值（BGE reranker 分数，0=不相关 1=完美匹配）
   rag_hyde_enabled: true         # HyDE: 本地RAG检索前生成英文假想答案提升召回
   hyde_max_tokens: 512           # HyDE 假想答案输出上限（与 prompt 250词约束配套，防截断）
+  # v8.15 查询级结果缓存：相同/高度相似问题直接复用上次检索结果（毫秒级返回）。
+  # 键 = 规范化 query + HyDE 开关 + 语料指纹(批次数+总块数)，语料增删/重启自动失效。
+  rag_cache_enabled: true        # 总开关（默认开；不影响 HyDE/embed 内部缓存）
+  rag_cache_size: 300            # LRU 上限（条）
+  rag_cache_ttl_hours: 24        # 过期时间（小时）
 
 # 学术搜索配置（CrossRef/PubMed/Semantic Scholar/OpenAlex）
-# 根据网络状况选择性启用。大陆网络 PubMed 稳定；其余源无摘要或需外网，默认关闭。
+# v8.15: 默认关闭联网学术检索（enabled: false）——PubMed 结果质量差（esummary 无摘要，
+# 模型易"补脑"）且每次检索增加 5~12s 网络等待。代码与工具保留不删，重开只需 enabled: true。
 academic_search:
-  enabled_sources: ["pubmed"]  # 仅 PubMed：有摘要+MeSH；CrossRef 无摘要无全文，已移除
+  enabled: false         # 总开关：false = academic_search/fetch_fulltext 不注册进工具列表
+  enabled_sources: []    # 保留：["pubmed"] 等；enabled=false 时忽略。重开时按需填回
   timeout_per_source: 5  # 单源超时秒数
+
+# ── 联网搜索（v8.15，DeepSeek 原生 Responses API web_search tool）──
+# 前端「联网搜索」开关的底座主开关。默认关闭：关闭时不注册 deepseek_web_search 工具，
+# 模型不可见、零网络调用。开启后由模型自主决定何时联网检索（不限制网站），
+# 返回的引用落入侧栏「联网搜索」证据组。
+# ⚠️ 未实测标记：Responses 端点路径/引用字段形态以官方文档为准（实现按 OpenAI
+# Responses API web_search tool 契约编写，沙箱无外网未联调，请在真机按 websearch_probe
+# 验证后再发布）。
+web_search:
+  enabled: false                  # 主开关（默认关）
+  provider: deepseek_responses    # deepseek_responses | builtin(预留 Tavily/Serper 自建源)
+  responses_path: /v1/responses   # Responses 端点路径（官方文档待核实）
+  probe_enabled: false            # 是否启用配套探测脚本（websearch_probe.py --run）
 
 model:
   main: "deepseek-v4-flash"   # v8.3.1: 全部切换 Flash 正式版（V4 Pro 已移除）
@@ -213,6 +233,10 @@ tools:
       category: rag
       readonly: true
       concurrency_key: rag
+    - name: deepseek_web_search
+      category: web
+      readonly: true
+      concurrency_key: web
     - name: pdf_read
       category: analysis
       readonly: true

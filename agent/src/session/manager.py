@@ -884,6 +884,7 @@ class SessionManager:
                 refs.append({
                     "ref_id": f"H{len(refs) + 1}",
                     "type": "historical",
+                    "source": str(e.get("source", "rag") or "rag"),   # v8.15: 历史证据保留来源徽标
                     "doi": doi or "N/A",
                     "title": title,
                     "year": str(e.get("year", "")),

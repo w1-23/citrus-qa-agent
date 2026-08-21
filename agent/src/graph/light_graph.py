@@ -12,7 +12,7 @@ from langgraph.graph import StateGraph, END
 
 from src.graph.state import AgentState
 from src.config import settings, get_deepseek_model
-from src.core.evidence import render_evidence, EVIDENCE_SNIPPET_MAX_CHARS
+from src.core.evidence import render_evidence, EVIDENCE_SNIPPET_MAX_CHARS, src_of
 from src.core.agent_loop import (
     dedup_by_doi, emit_llm_usage, FINAL_ANSWER_PROMPT,
     invoke_llm_with_retry, force_final_answer,
@@ -335,6 +335,7 @@ async def light_supervisor_node(state: AgentState) -> dict:
         cited_refs.append({
             "ref_id": i + 1,
             "type": "main",
+            "source": src_of(r),                       # v8.15: rag|ucr
             "doi": r.get("doi", "N/A"),
             "title": r.get("title", r.get("name", "Untitled")),
             "section_name": r.get("section_name", ""),
@@ -342,14 +343,17 @@ async def light_supervisor_node(state: AgentState) -> dict:
             "score": r.get("score", r.get("rerank_score", 0)) or 0,
             "year": r.get("year", ""),
             "authors": r.get("authors", ""),
+            "variety_name": r.get("variety_name", ""),
+            "registry_id": r.get("registry_id", ""),
         })
     for i, wr in enumerate(all_web_results[:5]):
         cited_refs.append({
             "ref_id": f"W{i+1}",
             "type": "web",
+            "source": "web",
             "url": wr.get("url", wr.get("link", "")),
             "title": wr.get("title", wr.get("name", "Untitled")),
-            "text_preview": (wr.get("snippet") or wr.get("content") or "")[:300],
+            "text_preview": (wr.get("snippet") or wr.get("content") or wr.get("abstract") or "")[:300],
             "score": 0,
         })
 
@@ -424,6 +428,8 @@ async def save_context_node(state: AgentState) -> dict:
                  "title": str(r.get("title", ""))[:150],
                  "score": r.get("score", r.get("rerank_score", 0)) or 0,
                  "year": str(r.get("year", "")),
+                 # v8.15: 来源随账本持久化（历史证据保留 RAG/UCR 徽标）
+                 "source": src_of(r),
                  "snippet": render_evidence(r, max_chars=EVIDENCE_SNIPPET_MAX_CHARS)}
                 for r in main_results[:30]
             ]

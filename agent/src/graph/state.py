@@ -33,4 +33,7 @@ class AgentState(TypedDict, total=False):
     retrieval_context: Optional[str]
     references_data: Optional[dict]
 
+    # v8.15: 联网搜索开关（前端逐请求下发；有效值 = 请求开关 && config web_search.enabled）
+    web_search_enabled: Optional[bool] = None
+
     _trace: Optional[dict]
