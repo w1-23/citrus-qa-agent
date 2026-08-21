@@ -1515,8 +1515,8 @@ function loadRuntimeConfig() {
     .then(function(cfg) {
       _runtimeConfig = cfg;
       if (cfg.permission_wait_sec) _permWaitSec = cfg.permission_wait_sec;
-      // v8.15: 联网搜索底座主开关（前端开关仅在该主开关开启后真正可用）
-      _webSearchAvailable = !!(cfg.web_search && cfg.web_search.enabled);
+      // v8.15: 联网开关=前端总开关，始终可用（config web_search.enabled 仅部署默认展示值）
+      _webSearchAvailable = true;
       renderWebSearchBtn();
       applyAppVersion();
       maybeShowApiSetup(cfg);
@@ -1537,32 +1537,22 @@ function applyAppVersion() {
   updatePermBadge();
 }
 /* v8.15: 联网搜索开关——render/toggle/persist
-   - 前端开关只是 UI 意愿；真正可用还需后端 config web_search.enabled=true（主开关）。
-   - 开启时请求带上 web_search_enabled=true，由 DeepSeek 自主联网检索。 */
+   - 前端开关就是总开关：开了随请求下发 web_search_enabled=true，
+     DeepSeek 自主联网检索、引用带网址；关了后端工具执行层短路，零网络调用。 */
 function renderWebSearchBtn() {
   var btn = document.getElementById('webSearchBtn');
   if (!btn) return;
-  var on = _webSearchEnabled && _webSearchAvailable;
+  var on = _webSearchEnabled;   // v8.15: 不再与后端 config 主开关 AND，前端即总开关
   var name = document.getElementById('webSearchName');
   var ico = document.getElementById('webSearchIco');
   btn.classList.toggle('active', on);
-  if (!_webSearchAvailable) {
-    btn.classList.add('disabled');
-    btn.title = '联网搜索：后端主开关未开启（config web_search.enabled=false），前端不可用';
-    if (name) name.textContent = '联网×';
-  } else {
-    btn.classList.remove('disabled');
-    btn.title = on ? '联网搜索已开启（DeepSeek 原生联网，模型自主决定是否检索）' : '联网搜索已关闭：点击开启';
-    if (name) name.textContent = on ? '联网●' : '联网';
-  }
+  btn.classList.remove('disabled');
+  btn.title = on ? '联网搜索已开启（DeepSeek 原生联网，模型自主决定是否检索）' : '联网搜索已关闭：点击开启';
+  if (name) name.textContent = on ? '联网●' : '联网';
   if (ico) ico.textContent = on ? '✅' : '🌐';
 }
 function toggleWebSearch(e) {
   if (e) { e.stopPropagation(); }
-  if (!_webSearchAvailable) {
-    showBanner('⚠ 联网搜索后端主开关未开启（config.yaml web_search.enabled=false），前端暂不可用');
-    return;
-  }
   _webSearchEnabled = !_webSearchEnabled;
   try { localStorage.setItem('citrus_web_search', _webSearchEnabled ? '1' : '0'); } catch (err) {}
   renderWebSearchBtn();

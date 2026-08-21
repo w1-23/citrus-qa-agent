@@ -93,10 +93,15 @@ def deepseek_web_search(query: str) -> Tuple[str, dict]:
         query: 要联网检索的问题/关键词（英文或中文均可，5-20 词为佳）
     """
     empty = {"main_results": [], "web_results": []}
-    if not getattr(settings, "WEB_SEARCH_ENABLED", False):
-        logger.info("[deepseek_web_search] 主开关关闭（config web_search.enabled=false），请求被短路")
-        return ("[DISABLED] 联网搜索未启用（config web_search.enabled=false 且前端开关未打开）。\n"
-                "建议: 使用 citrus_rag_search 本地检索；需要联网时请先在前端打开「联网搜索」开关。",
+    # v8.15: 前端开关即总开关（config web_search.enabled 仅部署默认值，不作门槛）。
+    # 每次请求由 chat_v2 写入 web_search_enabled contextvar，工具执行层据此强制短路——
+    # 开关关闭时即使模型误调也不会产生任何网络请求。
+    from src.core.tracing import web_search_enabled as _req_web_on
+    if not _req_web_on():
+        logger.info("[deepseek_web_search] 本次请求未开启联网搜索，请求被短路")
+        return ("[DISABLED] 联网搜索未开启。\n"
+                "建议: 需要实时/最新信息时，点击输入框左下的「联网」开关后重新提问；"
+                "本地文献类问题直接使用 citrus_rag_search。",
                 empty)
     query = (query or "").strip()
     if not query:

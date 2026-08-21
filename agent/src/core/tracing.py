@@ -18,6 +18,19 @@ _job_id: contextvars.ContextVar = contextvars.ContextVar(
 _session_id: contextvars.ContextVar = contextvars.ContextVar(
     "session_id", default="")
 
+# v8.15: 本次请求是否开启联网搜索（前端开关逐请求下发；工具执行层据此短路）
+# 与 session_id 同机制：chat_v2 显式写入，经 copy_context 贯穿到工具协程/线程。
+_web_search_enabled: contextvars.ContextVar = contextvars.ContextVar(
+    "web_search_enabled", default=False)
+
+
+def set_web_search_enabled(enabled: bool) -> None:
+    _web_search_enabled.set(bool(enabled))
+
+
+def web_search_enabled() -> bool:
+    return _web_search_enabled.get()
+
 
 def set_request_id(request_id: str) -> None:
     _request_id.set(request_id)

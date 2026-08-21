@@ -31,16 +31,17 @@ academic_search:
   timeout_per_source: 5  # 单源超时秒数
 
 # ── 联网搜索（v8.15，DeepSeek 原生 Responses API web_search tool）──
-# 前端「联网搜索」开关的底座主开关。默认关闭：关闭时不注册 deepseek_web_search 工具，
-# 模型不可见、零网络调用。开启后由模型自主决定何时联网检索（不限制网站），
-# 返回的引用落入侧栏「联网搜索」证据组。
+# 「联网」开关在前端（输入框左下），由用户逐条开启/关闭，随请求下发到后端：
+# 前端开 → 本次请求可联网（DeepSeek 自主决定何时检索、不限制网站），引用带网址
+# 落入侧栏「联网搜索」证据组；前端关 → 工具执行层短路，零网络调用。
+# 本段 enabled 只作为部署默认展示值，**不设启用门槛**（不代表"必须改这里才能用"）。
 # ⚠️ 未实测标记：Responses 端点路径/引用字段形态以官方文档为准（实现按 OpenAI
-# Responses API web_search tool 契约编写，沙箱无外网未联调，请在真机按 websearch_probe
-# 验证后再发布）。
+# Responses API web_search tool 契约编写，沙箱无外网未联调，请先跑
+# `python -m src.tools.websearch_probe --run` 核对 ①②③ 后再正式使用）。
 web_search:
-  enabled: false                  # 主开关（默认关）
+  enabled: true                   # 部署默认展示值（非启用门槛；前端开关才是总开关）
   provider: deepseek_responses    # deepseek_responses | builtin(预留 Tavily/Serper 自建源)
-  responses_path: /v1/responses   # Responses 端点路径（官方文档待核实）
+  responses_path: /v1/responses   # Responses 端点路径（官方文档待核实，probe 可验证）
   probe_enabled: false            # 是否启用配套探测脚本（websearch_probe.py --run）
 
 model:
