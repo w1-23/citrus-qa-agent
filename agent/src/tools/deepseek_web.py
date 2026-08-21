@@ -36,7 +36,18 @@ logger = logging.getLogger(__name__)
 
 # 引用条目默认上限
 _WEB_MAX_ITEMS = 8
-_HTTP_TIMEOUT = 30
+_HTTP_TIMEOUT = 30   # 兼容旧引用；实际值由 _web_http_timeout() 从 config web_search.timeout_sec 读取
+
+
+def _web_http_timeout() -> int:
+    """联网调用 HTTP 读取超时（秒）。
+
+    v8.15.3b: DeepSeek 原生联网实测响应 33-50s——旧 30s 会把"本会成功的慢响应"
+    自掐成伪失败（7×30s 白等根因）。取 config web_search.timeout_sec（默认 90），
+    钳制在 30~300s（低于 30 视为误配）。
+    """
+    t = int(getattr(settings, "WEB_SEARCH_TIMEOUT", 90) or 90)
+    return min(max(t, 30), 300)
 
 # 引用/URL 提取正则（防御式兜底：Markdown 链接 + 裸 URL）
 _MD_LINK_RE = re.compile(r"\[([^\]]{1,200})\]\s*\(\s*(https?://[^)\s]+)\s*\)", re.IGNORECASE)
@@ -171,8 +182,9 @@ def deepseek_web_search(query: str) -> Tuple[str, dict]:
             "Content-Type": "application/json",
         }
         url = _responses_endpoint()
-        logger.info(f"[deepseek_web_search] Responses 调用: {url} model={payload['model']}")
-        resp = requests.post(url, headers=headers, json=payload, timeout=_HTTP_TIMEOUT)
+        _to = _web_http_timeout()
+        logger.info(f"[deepseek_web_search] Responses 调用: {url} model={payload['model']} timeout={_to}s")
+        resp = requests.post(url, headers=headers, json=payload, timeout=_to)
         if resp.status_code != 200:
             # v8.15.3: 失败详情落日志（HTTP 状态码 + 响应体前 600 字）——
             # "7 次 30s 盲重试"的根因是失败原因全被吞（只看到 err=True）；
@@ -221,10 +233,11 @@ def deepseek_web_search(query: str) -> Tuple[str, dict]:
         return content, {"main_results": [], "web_results": items}
     except requests.exceptions.Timeout as e:
         # v8.15.3: 超时单独分支（超时 ≠ 403/429——盲重试与误改配置都源于此混为一谈）
-        logger.error(f"[deepseek_web_search] 请求超时 ({_HTTP_TIMEOUT}s): {e}")
-        return (f"[ERR_NETWORK] 联网搜索超时（{_HTTP_TIMEOUT}s 限制）。"
-                "DeepSeek 原生联网响应本就可能 30-50s：若偶发超时可接受；"
-                "若持续超时说明服务端异常，连续失败时系统会自动熔断停止重试。",
+        _to = _web_http_timeout()
+        logger.error(f"[deepseek_web_search] 请求超时 ({_to}s): {e}")
+        return (f"[ERR_NETWORK] 联网搜索超时（{_to}s 限制）。"
+                "DeepSeek 原生联网响应本就 30-50s；若仍持续超时说明服务端异常或"
+                "网络受限（需代理），连续失败时系统会自动熔断停止重试。",
                 empty)
     except Exception as e:
         logger.error(f"[deepseek_web_search] 调用失败: {e}")

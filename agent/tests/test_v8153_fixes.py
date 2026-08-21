@@ -157,6 +157,28 @@ def test_v8153_prompt_mechanisms():
     check("decision_guide 含回答前自审(引用对齐)", "回答前自审" in dg and "引用对齐" in dg)
 
 
+# ── F-15.3-7 单工具超时覆盖（联网工具 120s，防执行层 60s 硬上限误杀）──
+def test_v8153_tool_timeout_override():
+    print("[VF-15] 单工具超时覆盖")
+    from src.tools.registry import _tool_exec_timeout
+
+    check("联网工具放行 120s", _tool_exec_timeout("deepseek_web_search") == 120,
+          str(_tool_exec_timeout("deepseek_web_search")))
+    check("其他工具默认 60s", _tool_exec_timeout("citrus_rag_search") == 60,
+          str(_tool_exec_timeout("citrus_rag_search")))
+    # 误配/钳制（覆盖非法值 → 回退默认；负数钳到下限 1s）
+    old = settings.TOOL_TIMEOUTS
+    try:
+        settings.TOOL_TIMEOUTS = {"deepseek_web_search": "abc"}
+        check("非法覆盖回退默认", _tool_exec_timeout("deepseek_web_search") == 60,
+              str(_tool_exec_timeout("deepseek_web_search")))
+        settings.TOOL_TIMEOUTS = {"deepseek_web_search": -3}
+        check("超时下限钳制 1s", _tool_exec_timeout("deepseek_web_search") == 1,
+              str(_tool_exec_timeout("deepseek_web_search")))
+    finally:
+        settings.TOOL_TIMEOUTS = old
+
+
 # ── 汇总 ──────────────────────────────────────────────────────────
 def _summary():
     print(f"\n[VF-15.3] PASS {len(passed)} / FAIL {len(failed)}"

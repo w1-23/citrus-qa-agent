@@ -100,6 +100,9 @@ class Settings(BaseSettings):
     WEB_SEARCH_ENABLED: bool = Field(default_factory=lambda: _yaml_val("web_search", "enabled", default=False))
     WEB_SEARCH_PROVIDER: str = Field(default_factory=lambda: _yaml_val("web_search", "provider", default="deepseek_responses"))
     WEB_SEARCH_RESPONSES_PATH: str = Field(default_factory=lambda: _yaml_val("web_search", "responses_path", default="/v1/responses"))
+    # v8.15.3b: 联网 HTTP 读取超时（秒）——DeepSeek 原生联网实测 33-50s，
+    # 旧 30s 把本会成功的慢响应自掐成"伪失败"（7×30s 白等根因）
+    WEB_SEARCH_TIMEOUT: int = Field(default_factory=lambda: _yaml_val("web_search", "timeout_sec", default=90))
 
     # 4. Chat Parameters (centralized)
     TEMPERATURE_MAIN: float = Field(default_factory=lambda: _yaml_val("chat", "temperature_main", default=0.2))
@@ -164,6 +167,8 @@ class Settings(BaseSettings):
     LIGHT_MAX_TURNS: int = Field(default_factory=lambda: _yaml_val("light", "max_turns", default=2))
     SUBAGENT_MAX_TURNS: dict = Field(default_factory=lambda: _yaml_val("subagents", default={}))
     TOOL_EXEC_TIMEOUT_SEC: int = Field(default_factory=lambda: _yaml_val("agent", "tool_exec_timeout_sec", default=60))
+    # v8.15.3b: 单工具超时覆盖（{tool_name: 秒}，覆盖 TOOL_EXEC_TIMEOUT_SEC 默认值）
+    TOOL_TIMEOUTS: dict = Field(default_factory=lambda: _yaml_val("agent", "tool_timeouts", default={}))
 
     # ── Write Pipeline (v8.3.2) ──
     PIPELINE_MATERIAL_MIN_COUNT: int = Field(default_factory=lambda: _yaml_val("pipeline", "material_min_count", default=8))
