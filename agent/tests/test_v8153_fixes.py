@@ -153,8 +153,15 @@ def test_v8153_prompt_mechanisms():
     check("retrieve-agent 早停阈值规则(通过≤2/过滤≥50%)",
           "通过 ≤2 条" in ra and "过滤占比 ≥50%" in ra)
     check("retrieve-agent 联网失败禁再调", "[ERR_NETWORK]" in ra and "禁止再次调用" in ra)
+    # v8.15.3d: 原始问题直传 + 仲裁规则标记
+    check("retrieve-agent 联网原始问题直传说明",
+          "自动直传" in ra and "搜索参考关键词" in ra)
     check("decision_guide 含覆盖表+自审", "数据源覆盖边界与检索前自审" in dg)
     check("decision_guide 含回答前自审(引用对齐)", "回答前自审" in dg and "引用对齐" in dg)
+    check("decision_guide 含证据来源仲裁规则", "证据来源仲裁规则" in dg)
+    check("decision_guide 仲裁: 时效优先联网", "时效信息优先联网" in dg)
+    check("decision_guide 仲裁: 冲突并列禁止折中",
+          "并列展示" in dg and "禁止捏造折中值" in dg)
 
 
 # ── F-15.3-7 单工具超时覆盖（联网工具 120s，防执行层 60s 硬上限误杀）──
@@ -177,6 +184,54 @@ def test_v8153_tool_timeout_override():
               str(_tool_exec_timeout("deepseek_web_search")))
     finally:
         settings.TOOL_TIMEOUTS = old
+
+
+# ── F-15.3-8 原始问题直传联网工具（input 以原始问题开头，检索词作参考）──
+def test_v8153d_original_query_direct():
+    print("[VF-16] 原始问题直传联网工具")
+    import src.tools.deepseek_web as dw
+    from src.core.tracing import set_original_query, original_query
+    from src.core.tracing import set_web_search_enabled
+
+    set_original_query("2026年柑橘产业政府工作报告有哪些政策？")
+    check("contextvar 写入/读取",
+          original_query() == "2026年柑橘产业政府工作报告有哪些政策？")
+
+    captured: dict = {}
+
+    class _FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {"output": [
+                {"type": "message", "content": [{"type": "output_text", "text":
+                    "根据检索，[政府工作报告](https://gov.example.com/report)指出……"}]}]}
+
+    class _FakeRequests:
+        def post(self, url, **kw):
+            captured["url"] = url
+            captured["payload"] = kw.get("json", {})
+            return _FakeResp()
+
+    old = dw.requests
+    set_web_search_enabled(True)
+    try:
+        dw.requests = _FakeRequests()
+        c, a = dw.deepseek_web_search.func("citrus policy report 2026")
+    finally:
+        dw.requests = old
+        set_original_query("")
+        set_web_search_enabled(False)
+
+    inp = str(captured.get("payload", {}).get("input", ""))
+    check("input 以原始问题开头",
+          inp.startswith("2026年柑橘产业政府工作报告有哪些政策？"), inp[:80])
+    check("检索词作为搜索参考关键词",
+          "搜索参考关键词" in inp and "citrus policy report 2026" in inp, inp)
+    check("仍要求标注真实网址", "真实网址" in inp)
+    check("返回内容含 [W1] 引用", "[W1]" in c, c[:120])
+    ok_url = (a.get("web_results") or [{}])[0].get("url") == "https://gov.example.com/report"
+    check("artifact 带 URL", bool(a.get("web_results")) and ok_url, str(a))
 
 
 # ── 汇总 ──────────────────────────────────────────────────────────
