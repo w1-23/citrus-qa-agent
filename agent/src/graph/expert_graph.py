@@ -926,16 +926,8 @@ def _assemble_supervisor_answer(*, answer, all_main_results, all_web_results,
         "total": len(cited_refs),
     }
 
-    # v8.4.6 F2: 历史证据引用进侧栏——回答基于 [历史检索证据] 作答时，
-    # 侧栏展示历史证据条目（ref_id=H1..Hn），引用面板不再"消失"
-    try:
-        from src.session.manager import session_manager
-        historical = session_manager.get_evidence_refs(session_id, limit=20)
-        if historical:
-            references_data["historical"] = historical
-            references_data["total"] = len(cited_refs) + len(historical)
-    except Exception:
-        pass
+    # v8.15.2: 不再注入历史证据引用（H1..Hn）——侧栏只显示本轮回答真实引用的证据，
+    # 防止侧栏膨胀；历史跨轮信息仍经上下文/证据账本传递。（原 v8.4.6 F2 行为已移除）
 
     if answer:
         try:
