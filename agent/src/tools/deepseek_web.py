@@ -173,7 +173,16 @@ def deepseek_web_search(query: str) -> Tuple[str, dict]:
         url = _responses_endpoint()
         logger.info(f"[deepseek_web_search] Responses 调用: {url} model={payload['model']}")
         resp = requests.post(url, headers=headers, json=payload, timeout=_HTTP_TIMEOUT)
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            # v8.15.3: 失败详情落日志（HTTP 状态码 + 响应体前 600 字）——
+            # "7 次 30s 盲重试"的根因是失败原因全被吞（只看到 err=True）；
+            # 403/429/500/网络/超时 由此一眼可辨，且工具回执带状态码让模型不再盲试
+            logger.error(
+                f"[deepseek_web_search] HTTP {resp.status_code} 响应体: {resp.text[:600]}")
+            return (f"[ERR_NETWORK] 联网搜索失败 HTTP {resp.status_code}"
+                    "（详情已记录日志）。连续失败时系统会自动熔断停止重试；"
+                    "建议检查 config web_search.responses_path 与 API key 是否有效。",
+                    empty)
         body = resp.json()
         summary, calls, meta = _parse_response_output(body.get("output") or [])
         elapsed = (time.perf_counter() - t0) * 1000
@@ -210,6 +219,13 @@ def deepseek_web_search(query: str) -> Tuple[str, dict]:
         logger.info(f"[deepseek_web_search] done: {len(calls)} 引用, {len(summary)} 字摘要, "
                     f"{len(meta.get('queries', []))} 检索词, {elapsed:.0f}ms")
         return content, {"main_results": [], "web_results": items}
+    except requests.exceptions.Timeout as e:
+        # v8.15.3: 超时单独分支（超时 ≠ 403/429——盲重试与误改配置都源于此混为一谈）
+        logger.error(f"[deepseek_web_search] 请求超时 ({_HTTP_TIMEOUT}s): {e}")
+        return (f"[ERR_NETWORK] 联网搜索超时（{_HTTP_TIMEOUT}s 限制）。"
+                "DeepSeek 原生联网响应本就可能 30-50s：若偶发超时可接受；"
+                "若持续超时说明服务端异常，连续失败时系统会自动熔断停止重试。",
+                empty)
     except Exception as e:
         logger.error(f"[deepseek_web_search] 调用失败: {e}")
         return (f"[ERR_NETWORK] 联网搜索调用失败: {e}\n"

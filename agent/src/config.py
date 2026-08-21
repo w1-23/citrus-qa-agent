@@ -105,6 +105,10 @@ class Settings(BaseSettings):
     TEMPERATURE_MAIN: float = Field(default_factory=lambda: _yaml_val("chat", "temperature_main", default=0.2))
     TEMPERATURE_FAST: float = Field(default_factory=lambda: _yaml_val("chat", "temperature_fast", default=0.0))
     MAX_TOKENS: int = Field(default_factory=lambda: _yaml_val("chat", "max_tokens", default=4096))
+    # v8.15.3: 检索决策子代理思维链控制（"default"=不发送任何参数；"off"= 给
+    # retrieve-agent 下发 thinking:disabled 关闭推理——需先在真机确认 API 兼容后再
+    # 开启，默认不发送以避免未实测的 400/参数忽略风险）
+    MODEL_REASONING_MODE: str = Field(default_factory=lambda: _yaml_val("model", "reasoning_mode", default="default"))
     # v8.4 清理: RECENT_CONTENT_MAX_CHARS / COMPACT_MAX_TOKENS / FALLBACK_CONTENT_MAX_CHARS
     # 死配置已删（对应旧 graph.py check_history/compact_history 节点，代码已无引用；
     # 压缩统一走 context_budget 段的 ContextBudgetConfig）

@@ -164,6 +164,33 @@ def format_rag_context(results: list, source: str = "main") -> str:
 
 # ── Shared helpers ────────────────────────────
 
+def rag_stats_note(last_stats: dict | None, expect_query: str = "") -> str:
+    """v8.15.3: 候选/阈值过滤统计回传（决策器早停依据，纯函数可单测）。
+
+    检索工具把 rerank 后"候选→通过→过滤"三数回传给 LLM：
+    - 通过 ≤2 条 或 过滤占比 ≥50%（后置集内）→ 该角度相关性低，应停止该角度；
+    - 占位返回空串（无统计 / 无候选时不输出，不污染工具回执）；
+    - expect_query 传非空时校验统计归属的查询（并发检索防串号），不一致返回空串。
+    """
+    if not isinstance(last_stats, dict):
+        return ""
+    if expect_query and last_stats.get("query"):
+        if last_stats["query"] != expect_query:
+            return ""
+    cand = int(last_stats.get("candidates") or 0)
+    passed = int(last_stats.get("passed") or 0)
+    filtered = int(last_stats.get("filtered") or 0)
+    if cand <= 0:
+        return ""
+    reranked = passed + filtered
+    drop_ratio = (filtered / reranked) if reranked > 0 else 1.0
+    note = (f"[检索统计] 候选 {cand} 条，rerank 阈值后通过 {passed} 条、"
+            f"过滤 {filtered} 条（过滤占比 {drop_ratio:.0%}）。")
+    if passed <= 2 or reranked <= 0 or drop_ratio >= 0.5:
+        note += (" 该角度相关性低：请停止此角度、换实质不同的角度，"
+                 "或如实声明本地库覆盖缺口，不要重复相似检索。")
+    return note
+
 def _format_tool_result(
     tool_name: str,
     query: str,
@@ -413,6 +440,12 @@ def citrus_rag_search(query: str) -> tuple[str, dict]:
                 _rag_cache_put(cache_key, results)
             except Exception:
                 pass
+            # v8.15.3: 检索统计置前（置于证据列表前，不因 11000 字符预算被截丢）——
+            # 决策器每轮检索后自审的依据（通过率低 → 停止该角度）
+            _stats_note = rag_stats_note(getattr(rag, "last_stats", None),
+                                         expect_query=query)
+            if _stats_note:
+                raw = _stats_note + "\n\n" + raw
             content = _format_tool_result(
                 "citrus_rag_search", query, raw,
                 status="ok", results_count=len(results), elapsed_ms=elapsed,

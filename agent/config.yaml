@@ -49,6 +49,11 @@ model:
   fast: "deepseek-v4-flash"
   embedding: "intfloat/multilingual-e5-large"
   reranker: "BAAI/bge-reranker-v2-m3"
+  # v8.15.3: 检索决策子代理思维链控制。default = 不发送任何参数（零风险，维持现状，
+  # v4-flash 默认带推理 → 每轮决策偏慢）；off = 对 retrieve-agent 下发
+  # thinking:{"type":"disabled"} 关闭推理（决策提速，但需先在真机确认该参数兼容，
+  # 沙箱无外网未实测——确认后改这里一行即生效）。
+  reasoning_mode: "default"   # default | off
 
 embedder:
   force_cpu: false          # 强制 CPU（调试用）

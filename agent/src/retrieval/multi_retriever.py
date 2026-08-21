@@ -128,6 +128,7 @@ class MultiBatchRetriever:
             self.bm25 = BM25Plus()
             self._idx_map = {}
             self.last_empty_reason: str = ""   # v8.3.1: 空结果归因（threshold_blocked / no_match），供工具回传 LLM
+            self.last_stats: Dict[str, int] = {}  # v8.15.3: 最近一次 _fuse_rerank_select 的候选/通过/过滤统计（工具回传 LLM 早停依据）
             self.failed_batches: Dict[str, str] = {}  # v8.3.4: 向量加载失败批次（lock 冲突/异常），供降级提示
             self.runtime_failed_batches: set = set()  # v8.3.5: 运行期查询失败的批次（动态降级提示）
 
@@ -633,6 +634,10 @@ class MultiBatchRetriever:
                  docs=len(passed), filtered=len(filtered), ms=int(total_ms))
         except Exception:
             pass
+        # v8.15.3: 候选/通过统计（决策器早停依据：filtered 占比高 → 角度相关性低）。
+        # 附带本次 rerank_query 作防串号（同轮并发检索共享单例，取回时核对 query）
+        self.last_stats = {"candidates": len(candidates), "passed": len(passed),
+                           "filtered": len(filtered), "query": rerank_query}
         return passed
 
     def search_multi(self, queries: List[str]) -> List[Dict]:
