@@ -390,6 +390,17 @@ async def expert_load_node(state: AgentState) -> dict:
             budget=budget,
         )
 
+        # v8.15.3e: 消除"静默加载期"——load 前后推送状态（前端状态行可见；
+        # 此前 load→首个工具事件之间完全无声，产生"卡死"错觉）
+        t_load = time.perf_counter()
+        try:
+            from src.core.progress_bus import emit_status, emit_progress
+            emit_status("step_active", step_id="load")
+            emit_progress("tool_progress", {
+                "message": "正在加载会话历史与记忆…", "tool_call_id": ""})
+        except Exception:
+            pass
+
         ctx = await ctx_mgr.load(session_id, query, mode)
         # v8.4: 收尾装配收敛至 context_manager.finalize_load_result
         # （与 light 图共用，消除双实现漂移）
@@ -401,6 +412,22 @@ async def expert_load_node(state: AgentState) -> dict:
             node_label="expert_load",
             log_prefix="ExpertGraph",
         )
+        # v8.15.3e: load 完成 → 状态行明示"已加载 N 条，正在理解问题并规划检索"
+        # + 结构化耗时诊断（load 段卡住可一眼定位）
+        try:
+            from src.core.progress_bus import emit_status, emit_progress
+            emit_status("step_done", step_id="load")
+            emit_progress("tool_progress", {
+                "message": f"已加载历史 {len(ctx.history_messages)} 条，正在理解问题并规划检索…",
+                "tool_call_id": ""})
+        except Exception:
+            pass
+        try:
+            from src.core.diag import diag
+            diag("load", ms=round((time.perf_counter() - t_load) * 1000, 1),
+                 raw_msgs=len(ctx.history_messages), compacted=bool(ctx.compacted))
+        except Exception:
+            pass
         # v8.4.1: 业务日志——load 结果（排查"看不到历史"类问题的第一现场）
         try:
             from src.core.business_logger import blog

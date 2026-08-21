@@ -84,7 +84,7 @@ async def load_context_node(state: AgentState) -> dict:
         ctx = await ctx_mgr.load(session_id, query, mode)
         # v8.4: 收尾装配收敛至 context_manager.finalize_load_result
         # （与 expert 图共用，消除双实现漂移）
-        return finalize_load_result(
+        result = finalize_load_result(
             ctx,
             session_manager=session_manager,
             session_id=session_id,
@@ -92,6 +92,16 @@ async def load_context_node(state: AgentState) -> dict:
             node_label="load_context",
             log_prefix="LightGraph",
         )
+        # v8.15.3e: load 完成状态推送（与 expert 图一致，消除静默加载期）
+        try:
+            from src.core.progress_bus import emit_status, emit_progress
+            emit_status("step_done", step_id="load")
+            emit_progress("tool_progress", {
+                "message": f"已加载历史 {len(ctx.history_messages)} 条，正在理解问题…",
+                "tool_call_id": ""})
+        except Exception:
+            pass
+        return result
 
     except Exception as e:
         logger.warning(f"[LightGraph:load] failed: {e}")
