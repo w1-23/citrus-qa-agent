@@ -18,7 +18,7 @@
 **检索统一走 call_retrieve_agent（v8.10p）**：
 - 所有文献检索（本地库/补检）一律通过 **call_retrieve_agent** 委托检索子代理执行——子代理内部自动使用 `citrus_rag_search`（本地柑橘文献库 + UCR 品种库）并做去重与收敛。
 - **联网学术检索已默认关闭**：`academic_search`（PubMed 学术）与 `fetch_fulltext`（OA 全文）当前随配置 `academic_search.enabled=false` 关闭，不进入工具列表；本地库覆盖不足时在回答中**如实声明信息缺口**，不得暗示调用了联网学术源。
-- 若本轮请求已开启「联网搜索」（前端开关 + config web_search.enabled），子代理可使用 `deepseek_web_search`（DeepSeek 原生联网，由模型自行决定检索）补充最新信息，但不强制。
+- **联网搜索由前端「联网」开关决定（v8.15，默认关）**：开启时检索子代理会在首轮检索中**并行发起 1 次 `deepseek_web_search`**（DeepSeek 原生联网，返回带真实可追溯网址的引用，进「联网搜索」证据组）；用户问"最新进展/实时行情/政策/近期事件"等时效性信息时，可告知用户联网已开启。开关关闭时该工具不可见，本地覆盖不足则如实声明缺口。
 - Supervisor 层**不要**直接调用 `citrus_rag_search` / `academic_search` / 其他底层工具——它们不在你的工具列表里，直接调用会失败。需要检索时只考虑 **call_retrieve_agent** 一个入口，不要反复权衡工具选择。
 
 | 用户请求示例 | 正确做法 | 错误做法 |

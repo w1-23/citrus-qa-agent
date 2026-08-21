@@ -196,6 +196,15 @@ async def light_supervisor_node(state: AgentState) -> dict:
     tools = [t for t_name in LIGHT_TOOL_NAMES
              if t_name in _TOOL_REGISTRY_BY_NAME
              for t in [_TOOL_REGISTRY_BY_NAME[t_name]]]
+    # v8.15: light 模式联网工具——请求开启「联网」开关时动态追加（模型可自行调用；
+    # 开关未开则不可见，与 expert 语义一致）
+    try:
+        from src.core.tracing import web_search_enabled as _req_web_on
+        if _req_web_on() and "deepseek_web_search" in _TOOL_REGISTRY_BY_NAME:
+            tools.append(_TOOL_REGISTRY_BY_NAME["deepseek_web_search"])
+            logger.info("[LightGraph] 联网开关开启，已追加 deepseek_web_search 工具")
+    except Exception:
+        pass
 
     llm = _build_light_llm(bind_tools=tools) if tools else _build_light_llm()
 
