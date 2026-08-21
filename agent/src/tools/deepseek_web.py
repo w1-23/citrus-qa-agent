@@ -1,26 +1,28 @@
 # -*- coding: utf-8 -*-
-"""deepseek_web_search — DeepSeek 原生联网搜索工具（v8.15 P3 脚手架）。
+"""deepseek_web_search — DeepSeek 原生联网搜索工具（v8.15，真机联调后定稿）。
 
 机制：DeepSeek API 开放 Responses 接口，请求 tools 声明 {"type": "web_search"}，
 由 DeepSeek 服务端自行决定是否联网检索、检索哪些网站（不限制站点），
-同一请求内返回最终回答 + web_search_call 引用条目。本工具把一次这样的
-调用封装成检索链中的一个工具：模型自主决定何时需要实时信息并调用它，
-调用内仍是 DeepSeek 自己联网检索，我们只把引用映射为 web 证据组条目。
+同一请求内返回最终回答 + 引用。本工具把一次这样的调用封装成检索链中的一个
+工具：模型自主决定何时需要实时信息并调用它，调用内仍是 DeepSeek 自己联网检索，
+我们只把引用映射为 web 证据组条目。
 
-⚠️ 未实测标记（v8.15）：沙箱无外网、无有效 API key，本文件按 OpenAI
-Responses API web_search 契约编写，端点路径/引用字段形态以 DeepSeek 官方
-文档为准。上线前请先运行配套探测（python -m src.tools.websearch_probe
-或手动 curl）核对：① 端点精确路径（config web_search.responses_path）
-② 模型 deepseek-v4-flash 是否在该能力支持列表 ③ 返回 output 里
-web_search_call 的精确字段名。探测通过前保持 config web_search.enabled=false。
+2026-08-21 真机探测结论（HTTP 200）：DeepSeek 该版本响应的
+  - message 块: {"type":"message","content":[{"type":"output_text","text":...}]}
+  - web_search_call 块只记录搜索动作: {"action":{"type":"search","queries":[...]}}
+    → 不含结构化来源 URL；URL 依赖模型在回答文本里写出（MD 链接/裸 URL），
+    故工具在 input 中附"请标注真实网址"指令，并用多形态防御式解析提取。
 
 设计（与 PIPELINE 结构一致）：
   - 主循环（chat/completions + langchain 工具调用）完全不动；
   - 本工具仅在内部分支开一次 Responses 调用（非流式，聚合引用）；
-  - 返回 content=模型检索摘要 + 引用清单；artifact.web_results=引用条目
+  - 返回 content=模型检索摘要 + 检索词 + 引用清单；artifact.web_results=引用条目
     （source="web"），汇入 cited_refs type="web" → 侧栏「联网搜索」组。
+前端开关即总开关：开关否由请求级 contextvar（web_search_enabled）决定，
+工具执行层据此短路，关闭时零网络请求。
 """
 import logging
+import re
 import time
 from typing import Tuple
 
@@ -36,6 +38,10 @@ logger = logging.getLogger(__name__)
 _WEB_MAX_ITEMS = 8
 _HTTP_TIMEOUT = 30
 
+# 引用/URL 提取正则（防御式兜底：Markdown 链接 + 裸 URL）
+_MD_LINK_RE = re.compile(r"\[([^\]]{1,200})\]\s*\(\s*(https?://[^)\s]+)\s*\)", re.IGNORECASE)
+_BARE_URL_RE = re.compile(r"https?://[^\s\)\]\<>\",。；】》』！？]+", re.IGNORECASE)
+
 
 def _responses_endpoint() -> str:
     """Responses 端点：{base}{path}。base 与主模型一致（api.deepseek.com）。"""
@@ -45,17 +51,33 @@ def _responses_endpoint() -> str:
     return f"{base}{path}"
 
 
-def _parse_response_output(output: list) -> Tuple[str, list]:
-    """解析 Responses 输出：text 块拼接 + web_search_call 引用条目。
+def _extract_urls_deep(obj, acc: list, depth: int = 0) -> None:
+    """递归深扫任意嵌套 dict/list 找含 http 的 url/title（不确定层级时的通用兜底）。"""
+    if depth > 8 or obj is None:
+        return
+    if isinstance(obj, dict):
+        url = str(obj.get("url") or "").strip()
+        title = str(obj.get("title") or "").strip()
+        if url.lower().startswith("http"):
+            acc.append({
+                "title": title or url,
+                "url": url,
+                "abstract": str(obj.get("snippet") or obj.get("abstract") or "")[:500],
+            })
+        for v in obj.values():
+            _extract_urls_deep(v, acc, depth + 1)
+    elif isinstance(obj, list):
+        for v in obj:
+            _extract_urls_deep(v, acc, depth + 1)
 
-    契约（OpenAI Responses API web_search 形态，DeepSeek 待核对）：
-      - message 块: {"type": "message", "content": [{"type": "output_text", "text": ...}]}
-      - 引用块:   {"type": "web_search_call", "status": ..., "title": ..., "url": ...,
-                   "content": {...}}
-    防御式解析：字段缺失时跳过该条目，绝不因引用格式差异抛异常。
+
+def _parse_response_output(output: list):
+    """解析 Responses 输出（DeepSeek 实测结构）。
+    返回 (summary, calls, meta)；防御式：任何格式差异不抛异常，尽力提取 URL。
     """
     text_parts: list[str] = []
-    calls: list[dict] = []
+    queries: list[str] = []
+    url_items: list[dict] = []
     for item in output or []:
         if not isinstance(item, dict):
             continue
@@ -63,23 +85,33 @@ def _parse_response_output(output: list) -> Tuple[str, list]:
         if itype == "message":
             for c in item.get("content") or []:
                 if isinstance(c, dict) and c.get("type") == "output_text":
-                    text_parts.append(str(c.get("text", "")))
+                    t = str(c.get("text", ""))
+                    text_parts.append(t)
+                    # 行内 Markdown 链接 [title](url)
+                    for m in _MD_LINK_RE.finditer(t):
+                        url_items.append({"title": (m.group(1).strip() or m.group(2).strip()),
+                                          "url": m.group(2).strip(), "abstract": ""})
+                    # 裸 URL 兜底
+                    for u in _BARE_URL_RE.findall(t):
+                        url_items.append({"title": u, "url": u, "abstract": ""})
         elif itype == "web_search_call":
-            title = str(item.get("title", "") or "").strip()
-            url = str(item.get("url", "") or "").strip()
-            if not url:
-                # 兼容部分实现把引用挂在 status/content 上
-                content = item.get("content") or {}
-                url = str((content.get("url") if isinstance(content, dict) else "") or "").strip()
-                title = title or str((content.get("title") if isinstance(content, dict) else "") or "")
-            snippet = str((item.get("content") or ""))
-            if isinstance(item.get("content"), dict):
-                snippet = str(item["content"].get("snippet")
-                              or item["content"].get("content") or "")
-            if url:
-                calls.append({"title": title or url, "url": url,
-                              "abstract": (snippet or "")[:500]})
-    return "\n".join(p for p in text_parts if p).strip(), calls[: _WEB_MAX_ITEMS]
+            act = item.get("action") or {}
+            if isinstance(act, dict) and act.get("type") == "search":
+                queries.extend(str(q) for q in (act.get("queries") or []))
+        # 任意深层字段扫描（annotations / 搜索来源 / file 块等未知结构）
+        _extract_urls_deep(item, url_items)
+    # 按 URL 去重（去掉行内残留尾符）
+    seen: set = set()
+    calls: list[dict] = []
+    for it in url_items:
+        u = it["url"].rstrip("，。；：！？、/.,;:!?)]}>")
+        if not u or u in seen:
+            continue
+        seen.add(u)
+        calls.append({"title": (it["title"] or u)[:200], "url": u,
+                      "abstract": it.get("abstract", "")[:500]})
+    summary = "\n".join(p for p in text_parts if p).strip()
+    return summary, calls[: _WEB_MAX_ITEMS], {"queries": queries[:8]}
 
 
 @tool(response_format="content_and_artifact")
@@ -109,11 +141,19 @@ def deepseek_web_search(query: str) -> Tuple[str, dict]:
     if len(query) > 500:
         return f"[ERR_PARSE] 查询词过长 ({len(query)}字符)，请精简至 500 字符以内", empty
 
+    # v8.15: 输入附加"带网址引用"指令——DeepSeek 该版本 web_search_call 只回搜索动作、
+    # 不返回结构化来源，须让模型在回答里明确写出真实网址（[标题](URL)），
+    # 才能被解析进「联网搜索」证据组并在侧栏点击。
+    _input_prompt = (
+        f"{query}\n\n"
+        "如果使用了联网搜索，请在回答中对引用的信息来源标注真实网址，"
+        "格式如：[来源标题](https://...)。只列你实际引用且真实存在的网页地址。"
+    )
     t0 = time.perf_counter()
     try:
         payload = {
             "model": get_deepseek_model(),
-            "input": query,
+            "input": _input_prompt,
             "tools": [{"type": "web_search"}],   # 服务端内置 web_search：模型自主决定是否联网
             "stream": False,
         }
@@ -126,7 +166,7 @@ def deepseek_web_search(query: str) -> Tuple[str, dict]:
         resp = requests.post(url, headers=headers, json=payload, timeout=_HTTP_TIMEOUT)
         resp.raise_for_status()
         body = resp.json()
-        summary, calls = _parse_response_output(body.get("output") or [])
+        summary, calls, meta = _parse_response_output(body.get("output") or [])
         elapsed = (time.perf_counter() - t0) * 1000
 
         if not summary and not calls:
@@ -147,15 +187,19 @@ def deepseek_web_search(query: str) -> Tuple[str, dict]:
             }
             items.append(item)
 
+        _queries_line = ("\n\n本次模型联网检索了这些关键词:\n" + "、".join(
+            f"「{q[:80]}」" for q in meta.get("queries", [])[:5])) if meta.get("queries") else ""
         text_result = (
             f"联网检索摘要（DeepSeek 原生搜索返回）:\n{summary[:2000] or '(模型判断无需联网，未检索)'}"
+            + _queries_line
             + ("\n\n引用:\n" + "\n".join(f"[W{i}] {c['title']} — {c['url']}"
                                           for i, c in enumerate(calls, 1)) if calls else "")
         )
         content = _format_web_tool_result("deepseek_web_search", query, text_result,
                                           status="ok", results_count=len(items),
                                           elapsed_ms=elapsed)
-        logger.info(f"[deepseek_web_search] done: {len(calls)} 引用, {len(summary)} 字摘要, {elapsed:.0f}ms")
+        logger.info(f"[deepseek_web_search] done: {len(calls)} 引用, {len(summary)} 字摘要, "
+                    f"{len(meta.get('queries', []))} 检索词, {elapsed:.0f}ms")
         return content, {"main_results": [], "web_results": items}
     except Exception as e:
         logger.error(f"[deepseek_web_search] 调用失败: {e}")
