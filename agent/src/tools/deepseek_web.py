@@ -41,6 +41,13 @@ _HTTP_TIMEOUT = 30
 # 引用/URL 提取正则（防御式兜底：Markdown 链接 + 裸 URL）
 _MD_LINK_RE = re.compile(r"\[([^\]]{1,200})\]\s*\(\s*(https?://[^)\s]+)\s*\)", re.IGNORECASE)
 _BARE_URL_RE = re.compile(r"https?://[^\s\)\]\<>\",。；】》』！？]+", re.IGNORECASE)
+# 内部锚点（2026-08 实测：API 在 web_search_call.action.url 后追加 #ws_call_id=call_xx，须剥离）
+_WS_CALL_FRAG_RE = re.compile(r"#ws_call.*$", re.IGNORECASE)
+
+
+def _clean_url(u: str) -> str:
+    u = _WS_CALL_FRAG_RE.sub("", u or "").strip()
+    return u.rstrip("，。；：！？、/.,;:!?)]}>")
 
 
 def _responses_endpoint() -> str:
@@ -97,14 +104,16 @@ def _parse_response_output(output: list):
         elif itype == "web_search_call":
             act = item.get("action") or {}
             if isinstance(act, dict) and act.get("type") == "search":
-                queries.extend(str(q) for q in (act.get("queries") or []))
-        # 任意深层字段扫描（annotations / 搜索来源 / file 块等未知结构）
+                # 过滤 API 自己追加的伪查询项（ws_call_id=call_xx）
+                queries.extend(str(q) for q in (act.get("queries") or [])
+                               if not str(q).lower().startswith("ws_call_id="))
+        # 任意深层字段扫描（action.url / annotations / file 块等未知结构）
         _extract_urls_deep(item, url_items)
-    # 按 URL 去重（去掉行内残留尾符）
+    # 按 URL 去重（剥离 #ws_call_id 内部锚点 + 行内残留尾符）
     seen: set = set()
     calls: list[dict] = []
     for it in url_items:
-        u = it["url"].rstrip("，。；：！？、/.,;:!?)]}>")
+        u = _clean_url(it["url"])
         if not u or u in seen:
             continue
         seen.add(u)

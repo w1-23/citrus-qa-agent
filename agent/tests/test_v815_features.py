@@ -187,15 +187,16 @@ def test_v815_web_response_parse():
 
 
 def test_v815_web_response_parse_real_shape():
-    """复刻 2026-08 真机探测的真实结构：web_search_call 只含 action.queries，
-    URL 来自 message 行内 MD 链接 / 裸 URL / content.annotations。"""
+    """复刻 2026-08 真机探测的真实结构：web_search_call 含 action.queries（部分带
+    action.url+#ws_call_id 内部锚点）；URL 亦可来自 message 行内 MD 链接/裸 URL/annotations。"""
     print("[VF-7] Responses 引用解析（真机结构）")
     from src.tools.deepseek_web import _parse_response_output
     out = [
         {"type": "reasoning",
          "content": [{"type": "reasoning_text", "text": "thinking…"}]},
         {"type": "web_search_call", "id": "c1", "status": "completed",
-         "action": {"type": "search", "queries": ["柑橘黄龙病 防治 2024", "citrus hlb 2025"]}},
+         "action": {"type": "search", "queries": ["柑橘黄龙病 防治 2024", "citrus hlb 2025",
+                                                  "ws_call_id=c1-fake"]}},
         {"type": "message", "content": [
             {"type": "output_text",
              "text": "最新进展见 [中国农学通报综述](https://www.cjab.org.cn/x) "
@@ -203,15 +204,29 @@ def test_v815_web_response_parse_real_shape():
         {"type": "message", "content": [
             {"type": "output_text", "text": "华中农大纳米酶研究…", "annotations": [
                 {"type": "url_citation", "title": "纳米酶综述", "url": "https://nature.com/articles/123"}]}]},
+        # 2026-08 实测：action.url 带 #ws_call_id 内部锚点
+        {"type": "web_search_call", "id": "c2", "status": "completed",
+         "action": {"type": "search", "queries": ["黄龙病 防控"],
+                    "url": "https://cn.agropages.com/News/printnew-36039.htm#ws_call_id=call_01_ABC"}},
+        # 锚点被截断只留 #ws_call_ 前缀（防御）
+        {"type": "web_search_call", "id": "c3", "status": "completed",
+         "action": {"type": "search", "queries": ["黄龙病"],
+                    "url": "https://english.cas.cn/newsroom/life/202504/t20250411_1040967.shtml#ws_call_"}},
     ]
     summary, calls, meta = _parse_response_output(out)
-    check("检索关键词提取", meta.get("queries", [])[:2] == ["柑橘黄龙病 防治 2024", "citrus hlb 2025"],
-          str(meta.get("queries")))
-    check("URL 去重 3 条", len(calls) == 3, str([c["url"] for c in calls]))
+    check("检索关键词提取(过滤ws_call_id伪查询)",
+          meta.get("queries", [])[:2] == ["柑橘黄龙病 防治 2024", "citrus hlb 2025"]
+          and len(meta.get("queries", [])) == 4, str(meta.get("queries")))
+    check("URL 去重 5 条", len(calls) == 5, str([c["url"] for c in calls]))
     urls = [c["url"] for c in calls]
     check("MD 链接标题+url", any(u == "https://www.cjab.org.cn/x" for u in urls))
     check("裸 URL 兜底", any(u == "https://pubmed.ncbi.nlm.nih.gov/12345" for u in urls))
     check("annotations 深扫", any(u == "https://nature.com/articles/123" for u in urls))
+    check("action.url 提取且剥离 #ws_call_id 锚点",
+          any(u == "https://cn.agropages.com/News/printnew-36039.htm" for u in urls), str(urls))
+    check("截断锚点 #ws_call_ 也能剥离",
+          any(u == "https://english.cas.cn/newsroom/life/202504/t20250411_1040967.shtml" for u in urls),
+          str(urls))
     check("text 聚合", len(summary) > 10, summary[:30])
 
 
