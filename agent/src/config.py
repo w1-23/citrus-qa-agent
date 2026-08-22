@@ -112,6 +112,9 @@ class Settings(BaseSettings):
     DRAFT_MAX_CHARS: int = Field(default_factory=lambda: _yaml_val("draft", "max_chars", default=300))
     # 草稿 HTTP 超时（秒）——非联网调用 2-5s，留足余量防慢响应被自掐
     DRAFT_TIMEOUT_SEC: int = Field(default_factory=lambda: _yaml_val("draft", "timeout_sec", default=15))
+    # v8.16.3: 草稿调用输出上限——真空输出根因（v4-flash 思维链吃光 max_tokens，
+    # v8.15.3c HyDE 同款事故）：1024→2048 给思维链留足余量（结构化区块实际 400-800 tokens）
+    DRAFT_MAX_TOKENS: int = Field(default_factory=lambda: _yaml_val("draft", "max_tokens", default=2048))
     DRAFT_MAX_ANGLES: int = Field(default_factory=lambda: _yaml_val("draft", "max_angles", default=3))
     # 已确认：SUMMARY 上限 3 条（不做 5-8），与草稿提示词「恰好 3 条」一致
     DRAFT_SUMMARY_POINTS: int = Field(default_factory=lambda: _yaml_val("draft", "summary_points", default=3))

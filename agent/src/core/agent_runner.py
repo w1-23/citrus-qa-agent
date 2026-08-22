@@ -233,7 +233,9 @@ def build_evidence_report(collected_artifacts: dict, query: str,
         lines.append("（以下 [Wn] 为综述对应的可点击网页来源）")
     if web:
         lines.append("## 学术源补充条目")
-        for i, r in enumerate(web[:10], 1):
+        # v8.16.3: web[:10]→[:14]——联网 14 条结果此前只渲染 10 条,4 条从不进回执
+        # （supervisor 只能引用可见条目，"丢失 9 条"实为展示截断而非被长文本淹没）
+        for i, r in enumerate(web[:14], 1):
             text = str(r.get("abstract") or r.get("snippet") or r.get("content") or "").strip()
             if len(text) > 600:
                 text = text[:600] + " …"

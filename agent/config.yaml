@@ -61,6 +61,9 @@ draft:
   label: "预检索草稿·验证中"         # 事件 label（前端 index.html 同文案兜底）
   max_chars: 300                    # DRAFT_ZH 展示上限，超出截断
   timeout_sec: 15                   # 草稿 fast 调用 HTTP 超时（秒）
+  # v8.16.3: 输出上限 1024→2048——fast 模型(depseek-v4-flash)思维链偶发吃光
+  # max_tokens 致 content 为空（v8.15.3c HyDE 同款事故，日志实证 call_empty）
+  max_tokens: 2048                  # 结构化区块实际 400-800 tokens，留足思维链余量
   max_angles: 3                     # MULTI_QUERY 最多取前 N 条（提示词恰好 3）
   summary_points: 3                 # SUMMARY 最多取前 N 条（已确认上限 3，不做 5-8）
   extra_retrieval: true             # 草稿衍生查询并入 search_multi 多路检索（best-effort）
