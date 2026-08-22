@@ -101,6 +101,15 @@ async def load_context_node(state: AgentState) -> dict:
                 "tool_call_id": ""})
         except Exception:
             pass
+        # v8.16.1: 草稿先行（全场景覆盖）——与 expert 图同机制：后台 fast 调用
+        # 产出 DRAFT_ZH 上屏；light 不走 retrieve-agent，草稿衍生多路检索结果
+        # 不入证据回执（light 保持"本地基础检索+速度优先"，见 AGENT_CHANGES v8.16.1）
+        try:
+            from src.tools.deepseek_web import draft_worker
+            import asyncio as _asyncio
+            _asyncio.create_task(draft_worker(query, session_id))
+        except Exception as _e:
+            logger.warning(f"[LightGraph:load] 草稿先行启动失败（跳过）: {_e}")
         return result
 
     except Exception as e:

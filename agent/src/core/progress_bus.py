@@ -213,6 +213,15 @@ def emit_text(content: str) -> None:
     emit_encoded("text", {"content": content})
 
 
+def emit_draft(content: str, label: str = "预检索草稿·验证中") -> None:
+    """v8.16.1: Emit a DRAFT event（草稿先行·预检索草稿）。
+
+    草稿 worker 产出 DRAFT_ZH 后立即推送；前端以灰底面板展示，
+    收到首个 text 事件时清空替换为正式回答。
+    """
+    emit_encoded("draft", {"content": str(content or ""), "label": label})
+
+
 def emit_status(stage: str, **kwargs) -> None:
     """Emit a generic status event (backward compat)."""
     payload = {"stage": stage}

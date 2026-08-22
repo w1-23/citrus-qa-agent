@@ -104,6 +104,20 @@ class Settings(BaseSettings):
     # 旧 30s 把本会成功的慢响应自掐成"伪失败"（7×30s 白等根因）
     WEB_SEARCH_TIMEOUT: int = Field(default_factory=lambda: _yaml_val("web_search", "timeout_sec", default=90))
 
+    # v8.16.1: 草稿先行——load 后后台 fast 调用一次性产出
+    # DRAFT_ZH（中文展示）/ DRAFT_EN（HyDE 复用）/ MULTI_QUERY / SUMMARY，
+    # 前端 3-5s 见「预检索草稿·验证中」；草稿衍生查询并入多路检索。
+    DRAFT_ENABLED: bool = Field(default_factory=lambda: _yaml_val("draft", "enabled", default=True))
+    DRAFT_LABEL: str = Field(default_factory=lambda: _yaml_val("draft", "label", default="预检索草稿·验证中"))
+    DRAFT_MAX_CHARS: int = Field(default_factory=lambda: _yaml_val("draft", "max_chars", default=300))
+    # 草稿 HTTP 超时（秒）——非联网调用 2-5s，留足余量防慢响应被自掐
+    DRAFT_TIMEOUT_SEC: int = Field(default_factory=lambda: _yaml_val("draft", "timeout_sec", default=15))
+    DRAFT_MAX_ANGLES: int = Field(default_factory=lambda: _yaml_val("draft", "max_angles", default=3))
+    # 已确认：SUMMARY 上限 3 条（不做 5-8），与草稿提示词「恰好 3 条」一致
+    DRAFT_SUMMARY_POINTS: int = Field(default_factory=lambda: _yaml_val("draft", "summary_points", default=3))
+    # 草稿衍生查询（DRAFT_EN + MULTI_QUERY + SUMMARY）是否并入 search_multi 多路检索
+    DRAFT_EXTRA_RETRIEVAL: bool = Field(default_factory=lambda: _yaml_val("draft", "extra_retrieval", default=True))
+
     # 4. Chat Parameters (centralized)
     TEMPERATURE_MAIN: float = Field(default_factory=lambda: _yaml_val("chat", "temperature_main", default=0.2))
     TEMPERATURE_FAST: float = Field(default_factory=lambda: _yaml_val("chat", "temperature_fast", default=0.0))

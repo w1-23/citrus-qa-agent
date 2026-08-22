@@ -438,6 +438,15 @@ async def expert_load_node(state: AgentState) -> dict:
                  evidence=bool(result.get("history_evidence_block")))
         except Exception:
             pass
+        # v8.16.1: 草稿先行——load 后立即后台启动结构化草稿任务（fast 非联网调用），
+        # 与 supervisor/检索并行；草稿经 SSE draft 事件上屏（3-5s），草稿衍生
+        # 多路检索结果经 draft_store 并入 retrieve-agent 证据回执（agent_runner）。
+        # create_task 继承当前请求上下文（进度队列 contextvar），fail-soft 零阻塞。
+        try:
+            from src.tools.deepseek_web import draft_worker
+            asyncio.create_task(draft_worker(query, session_id))
+        except Exception as _e:
+            logger.warning(f"[ExpertGraph:load] 草稿先行启动失败（跳过）: {_e}")
         return result
 
     except Exception as e:
