@@ -260,8 +260,18 @@ def test_v8163_hyde_structured():
     check("结构化提示词含三行标签",
           "HyDE:" in st._HYDE_PROMPT and "Multi-Query:" in st._HYDE_PROMPT
           and "Summary:" in st._HYDE_PROMPT)
-    check("HYDE_MAX_TOKENS 1536（结构化输出余量）", settings.HYDE_MAX_TOKENS == 1536,
-          str(settings.HYDE_MAX_TOKENS))
+    check("HYDE_MAX_TOKENS 2048（v8.16.3c 双保险: 关思维链+预算）",
+          settings.HYDE_MAX_TOKENS == 2048, str(settings.HYDE_MAX_TOKENS))
+    check("HYDE_THINKING_OFF 默认开（真空输出根因防线）",
+          settings.HYDE_THINKING_OFF is True, str(settings.HYDE_THINKING_OFF))
+
+    # v8.16.3c 部分解析: 仅 HyDE 段（无 MQ/Summary）→ 仍返回, 调用方补原始查询保底
+    raw_hyde_only = ("HyDE: An integrated management strategy for HLB combines "
+                     "vector control with chemotherapy in citrus groves.\n")
+    p4 = st.parse_hyde_structured(raw_hyde_only)
+    check("仅 HyDE 段 → 仍可解析（mq/summary 空列表）",
+          p4 and p4["hyde"].startswith("An integrated") and p4["multi_query"] == [],
+          str(p4))
 
 
 # ── VF-34 hints 合并 + format 会话缓存 ────────────────────────────
@@ -326,6 +336,14 @@ def test_v8163_wiring_163():
     check("每路 7-9 查询入 search_multi",
           'queries = [hyde_parsed["hyde"]]' in se
           and 'hyde_parsed.get("multi_query", [])[:3]' in se)
+    check("结构化仅 HyDE 段 → 保底补原始查询",
+          "补充原始查询保底" in se and "queries.append(query)" in se)
+    cfg = (root / "src/config.py").read_text(encoding="utf-8")
+    check("HyDE 生成关思维链（thinking:disabled 下传）",
+          '{"thinking": {"type": "disabled"}}' in se)
+    check("HYDE_THINKING_OFF 配置字段存在",
+          "HYDE_THINKING_OFF" in cfg)
+    check("HyDE 预算 HYDE_MAX_TOKENS 引用", "settings.HYDE_MAX_TOKENS" in se)
     check("draft_worker 不再检索（无 rag.search_multi 调用）", "rag.search_multi" not in dw)
     check("agent_runner 不再 pop 草稿仓", "draft_store.pop" not in
           (root / "src/core/agent_runner.py").read_text(encoding="utf-8"))

@@ -17,7 +17,9 @@ retrieval:
   rag_hyde_enabled: true         # HyDE: 本地RAG检索前生成英文假想答案提升召回
   # v8.15.3c: 假想答案输出上限 512→1024 —— v4-flash 默认思维链偶发把 512 预算
   # 吃光、返回空 content（8-21 19:45 连续两轮"生成结果为空"即此），1024 留余量
-  hyde_max_tokens: 1536          # v8.16.3: 结构化 HyDE（假想段落 200-500 词 + 3 多路查询 + 3-5 要点）输出上限
+  # v8.16.3c: 实测真机 22:02 连空两次 → 关思维链(下) + 预算抬到 2048 双保险
+  hyde_max_tokens: 2048          # v8.16.3: 结构化 HyDE（假想段落 200-500 词 + 3 多路查询 + 3-5 要点）输出上限
+  hyde_thinking_off: true        # v8.16.3c: HyDE 生成走 thinking:disabled（与 hints 同款；真空输出根因防线）
   # v8.15 查询级结果缓存：相同/高度相似问题直接复用上次检索结果（毫秒级返回）。
   # 键 = 规范化 query + HyDE 开关 + 语料指纹(批次数+总块数)，语料增删/重启自动失效。
   rag_cache_enabled: true        # 总开关（默认开；不影响 HyDE/embed 内部缓存）

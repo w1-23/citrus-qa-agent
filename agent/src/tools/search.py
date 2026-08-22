@@ -405,6 +405,11 @@ def citrus_rag_search(query: str) -> tuple[str, dict]:
             queries = [hyde_parsed["hyde"]] \
                 + hyde_parsed.get("multi_query", [])[:3] \
                 + hyde_parsed.get("summary", [])[:5]
+            if len(queries) < 2:
+                # v8.16.3c: 结构化仅剩 HyDE 段（多路/要点缺失）→ 补原始查询保底多路
+                queries.append(query)
+                logger.info(f"[HyDE] 结构化仅 HyDE 段，补充原始查询保底 → "
+                            f"{len(queries)} 路查询")
             results = rag.search_multi(queries)
         else:
             results = rag.search(query)
@@ -558,6 +563,13 @@ def _generate_hyde_structured(query: str) -> str | None:
             timeout=15,  # v8.3.1: 3s 太短导致 flash 生成假想答案频繁超时降级（每次检索白等+丢 hyde_dense 一路）
         )
         answer = ""
+        extra: dict = {}
+        if getattr(settings, "HYDE_THINKING_OFF", True):
+            # v8.16.3c: 实测 22:02:33/44 连续两次真空输出（成功调用但 content 为空，
+            # "第 N 次返回为空"日志实证）——v4-flash 思维链吃光预算（draft call
+            # 1024→2048 同款事故）。DeepSeek chat 端点关闭思维链参数；不兼容时抛
+            # 异常 → 走下方 except fail-soft 回退基础检索（最差=现状 1 路查询）
+            extra["extra_body"] = {"thinking": {"type": "disabled"}}
         for attempt in (1, 2):
             resp = client.chat.completions.create(
                 model=settings.RESOLVED_FAST_MODEL,
@@ -567,6 +579,7 @@ def _generate_hyde_structured(query: str) -> str | None:
                 ],
                 temperature=0.2,
                 max_tokens=settings.HYDE_MAX_TOKENS,
+                **extra,
             )
             answer = (resp.choices[0].message.content or "").strip()
             if answer:
