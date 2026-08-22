@@ -109,7 +109,7 @@ class Settings(BaseSettings):
     # 前端 3-5s 见「预检索草稿·验证中」；草稿衍生查询并入多路检索。
     DRAFT_ENABLED: bool = Field(default_factory=lambda: _yaml_val("draft", "enabled", default=True))
     DRAFT_LABEL: str = Field(default_factory=lambda: _yaml_val("draft", "label", default="预检索草稿·验证中"))
-    DRAFT_MAX_CHARS: int = Field(default_factory=lambda: _yaml_val("draft", "max_chars", default=300))
+    DRAFT_MAX_CHARS: int = Field(default_factory=lambda: _yaml_val("draft", "max_chars", default=800))
     # 草稿 HTTP 超时（秒）——非联网调用 2-5s，留足余量防慢响应被自掐
     DRAFT_TIMEOUT_SEC: int = Field(default_factory=lambda: _yaml_val("draft", "timeout_sec", default=15))
     # v8.16.3: 草稿调用输出上限——真空输出根因（v4-flash 思维链吃光 max_tokens，

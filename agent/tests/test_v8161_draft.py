@@ -93,20 +93,23 @@ def test_v8161_parse_structured():
         check("缺区块 → 抛 StructuredParseError", False)
     except dw.StructuredParseError:
         check("缺区块 → 抛 StructuredParseError", True)
-    raw_missing = ("===STRUCTURED_START===\nDRAFT_ZH: 中文草稿\nDRAFT_EN: English draft\n"
+    raw_missing = ("===STRUCTURED_START===\nDRAFT_EN: English draft\n"
                    "MULTI_QUERY: a|b|c\n===STRUCTURED_END===\n")
     try:
         dw._parse_structured_response(raw_missing)
-        check("缺 SUMMARY → 抛错", False)
+        check("缺 DRAFT_ZH → 抛错（v8.16.3 唯一必需字段）", False)
     except dw.StructuredParseError as e:
-        check("缺 SUMMARY → 抛错", "SUMMARY" in str(e), str(e))
-    raw_empty = ("===STRUCTURED_START===\nDRAFT_ZH: 中文草稿\nDRAFT_EN: English draft\n"
-                 "MULTI_QUERY: a|b|c\nSUMMARY: \n===STRUCTURED_END===\n")
-    try:
-        dw._parse_structured_response(raw_empty)
-        check("空值字段 → 抛错", False)
-    except dw.StructuredParseError:
-        check("空值字段 → 抛错", True)
+        check("缺 DRAFT_ZH → 抛错（v8.16.3 唯一必需字段）", "DRAFT_ZH" in str(e), str(e))
+    # v8.16.3: 仅 DRAFT_ZH 必需——旧字段 SUMMARY 缺失/为空不再抛错（兼容占位）
+    raw_missing_old = ("===STRUCTURED_START===\nDRAFT_ZH: 中文草稿\nDRAFT_EN: English draft\n"
+                       "MULTI_QUERY: a|b|c\n===STRUCTURED_END===\n")
+    p5 = dw._parse_structured_response(raw_missing_old)
+    check("缺 SUMMARY → 不再抛错（兼容占位）", p5["draft_zh"] == "中文草稿"
+          and p5["summary"] == [], str(p5))
+    raw_empty_old = ("===STRUCTURED_START===\nDRAFT_ZH: 中文草稿\nDRAFT_EN: English draft\n"
+                     "MULTI_QUERY: a|b|c\nSUMMARY: \n===STRUCTURED_END===\n")
+    p6 = dw._parse_structured_response(raw_empty_old)
+    check("空 SUMMARY 值 → 不再抛错", p6["draft_zh"] == "中文草稿", str(p6))
     try:
         dw._parse_structured_response("")
         check("空响应 → 抛错", False)
@@ -123,13 +126,16 @@ def test_v8161_prompt_and_config():
     check("模板非空", bool(prompt))
     check("模板含 START 分隔符", "===STRUCTURED_START===" in prompt)
     check("模板含 END 分隔符", "===STRUCTURED_END===" in prompt)
-    check("模板含四个字段", all(f in prompt for f in ("DRAFT_ZH", "DRAFT_EN", "MULTI_QUERY", "SUMMARY")))
+    # v8.16.3: 草稿纯中文预览——模板仅 DRAFT_ZH 一个字段（DRAFT_EN/MULTI_QUERY/SUMMARY 已移除）
+    check("模板含 DRAFT_ZH 字段", "DRAFT_ZH:" in prompt)
+    check("模板不再含检索字段", all(f not in prompt for f in ("DRAFT_EN", "MULTI_QUERY", "SUMMARY")),
+          "v8.16.3 DRAFT_EN/MULTI_QUERY/SUMMARY 应从模板消失")
     check("模板禁止 JSON/围栏", "不要输出 JSON" in prompt and "不要输出 Markdown 代码块" in prompt)
-    check("模板 DRAFT_ZH 100-150 字约束", "100-150" in prompt)
+    check("模板 DRAFT_ZH 300-600 字约束", "300-600" in prompt)
 
     check("DRAFT_ENABLED 默认开", settings.DRAFT_ENABLED is True)
     check("DRAFT_LABEL 默认文案", settings.DRAFT_LABEL == "预检索草稿·验证中", settings.DRAFT_LABEL)
-    check("DRAFT_MAX_CHARS 默认 300", settings.DRAFT_MAX_CHARS == 300)
+    check("DRAFT_MAX_CHARS 默认 800", settings.DRAFT_MAX_CHARS == 800)
     check("DRAFT_MAX_ANGLES 默认 3", settings.DRAFT_MAX_ANGLES == 3)
     check("DRAFT_SUMMARY_POINTS 默认 3（已确认上限）", settings.DRAFT_SUMMARY_POINTS == 3)
     check("DRAFT_EXTRA_RETRIEVAL 默认开", settings.DRAFT_EXTRA_RETRIEVAL is True)
@@ -159,39 +165,28 @@ def test_v8161_draft_event_and_worker():
           ev.get("content") == "2026年柑橘政策初判…"
           and ev.get("label") == "预检索草稿·验证中", str(ev))
 
-    # 2) draft_worker 全链路（打桩调用与检索；验证 emit + 仓暂存 + 幂等幂等安全）
+    # 2) draft_worker 全链路（打桩调用；v8.16.3: 纯前端预览——事件发出、不检索、不落仓）
     q2 = asyncio.Queue()
     set_request_queue(q2)
     draft_store.clear()
 
     real_call = dw._call_structured_draft
 
-    class _FakeCall:
+    class _FakeCallZh:
         def __call__(self, query):
             return ("===STRUCTURED_START===\n"
-                    "DRAFT_ZH: 测试草稿内容。\n"
-                    "DRAFT_EN: Test draft content.\n"
-                    "MULTI_QUERY: citrus test query a|citrus test query b|citrus test query c\n"
-                    "SUMMARY: point one|point two|point three\n"
+                    "DRAFT_ZH: 2026年柑橘黄龙病综合防治技术现状，核心结论：无根治手段，"
+                    "综合管理以三角管理（病原-寄主-媒介）为框架。主要维度：①病原靶向——"
+                    "化学治疗与热疗仍为田间主要手段；②媒介防控——化学防治、经济阈值与"
+                    "生物防治（寄生蜂、虫生真菌）；③寄主管理——清除病树与无病苗。"
+                    "具体证据与展开将在正式回答中给出。\n"
                     "===STRUCTURED_END===\n")
 
-    class _FakeRetriever:
-        def __init__(self):
-            pass
-
-        def search_multi(self, queries):
-            return [{"title": "DraftPaper", "doi": "10.999/draft",
-                     "year": 2026, "text": "draft hit", "score": 0.9}]
-
-    import src.retrieval.multi_retriever as mr
-    real_retriever = mr.MultiBatchRetriever
     try:
-        dw._call_structured_draft = _FakeCall()
-        mr.MultiBatchRetriever = _FakeRetriever
+        dw._call_structured_draft = _FakeCallZh()
         asyncio.run(dw.draft_worker("2026柑橘政策", "sess-1"))
     finally:
         dw._call_structured_draft = real_call
-        mr.MultiBatchRetriever = real_retriever
         items2 = []
         while not q2.empty():
             items2.append(q2.get_nowait())
@@ -200,15 +195,14 @@ def test_v8161_draft_event_and_worker():
     check("worker 发出 draft 事件", any(it["event"] == "draft" for it in items2), str(items2)[:200])
     draft_ev = next((it for it in items2 if it["event"] == "draft"), {})
     ddata = json.loads(draft_ev["data"]) if draft_ev.get("data") else {}
-    check("草稿内容 = DRAFT_ZH", ddata.get("content") == "测试草稿内容。", str(ddata))
+    check("草稿内容 = DRAFT_ZH 完整预览", ddata.get("content", "").startswith(
+        "2026年柑橘黄龙病综合防治技术现状"), str(ddata)[:120])
+    check("v8.16.3 草稿≥140 字（完整预览，非 100-150 短句）",
+          len(ddata.get("content", "")) >= 140, str(len(ddata.get("content", ""))))
     check("草稿标签 = 预检索草稿·验证中", ddata.get("label") == "预检索草稿·验证中", str(ddata))
 
-    payload = draft_store.pop("sess-1", "-")
-    check("多路检索结果已暂存草稿仓", bool(payload and payload.get("results")), str(payload)[:200])
-    check("draft_en 在首路查询", payload and payload["queries"][0] == "Test draft content.",
-          str(payload and payload["queries"]))
-    check("查询路由 = 1+3+3", payload and len(payload["queries"]) == 7,
-          str(payload and len(payload["queries"])))
+    check("v8.16.3 草稿不落仓（纯前端展示，检索独立）",
+          draft_store.pop("sess-1", "-") is None)
     draft_store.clear()
 
     # 3) fail-soft：解析失败不抛异常、不落仓
@@ -285,12 +279,13 @@ def test_v8161_wiring_assertions():
     ar = (root / "src/core/agent_runner.py").read_text(encoding="utf-8")
     dw = (root / "src/tools/deepseek_web.py").read_text(encoding="utf-8")
     idx = (root / "index.html").read_text(encoding="utf-8")
-    check("expert load 启动 draft_worker",
-          "draft_worker(query, session_id)" in ex and "草稿先行" in ex)
+    check("expert load 启动 draft_worker（v8.16.3 提前到 load 开头）",
+          "draft_worker(query, session_id)" in ex and "草稿先行启动提前到 load 开头" in ex)
     check("light load 启动 draft_worker（全场景草稿）",
           "draft_worker(query, session_id)" in lg)
-    check("agent_runner 并入草稿证据", "draft_store.pop(session_id" in ar
-          and "草稿多路检索补充" in ar)
+    # v8.16.3: 草稿证据并入已移除（草稿=纯前端预览），draft_store.pop 不再出现于 agent_runner
+    check("agent_runner 不再并入草稿仓（草稿与检索解耦）",
+          "draft_store.pop" not in ar and "草稿多路检索补充" in ar)
     check("deepseek_web 含分隔符解析与 worker",
           "def _parse_structured_response" in dw and "async def draft_worker" in dw)
     check("前端 draft 事件分支", "case 'draft':" in idx)

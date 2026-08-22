@@ -401,6 +401,16 @@ async def expert_load_node(state: AgentState) -> dict:
         except Exception:
             pass
 
+        # v8.16.3: 草稿先行启动提前到 load 开头（草稿不依赖 load 结果）——
+        # 此前在 load 结束后 create_task，load 被 hints 卡住（实测 38.6s）时草稿
+        # 等 46s 才上屏；提前后与 load 并行，草稿延迟 = max(自身调用, load)。
+        # create_task 继承当前请求上下文（进度队列 contextvar），fail-soft 零阻塞。
+        try:
+            from src.tools.deepseek_web import draft_worker
+            asyncio.create_task(draft_worker(query, session_id))
+        except Exception as _e:
+            logger.warning(f"[ExpertGraph:load] 草稿先行启动失败（跳过）: {_e}")
+
         ctx = await ctx_mgr.load(session_id, query, mode)
         # v8.4: 收尾装配收敛至 context_manager.finalize_load_result
         # （与 light 图共用，消除双实现漂移）
@@ -438,15 +448,8 @@ async def expert_load_node(state: AgentState) -> dict:
                  evidence=bool(result.get("history_evidence_block")))
         except Exception:
             pass
-        # v8.16.1: 草稿先行——load 后立即后台启动结构化草稿任务（fast 非联网调用），
-        # 与 supervisor/检索并行；草稿经 SSE draft 事件上屏（3-5s），草稿衍生
-        # 多路检索结果经 draft_store 并入 retrieve-agent 证据回执（agent_runner）。
-        # create_task 继承当前请求上下文（进度队列 contextvar），fail-soft 零阻塞。
-        try:
-            from src.tools.deepseek_web import draft_worker
-            asyncio.create_task(draft_worker(query, session_id))
-        except Exception as _e:
-            logger.warning(f"[ExpertGraph:load] 草稿先行启动失败（跳过）: {_e}")
+        # v8.16.1 注: 草稿先行 create_task 已上移至 load 开头（v8.16.3，
+        # 与 load 并行——草稿不依赖 load 结果，避免 hints 慢时草稿 46s 才上屏）
         return result
 
     except Exception as e:

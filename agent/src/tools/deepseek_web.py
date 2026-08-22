@@ -358,7 +358,7 @@ def _parse_structured_response(raw_text: str) -> dict:
             _prev = result.get(current_field, "")
             result[current_field] = (_prev + "\n" + line).strip() if _prev else line
 
-    required = ("DRAFT_ZH", "DRAFT_EN", "MULTI_QUERY", "SUMMARY")
+    required = ("DRAFT_ZH",)
     for field in required:
         if field not in result:
             raise StructuredParseError(f"缺少字段: {field}")
@@ -367,10 +367,12 @@ def _parse_structured_response(raw_text: str) -> dict:
 
     return {
         "answer": answer_text,
-        "draft_zh": result["DRAFT_ZH"],
-        "draft_en": result["DRAFT_EN"],
-        "multi_query": result["MULTI_QUERY"],
-        "summary": result["SUMMARY"],
+        "draft_zh": result.get("DRAFT_ZH", ""),
+        # v8.16.3: 草稿纯中文预览——DRAFT_EN/MULTI_QUERY/SUMMARY 已从模板移除
+        # （检索的 HyDE/多路查询由主检索独立结构化生成）；旧模板残留字段仍兼容解析
+        "draft_en": result.get("DRAFT_EN", ""),
+        "multi_query": result.get("MULTI_QUERY", []),
+        "summary": result.get("SUMMARY", []),
     }
 
 
@@ -494,7 +496,7 @@ async def draft_worker(query: str, session_id: str) -> None:
         return
 
     label = str(getattr(settings, "DRAFT_LABEL", "预检索草稿·验证中") or "预检索草稿·验证中")
-    max_chars = max(int(getattr(settings, "DRAFT_MAX_CHARS", 300) or 300), 20)
+    max_chars = max(int(getattr(settings, "DRAFT_MAX_CHARS", 800) or 800), 20)
     draft_zh = parsed["draft_zh"][:max_chars]
     try:
         from src.core.progress_bus import emit_draft
@@ -503,41 +505,10 @@ async def draft_worker(query: str, session_id: str) -> None:
     except Exception as e:
         logger.debug(f"[draft] emit_draft 失败: {e}")
 
-    if not getattr(settings, "DRAFT_EXTRA_RETRIEVAL", True):
-        _draft_blog("draft_done", zh_len=len(draft_zh), queries_n=0, items=0,
-                    extra_retrieval=False)
-        return
-    max_angles = max(int(getattr(settings, "DRAFT_MAX_ANGLES", 3) or 3), 1)
-    summary_points = max(int(getattr(settings, "DRAFT_SUMMARY_POINTS", 3) or 3), 1)
-    queries = (
-        [parsed["draft_en"]]
-        + parsed["multi_query"][:max_angles]
-        + parsed["summary"][:summary_points]
-    )
-    try:
-        from src.core.draft_store import draft_store
-        from src.retrieval.multi_retriever import MultiBatchRetriever
-        from src.core.tracing import get_request_id
-        rag = MultiBatchRetriever()
-        results = await asyncio.to_thread(rag.search_multi, queries)
-        if not results:
-            logger.info("[draft] 多路检索无结果，跳过证据并入")
-            _draft_blog("draft_done", zh_len=len(draft_zh), queries_n=len(queries),
-                        items=0)
-            return
-        draft_store.put(session_id, get_request_id(), {
-            "draft_zh": draft_zh,
-            "queries": queries,
-            "results": results,
-        })
-        logger.info(f"[draft] 多路检索完成 {len(results)} 条 · "
-                    f"{len(queries)} 路查询 → 待并入证据回执")
-        _draft_blog("draft_done", zh_len=len(draft_zh), queries_n=len(queries),
-                    items=len(results))
-    except Exception as e:
-        logger.warning(f"[draft] 多路检索/暂存失败（不阻塞）: {e}")
-        _draft_blog("draft_done", zh_len=len(draft_zh), queries_n=len(queries),
-                    items=0, retrieval_error=str(e)[:120])
+    # v8.16.3: 草稿纯前端展示——不再并入多路检索（检索的 HyDE/Multi-Query/Summary
+    # 由 citrus_rag_search 独立结构化生成，草稿与检索彻底解耦）。
+    # 此前草稿通道的 search_multi(7 路) 已移除（省约 4s/请求；draft_store 保留兼容）。
+    _draft_blog("draft_done", zh_len=len(draft_zh))
 
 
 def _draft_blog(event: str, **fields) -> None:

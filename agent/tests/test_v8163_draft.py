@@ -215,6 +215,126 @@ def test_v8163_wiring():
     check("config DRAFT_MAX_TOKENS 字段", "DRAFT_MAX_TOKENS" in cfg)
 
 
+# ── VF-33 HyDE 结构化拆解 ─────────────────────────────────────────
+def test_v8163_hyde_structured():
+    print("[VF-33] HyDE 结构化拆解（HyDE + Multi-Query + Summary）")
+    import src.tools.search as st
+
+    raw = ("HyDE: In citrus-growing regions, Huanglongbing (HLB) is managed "
+           "through an integrated approach combining pathogen targeting with "
+           "chemical therapy, heat therapy, and vector control of Asian citrus "
+           "psyllid populations using economic thresholds.\n"
+           "Multi-Query: HLB integrated management strategies|Asian citrus psyllid control economics|citrus HLB chemotherapy field trials\n"
+           "Summary: triangle disease management|vector control threshold|chemotherapy field data\n")
+    p = st.parse_hyde_structured(raw)
+    check("HyDE 段解析", p and p["hyde"].startswith("In citrus-growing regions"), str(p)[:100])
+    check("Multi-Query 3 条", p and len(p["multi_query"]) == 3, str(p and p["multi_query"]))
+    check("Summary 3 条", p and len(p["summary"]) == 3, str(p and p["summary"]))
+
+    raw_wrap = ("HyDE: First line of the hypothetical citrus research paragraph "
+                "continuing on the next physical line without any label.\n"
+                "Multi-Query: a1|a2|a3\nSummary: s1|s2|s3\n")
+    p2 = st.parse_hyde_structured(raw_wrap)
+    check("HyDE 跨行折叠", p2 and p2["hyde"].startswith("First line")
+          and "continuing" in p2["hyde"], str(p2 and p2["hyde"]))
+
+    p3 = st.parse_hyde_structured("```\n" + raw + "```")
+    check("代码围栏剥离", p3 and p3["hyde"].startswith("In citrus"), str(p3 and p3["hyde"])[:60])
+
+    check("中文 HyDE → None（英文向量保真）",
+          st.parse_hyde_structured("HyDE: 柑橘黄龙病防治现状及对策\nMulti-Query: a|b|c\nSummary: x|y|z\n") is None)
+    check("缺 HyDE 段 → None",
+          st.parse_hyde_structured("Multi-Query: a|b|c\nSummary: x|y|z\n") is None)
+
+    # 旧式纯段落（模型忽略模板）→ 单路 {hyde, [], []} 兼容
+    para = "Huanglongbing is managed through integrated pest management strategies in citrus groves."
+    real_gen = st._generate_hyde_structured
+    try:
+        st._generate_hyde_structured = lambda q: para
+        got = st._cached_hyde_parsed("citrus hlb legacy test")
+    finally:
+        st._generate_hyde_structured = real_gen
+    check("旧式纯段落 → 单路兼容", got and got["hyde"] == para and got["multi_query"] == [],
+          str(got))
+
+    check("结构化提示词含三行标签",
+          "HyDE:" in st._HYDE_PROMPT and "Multi-Query:" in st._HYDE_PROMPT
+          and "Summary:" in st._HYDE_PROMPT)
+    check("HYDE_MAX_TOKENS 1536（结构化输出余量）", settings.HYDE_MAX_TOKENS == 1536,
+          str(settings.HYDE_MAX_TOKENS))
+
+
+# ── VF-34 hints 合并 + format 会话缓存 ────────────────────────────
+def test_v8163_hints_merged_cached():
+    print("[VF-34] hints 合并为一次 + format 会话缓存")
+    import asyncio
+
+    class _FakeLLM:
+        calls = 0
+
+        class _Resp:
+            pass
+
+        async def ainvoke(self, messages):
+            type(self).calls += 1
+            sys_text = messages[0].content
+            user_text = messages[-1].content
+            if '"suggestions"' in sys_text:      # 合并调用
+                content = ('{"suggestions": [], "format": "fallback"}'
+                           if "聊" in user_text
+                           else '{"suggestions": ["citrus a", "citrus b"], "format": "fact"}')
+            else:                                # 追问轮仅 suggestions
+                content = '["citrus c"]'
+            r = self._Resp()
+            r.content = content
+            return r
+
+    from src.core.context_manager import ContextManager
+    cm = ContextManager(session_manager=None, memory_store=None, budget=None)
+    cm._get_fast_llm = lambda thinking_off=False: _FakeLLM()
+
+    async def run():
+        s1, f1 = await cm._generate_hints("柑橘黄龙病防治", "sess-x", "expert")
+        s2, f2 = await cm._generate_hints("抗病育种现状", "sess-x", "expert")
+        s3, f3 = await cm._generate_hints("随便聊聊", "sess-chat", "expert")
+        s4, f4 = await cm._generate_hints("再聊聊", "sess-chat", "expert")
+        return (s1, f1, s2, f2, s3, f3, s4, f4)
+
+    s1, f1, s2, f2, s3, f3, s4, f4 = asyncio.run(run())
+    check("合并调用: suggestions 拆出", s1 == ["citrus a", "citrus b"], str(s1))
+    check("合并调用: format=fact", f1 == "fact", str(f1))
+    check("追问轮复用缓存 format", f2 == "fact", str(f2))
+    check("追问轮 suggestions 仍按新 query 生成", s2 == ["citrus c"], str(s2))
+    check("闲聊 format=fallback 不缓存",
+          f3 == "fallback" and f4 == "fallback", f"{f3}/{f4}")
+    check("总调用数 = 4 次（2 实质轮各 1 + 2 闲聊轮各 1，format 段 0 额外）",
+          _FakeLLM.calls == 4, str(_FakeLLM.calls))
+
+
+# ── VF-35 源码接线（v8.16.3 解耦与提前启动）──────────────────────
+def test_v8163_wiring_163():
+    print("[VF-35] 解耦/提前启动接线")
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]  # agent/
+    se = (root / "src/tools/search.py").read_text(encoding="utf-8")
+    dw = (root / "src/tools/deepseek_web.py").read_text(encoding="utf-8")
+    ex = (root / "src/graph/expert_graph.py").read_text(encoding="utf-8")
+    cm = (root / "src/core/context_manager.py").read_text(encoding="utf-8")
+
+    check("search.py: parse_hyde_structured + 缓存拆解",
+          "def parse_hyde_structured" in se and "def _cached_hyde_parsed" in se)
+    check("每路 7-9 查询入 search_multi",
+          'queries = [hyde_parsed["hyde"]]' in se
+          and 'hyde_parsed.get("multi_query", [])[:3]' in se)
+    check("draft_worker 不再检索（无 rag.search_multi 调用）", "rag.search_multi" not in dw)
+    check("agent_runner 不再 pop 草稿仓", "draft_store.pop" not in
+          (root / "src/core/agent_runner.py").read_text(encoding="utf-8"))
+    check("草稿 create_task 在 ctx_mgr.load 之前",
+          ex.index("create_task(draft_worker(query, session_id))") < ex.index("ctx_mgr.load(session_id, query, mode)"))
+    check("context_manager: 合并+hints 缓存+关思维链",
+          "def gen_merged" in cm and "_hint_fmt_cache" in cm and "thinking_off=True" in cm)
+
+
 # ── 汇总 ──────────────────────────────────────────────────────────
 def _summary():
     print(f"\n[VF-16.3] PASS {len(passed)} / FAIL {len(failed)}"

@@ -723,23 +723,10 @@ async def run_agent(
     # 直接进上下文（ToolMessage → 历史可见，追问无需重检索）——不再依赖模型转述
     # （"管道而非漏斗"，历史模型报告 34~176 字极短回执由此根治）。
     if agent_name == "retrieve-agent":
-        # v8.16.1: 草稿先行证据并入——草稿 worker 的多路检索结果（DRAFT_EN +
-        # MULTI_QUERY + SUMMARY，load 后并行产出）pop 进证据清单，随确定性回执
-        # 呈现给 supervisor。best-effort：未就绪/失败不等待、不阻塞主链路。
+        # v8.16.3: 草稿证据并入已移除——草稿改为纯前端预览，不再写入 draft_store
+        # （检索由 citrus_rag_search 的 HyDE 结构化独立承担）。draft_extra_count 保留
+        # 参数兼容（恒 0），build_evidence_report 的补充行仅在建置调用方显式传入时出现。
         draft_extra_count = 0
-        try:
-            from src.core.tracing import get_request_id
-            from src.core.draft_store import draft_store
-            _draft_extra = draft_store.pop(session_id, get_request_id())
-            if _draft_extra and _draft_extra.get("results"):
-                _items = [r for r in _draft_extra["results"] if r]
-                if _items:
-                    collected_artifacts["main_results"].extend(_items)
-                    draft_extra_count = len(_items)
-                    logger.info(
-                        f"[AgentRunner] 并入草稿多路检索证据 {draft_extra_count} 条")
-        except Exception as _e:
-            logger.debug(f"[AgentRunner] 草稿证据并入跳过: {_e}")
         budget_blocked = sum(
             1 for m in placeholder_results.values()
             if str(getattr(m, "content", "") or "").startswith("[SEARCH_BUDGET]"))
