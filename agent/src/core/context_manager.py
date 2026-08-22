@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -114,6 +115,12 @@ class ContextManager:
             query=query,
         )
 
+        # v8.16.2: load 分段计时（load_done 24s 类问题的第一现场——
+        # DB 读取 / LTM 召回 / hints(2×fast-LLM) 三段占比一眼可辨，
+        # 供 v8.16.2 Phase 3 提速决策使用）
+        _t_load = time.perf_counter()
+        _t_db0 = time.perf_counter()
+
         if self._session:
             try:
                 raw_messages, row_ids = await self._session.get_messages_with_ids(session_id)
@@ -134,6 +141,8 @@ class ContextManager:
                 except Exception:
                     pass
 
+        _db_ms = (time.perf_counter() - _t_db0) * 1000
+        _t_ltm0 = time.perf_counter()
         if self._memory:
             try:
                 # v8.4.5: LTM 语义召回含 embed 推理（≤500 条事实），走线程池防阻塞事件循环
@@ -163,12 +172,26 @@ class ContextManager:
             except Exception as e:
                 logger.debug(f"[ContextManager] preferences skipped: {e}")
 
+        _ltm_ms = (time.perf_counter() - _t_ltm0) * 1000
+        _t_hints0 = time.perf_counter()
         suggestions, format_hint = await self._generate_hints(query)
 
         if suggestions:
             ctx.search_suggestions = suggestions
         if format_hint:
             ctx.format_hint = format_hint
+
+        # v8.16.2: 分段耗时落 diag（agent/logs/diag 可查）——load 提速
+        # （Phase 3）的唯一决策依据：db_ms 若 <1s 则"预加载 DB"方案无意义；
+        # hints_ms 若占大头（2×fast-LLM + v4-flash 推理）则合并/关推理/缓存
+        try:
+            from src.core.diag import diag
+            diag("load_stages", db_ms=round(_db_ms, 1), ltm_ms=round(_ltm_ms, 1),
+                 hints_ms=round((time.perf_counter() - _t_hints0) * 1000, 1),
+                 total_ms=round((time.perf_counter() - _t_load) * 1000, 1),
+                 compacted=bool(ctx.compacted))
+        except Exception:
+            pass
 
         return ctx
 

@@ -138,7 +138,10 @@ agent:
     deepseek_web_search: 120
   tool_result_caps:              # 子Agent结果回传supervisor的分档截断(字符)
     write-agent: 1000            #   write-agent 只回传保存摘要
-    retrieve-agent: 40000        #   v8.3.4: 检索证据清单完整回传（原 15000 截掉关键证据细节）
+    retrieve-agent: 60000        #   v8.4.6: 检索证据清单完整回传（原 15000 截掉关键证据细节）
+                                 #   v8.16.2: 40000→60000 —— rich 场景回执实测 47.6K
+                                 #   (15文献+3综述+8联网条目) 旧 cap 截尾恰好切掉文末 [Wn] 清单
+                                 #   + 引用导引（v8.16.2 实证根因）。重排+扩 cap 后 rich 零截断。
     analyze-agent: 10000         #   分析结论
     default: 100000              #   read_local_file/pdf_read 保留大值
 

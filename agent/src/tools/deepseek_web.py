@@ -423,6 +423,8 @@ async def draft_worker(query: str, session_id: str) -> None:
     run_agent 在组装确定性回执前 pop 并入证据（best-effort，失败零阻塞）。
 
     注意: 本任务执行严格 fail-soft——任何异常只记日志，绝不阻塞主链路。
+    v8.16.2: 业务日志 draft_done / draft_skipped——"草稿未显示"类问题的
+    第一现场（business.log 可见 推送/跳过原因/检索并入量）。
     """
     if not getattr(settings, "DRAFT_ENABLED", True):
         return
@@ -432,13 +434,16 @@ async def draft_worker(query: str, session_id: str) -> None:
     try:
         raw = await asyncio.to_thread(_call_structured_draft, query)
         if not raw:
+            _draft_blog("draft_skipped", reason="call_empty")
             return
         parsed = _parse_structured_response(raw)
     except StructuredParseError as e:
         logger.info(f"[draft] 解析失败，跳过草稿: {e}")
+        _draft_blog("draft_skipped", reason=f"parse_error:{e}")
         return
     except Exception as e:
         logger.warning(f"[draft] 草稿生成异常（跳过）: {e}")
+        _draft_blog("draft_skipped", reason=f"exception:{e}")
         return
 
     label = str(getattr(settings, "DRAFT_LABEL", "预检索草稿·验证中") or "预检索草稿·验证中")
@@ -452,6 +457,8 @@ async def draft_worker(query: str, session_id: str) -> None:
         logger.debug(f"[draft] emit_draft 失败: {e}")
 
     if not getattr(settings, "DRAFT_EXTRA_RETRIEVAL", True):
+        _draft_blog("draft_done", zh_len=len(draft_zh), queries_n=0, items=0,
+                    extra_retrieval=False)
         return
     max_angles = max(int(getattr(settings, "DRAFT_MAX_ANGLES", 3) or 3), 1)
     summary_points = max(int(getattr(settings, "DRAFT_SUMMARY_POINTS", 3) or 3), 1)
@@ -468,6 +475,8 @@ async def draft_worker(query: str, session_id: str) -> None:
         results = await asyncio.to_thread(rag.search_multi, queries)
         if not results:
             logger.info("[draft] 多路检索无结果，跳过证据并入")
+            _draft_blog("draft_done", zh_len=len(draft_zh), queries_n=len(queries),
+                        items=0)
             return
         draft_store.put(session_id, get_request_id(), {
             "draft_zh": draft_zh,
@@ -476,5 +485,18 @@ async def draft_worker(query: str, session_id: str) -> None:
         })
         logger.info(f"[draft] 多路检索完成 {len(results)} 条 · "
                     f"{len(queries)} 路查询 → 待并入证据回执")
+        _draft_blog("draft_done", zh_len=len(draft_zh), queries_n=len(queries),
+                    items=len(results))
     except Exception as e:
         logger.warning(f"[draft] 多路检索/暂存失败（不阻塞）: {e}")
+        _draft_blog("draft_done", zh_len=len(draft_zh), queries_n=len(queries),
+                    items=0, retrieval_error=str(e)[:120])
+
+
+def _draft_blog(event: str, **fields) -> None:
+    """v8.16.2: 草稿业务日志（fail-soft：日志失败绝不影响草稿链路）。"""
+    try:
+        from src.core.business_logger import blog
+        blog(event, **fields)
+    except Exception:
+        pass
