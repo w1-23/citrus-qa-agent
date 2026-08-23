@@ -161,8 +161,10 @@ def _responses_web_search(input_prompt: str, context: str = "") -> tuple[str, li
     回答；草稿直接取 output_text，检索素材改由既有 HyDE（citrus_rag_search
     内部）驱动，联网引用经 _to_web_items → [Wn] 进侧栏 WEB 组。
     structured_web.md 保留文件但不在此调用（历史格式约束，改由 HyDE 承担素材）。
-    v8.17.10-a：context 携带最近会话历史（human 问题），解决"重新查找上一个
-    问题"等指代性追问——无上下文时模型会拒绝回答且不触发 web_search。
+    v8.17.10-a：context 参数携带最近会话历史（human 问题），原用于解决"重新
+    查找上一个问题"类指代性追问。**v8.17.12（用户决策）默认禁用**——21:21
+    实机联网空返回（call_empty）疑与 ctx 组合相关，draft_worker 改为传空；
+    参数保留仅为回滚兜底（需要时重新传 _recent_human_context_sync 结果即可）。
     """
     context_block = ""
     if context:
@@ -196,7 +198,20 @@ def _responses_web_search(input_prompt: str, context: str = "") -> tuple[str, li
     body = resp.json()
     summary, calls, _meta = _parse_response_output(body.get("output") or [])
     if not summary and not calls:
-        raise RuntimeError("联网无返回内容")
+        # v8.17.12（用户方案 B）：call_empty 不再仅仅是 raise——记录 API 原始
+        # 响应（request_id/output 前 500 字符）供真机定位（配额/拒答/参数遗漏）
+        _debug = {
+            "status_code": resp.status_code,
+            "request_id": str(body.get("id", "") or "")[:40],
+            "output_len": len(body.get("output") or []),
+            "output_preview": str(body.get("output") or [])[:500],
+        }
+        logger.warning(
+            f"[draft-web] 联网调用返回空（call_empty）→ 回退快速调用 | "
+            f"raw={_debug}")
+        raise RuntimeError(
+            f"联网无返回内容 req={_debug.get('request_id') or '?'} "
+            f"out={_debug['output_preview'][:200]!r}")
     return summary, calls
 
 
@@ -860,11 +875,12 @@ async def draft_worker(query: str, session_id: str) -> None:
     if web_mode:
         # ── 联网路径：原生联网回答（草稿）→ 二级提取检索素材 ──
         # v8.17.1: 失败不跳过——回退到快速非联网调用（草稿恒在）
-        # v8.17.10: 注入最近会话历史（human 问题），解决"重新查找上一个问题"
-        # 类指代性追问；若首次回答为拒绝型（短 + 拒绝词）→ 带上下文重试一次。
-        _ctx = await asyncio.to_thread(
-            lambda: _join_human_context(
-                _recent_human_context_sync(session_id)))
+        # v8.17.12（用户决策）：**禁用会话历史注入**——21:21 实机日志
+        # 联网调用空返回（call_empty）发生在 ctx=yes 之后，用户排查暂定
+        # 上下文+问题组合可能引发拒答/空返回；回退为只传用户原始问题
+        # （与 v8.15.3d 最早验证形态一致）。_recent_human_context_sync /
+        # _join_human_context 保留定义仅作回滚兜底，此处不再调用。
+        _ctx = ""
         try:
             summary, calls = await asyncio.to_thread(
                 _responses_web_search, query, _ctx)
@@ -887,8 +903,7 @@ async def draft_worker(query: str, session_id: str) -> None:
             else:
                 logger.info(
                     f"[draft] 联网自由文本产出（草稿 {len(draft_zh)} 字, "
-                    f"calls={len(calls)})"
-                    + (f" ctx={'yes' if _ctx else 'no'}" if _ctx else ""))
+                    f"calls={len(calls)}, ctx=no)")
 
     if web_fallback or not web_mode:
         if web_fallback:

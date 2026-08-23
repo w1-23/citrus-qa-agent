@@ -572,7 +572,7 @@ def test_v81710_deferral_context():
           dw._join_human_context([]) == ""
           and dw._join_human_context(["问题A", "问题B"]) == "问题A\n问题B")
 
-    # 4) worker 级：自由文本 + context 注入（指代解析由模型凭对话背景完成）→ 草稿落仓
+    # 4) worker 级：v8.17.12 默认禁用会话历史注入（ctx=no，只传原始问题）
     real_resp = dw._responses_web_search
     real_search = dw._draft_search_multi
     real_ctx = dw._recent_human_context_sync
@@ -589,8 +589,7 @@ def test_v81710_deferral_context():
     try:
         def free_text_ok(inp, ctx=""):
             calls.append(ctx)
-            return ("基于您上一个问题（2025年后黄龙病田间感染），最新报道如下："
-                    "2025 年 Florida 果园发病率 3.2%，木虱带菌率 9%。\n"
+            return ("2025 年 Florida 果园发病率 3.2%，木虱带菌率 9%。\n"
                     "详见 [HLB 2025 survey](https://w.example/hlb2025)。",
                     [{"url": "https://w.example/hlb2025", "title": "HLB 2025 survey"}])
         dw._responses_web_search = free_text_ok
@@ -616,19 +615,27 @@ def test_v81710_deferral_context():
             items.append(q.get_nowait())
         clear_request_queue()
     payload = draft_store.pop("sess-ctx", "-")
-    check("自由文本草稿=output_text 全文（指代由模型凭对话背景解析）",
+    check("自由文本草稿=output_text 全文（ctx=no 只传原始问题）",
           payload is not None and payload.get("answer_text", "").startswith(
-              "基于您上一个问题（2025年后黄龙病田间感染）"),
+              "2025 年 Florida 果园发病率"),
           str(payload)[:200])
     check("自由文本 → [Wn] 引用 + 关键词兜底并入",
           payload is not None and len(payload.get("results") or []) == 1
           and len(payload.get("web_items") or []) == 1,
           str(payload)[:200])
-    check("注入的 context 携带历史问题", any(
-        "2025年后黄龙病田间感染的新报道" in c for c in calls), str(calls))
+    check("v8.17.12 ctx 已禁用（worker 传空串给联网调用）",
+          all(c == "" for c in calls) and len(calls) >= 1, str(calls))
     draft_ev = next((it for it in items if it.get("event") == "draft"), {})
     check("自由文本草稿事件仍推前端（内容=全文）",
-          bool(draft_ev) and "基于您上一个问题" in str(draft_ev.get("data", ""))[:300])
+          bool(draft_ev) and "Florida 果园发病率" in str(draft_ev.get("data", ""))[:300])
+    draft_store.clear()
+
+    # 4b) call_empty 诊断：联网空返回时记录 API 原始响应（v8.17.12 方案 B）
+    # 源码级断言（沙箱无网，不打真实 API）
+    _rs_src = inspect.getsource(dw._responses_web_search)
+    check("call_empty 记录 API 原始响应（request_id + output 预览）",
+          "call_empty" in _rs_src and "request_id" in _rs_src
+          and "output_preview" in _rs_src, _rs_src[:60])
     draft_store.clear()
 
     # 5) 模板作为历史参考保留（不再被调用），快照同步
