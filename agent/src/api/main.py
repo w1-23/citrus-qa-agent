@@ -1096,5 +1096,9 @@ async def context_detail_endpoint(session_id: str, mode: str = "expert"):
 
         return {"session_id": session_id, "segments": segments, "count": len(segments)}
     except Exception as e:
+        # v8.16.4: 细分端点不再 500——内部异常降级为空信封 + error 标记，
+        # 前端据此显示温和失败提示（此前 500 直接落到前端 .catch"细分加载失败"，
+        # 且无法与"暂无上下文"区分）
         logger.error(f"[API] context-detail failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"session_id": session_id, "segments": [], "count": 0,
+                "error": "context_detail_error"}

@@ -161,6 +161,11 @@ class ContextManager:
                     pass
 
         _db_ms = (time.perf_counter() - _t_db0) * 1000
+        # v8.16.4: LTM ∥ hints 并行——hints 只依赖 (query, session_id, mode)，
+        # 与 LTM/resident/prefs 无依赖；先调度 hints 协程，LTM 块 await 期间并发推进，
+        # load 总耗时 ≈ db + max(LTM 块, hints) 而非二者之和（预计再省 0.5-0.8s）
+        _t_hints0 = time.perf_counter()
+        hints_task = asyncio.create_task(self._generate_hints(query, session_id, mode))
         _t_ltm0 = time.perf_counter()
         if self._memory:
             try:
@@ -192,8 +197,12 @@ class ContextManager:
                 logger.debug(f"[ContextManager] preferences skipped: {e}")
 
         _ltm_ms = (time.perf_counter() - _t_ltm0) * 1000
-        _t_hints0 = time.perf_counter()
-        suggestions, format_hint = await self._generate_hints(query, session_id, mode)
+        try:
+            # v8.16.4: 汇合并行 hints 任务（_generate_hints 内部已 fail-soft，此处兜底）
+            suggestions, format_hint = await hints_task
+        except Exception as e:
+            logger.warning(f"[ContextManager] hints parallel await failed: {e}")
+            suggestions, format_hint = [], ""
 
         if suggestions:
             ctx.search_suggestions = suggestions
