@@ -21,6 +21,7 @@
 前端开关即总开关：开关否由请求级 contextvar（web_search_enabled）决定，
 工具执行层据此短路，关闭时零网络请求。
 """
+import asyncio
 import logging
 import re
 import time
@@ -278,3 +279,202 @@ def _format_web_tool_result(tool_name, query, content, status="ok",
     if elapsed_ms > 0:
         header += f"\n**elapsed_ms**: {elapsed_ms:.0f}"
     return f"{header}\n\n{content}"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# v8.16.1 草稿先行：分隔符结构化输出（非 JSON）
+#   DRAFT_ZH（中文展示） / DRAFT_EN（HyDE 复用） / MULTI_QUERY / SUMMARY
+# ═══════════════════════════════════════════════════════════════════════
+
+_STRUCTURED_START = "===STRUCTURED_START==="
+_STRUCTURED_END = "===STRUCTURED_END==="
+
+
+class StructuredParseError(ValueError):
+    """分隔符结构化区块解析失败（字段缺失/格式不符）。"""
+
+
+def _strip_code_fence(block: str) -> str:
+    """防御: 模型偶发包 ``` 围栏时剥离（提示词已约束，此仅为容错）。"""
+    s = block.strip()
+    if s.startswith("```"):
+        s = s[3:]
+        # 去掉语言标记行（如 ```text）
+        nl = s.find("\n")
+        if 0 < nl < 20:
+            s = s[nl + 1:]
+        if s.endswith("```"):
+            s = s[:-3]
+    return s.strip()
+
+
+def _parse_structured_response(raw_text: str) -> dict:
+    """从 DeepSeek 响应中提取结构化字段（分隔符定位，不依赖 JSON 解析）。
+
+    规划 v8.16.1 §5.2 实现：
+      - 联网回答正文 = 结构化区块之前的所有文本（草稿调用中通常为空）
+      - 区块内按行 "字段名: 值"，MULTI_QUERY/SUMMARY 为竖线分隔列表
+      - 必需字段缺失/为空 → 抛 StructuredParseError（调用方 fail-soft 跳过草稿）
+
+    Returns:
+        {"answer": str, "draft_zh": str, "draft_en": str,
+         "multi_query": list[str], "summary": list[str]}
+    """
+    if not raw_text or not raw_text.strip():
+        raise StructuredParseError("结构化区块未找到（空响应）")
+    start_idx = raw_text.find(_STRUCTURED_START)
+    end_idx = raw_text.find(_STRUCTURED_END)
+    if start_idx == -1 or end_idx == -1 or end_idx <= start_idx:
+        raise StructuredParseError("结构化区块未找到")
+    answer_text = raw_text[:start_idx].strip()
+    block = _strip_code_fence(
+        raw_text[start_idx + len(_STRUCTURED_START):end_idx].strip())
+
+    result: dict = {}
+    current_field: str | None = None
+    for line in block.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        known = False
+        key, value = "", ""
+        if ":" in line:
+            key, value = line.split(":", 1)
+            key = key.strip().upper()
+            value = value.strip()
+            if key in ("DRAFT_ZH", "DRAFT_EN", "MULTI_QUERY", "SUMMARY"):
+                known = True
+                current_field = key
+        if known:
+            if key in ("MULTI_QUERY", "SUMMARY"):
+                items = [v.strip() for v in value.split("|") if v.strip()]
+                if items:
+                    result[key] = items
+            else:
+                result[key] = value
+        elif current_field in ("DRAFT_ZH", "DRAFT_EN"):
+            # 续行容错：模型可能把 DRAFT_EN/DRAFT_ZH 段落折行
+            # （无已知字段前缀的行归属当前字段；提示词已约束单行，此为防御）
+            _prev = result.get(current_field, "")
+            result[current_field] = (_prev + "\n" + line).strip() if _prev else line
+
+    required = ("DRAFT_ZH", "DRAFT_EN", "MULTI_QUERY", "SUMMARY")
+    for field in required:
+        if field not in result:
+            raise StructuredParseError(f"缺少字段: {field}")
+        if not result[field]:
+            raise StructuredParseError(f"字段为空: {field}")
+
+    return {
+        "answer": answer_text,
+        "draft_zh": result["DRAFT_ZH"],
+        "draft_en": result["DRAFT_EN"],
+        "multi_query": result["MULTI_QUERY"],
+        "summary": result["SUMMARY"],
+    }
+
+
+def _call_structured_draft(query: str) -> str | None:
+    """非联网 fast 模型调用：一次性产出分隔符结构化区块（DRAFT_ZH/EN/MQ/SUMMARY）。
+
+    与 HyDE 同款防线（v8.15.3c）：空 content 自动重试一次（v4-flash 思维链
+    偶发吃光 max_tokens）；失败返回 None 由调用方 fail-soft。
+    """
+    try:
+        from src.prompts.loader import assemble_structured_output_prompt
+        prompt = assemble_structured_output_prompt()
+        if not prompt:
+            logger.warning("[draft] structured_output.md 模板缺失，草稿跳过")
+            return None
+        from openai import OpenAI
+        client = OpenAI(
+            api_key=settings.RESOLVED_FAST_API_KEY,
+            base_url=settings.RESOLVED_FAST_BASE_URL,
+            timeout=max(int(getattr(settings, "DRAFT_TIMEOUT_SEC", 15) or 15), 5),
+        )
+        answer = ""
+        for attempt in (1, 2):
+            resp = client.chat.completions.create(
+                model=settings.RESOLVED_FAST_MODEL,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": f"用户问题：\n{query}"},
+                ],
+                temperature=0.2,
+                # v8.15.3c 同款：1024 给思维链留余量（结构化区块实际 400-800 tokens）
+                max_tokens=1024,
+            )
+            answer = (resp.choices[0].message.content or "").strip()
+            if answer:
+                break
+            logger.warning(f"[draft] 第 {attempt} 次调用返回为空，重试一次")
+        return answer or None
+    except Exception as e:
+        logger.warning(f"[draft] 结构化草稿调用失败（跳过草稿）: {e}")
+        return None
+
+
+async def draft_worker(query: str, session_id: str) -> None:
+    """v8.16.1 草稿先行后台任务（load 节点 create_task 启动，fire-and-forget）。
+
+    与 supervisor/检索并行：fast 非联网调用 → 解析 → emit draft 事件（前端
+    「预检索草稿·验证中」3-5s 上屏）→ 草稿衍生查询（DRAFT_EN + MULTI_QUERY +
+    SUMMARY）search_multi 多路检索 → 结果暂存 draft_store，retrieve-agent 的
+    run_agent 在组装确定性回执前 pop 并入证据（best-effort，失败零阻塞）。
+
+    注意: 本任务执行严格 fail-soft——任何异常只记日志，绝不阻塞主链路。
+    """
+    if not getattr(settings, "DRAFT_ENABLED", True):
+        return
+    query = (query or "").strip()
+    if not query:
+        return
+    try:
+        raw = await asyncio.to_thread(_call_structured_draft, query)
+        if not raw:
+            return
+        parsed = _parse_structured_response(raw)
+    except StructuredParseError as e:
+        logger.info(f"[draft] 解析失败，跳过草稿: {e}")
+        return
+    except Exception as e:
+        logger.warning(f"[draft] 草稿生成异常（跳过）: {e}")
+        return
+
+    label = str(getattr(settings, "DRAFT_LABEL", "预检索草稿·验证中") or "预检索草稿·验证中")
+    max_chars = max(int(getattr(settings, "DRAFT_MAX_CHARS", 300) or 300), 20)
+    draft_zh = parsed["draft_zh"][:max_chars]
+    try:
+        from src.core.progress_bus import emit_draft
+        emit_draft(draft_zh, label)
+        logger.info(f"[draft] 草稿已推送前端 ({len(draft_zh)} 字, q={query[:40]!r})")
+    except Exception as e:
+        logger.debug(f"[draft] emit_draft 失败: {e}")
+
+    if not getattr(settings, "DRAFT_EXTRA_RETRIEVAL", True):
+        return
+    max_angles = max(int(getattr(settings, "DRAFT_MAX_ANGLES", 3) or 3), 1)
+    summary_points = max(int(getattr(settings, "DRAFT_SUMMARY_POINTS", 3) or 3), 1)
+    queries = (
+        [parsed["draft_en"]]
+        + parsed["multi_query"][:max_angles]
+        + parsed["summary"][:summary_points]
+    )
+    try:
+        from src.core.draft_store import draft_store
+        from src.retrieval.multi_retriever import MultiBatchRetriever
+        from src.core.tracing import get_request_id
+        rag = MultiBatchRetriever()
+        results = await asyncio.to_thread(rag.search_multi, queries)
+        if not results:
+            logger.info("[draft] 多路检索无结果，跳过证据并入")
+            return
+        draft_store.put(session_id, get_request_id(), {
+            "draft_zh": draft_zh,
+            "queries": queries,
+            "results": results,
+        })
+        logger.info(f"[draft] 多路检索完成 {len(results)} 条 · "
+                    f"{len(queries)} 路查询 → 待并入证据回执")
+    except Exception as e:
+        logger.warning(f"[draft] 多路检索/暂存失败（不阻塞）: {e}")

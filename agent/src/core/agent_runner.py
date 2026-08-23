@@ -154,7 +154,8 @@ def build_evidence_report(collected_artifacts: dict, query: str,
                           rag_search_count: int,
                           budget_blocked: int = 0,
                           dedup_blocked: int = 0,
-                          web_unavailable: bool = False) -> str:
+                          web_unavailable: bool = False,
+                          draft_extra_count: int = 0) -> str:
     """确定性证据回执（v8.4.6，纯函数可单测）。
 
     检索回执由代码组装而非模型转述——保证"管道而非漏斗"：
@@ -174,6 +175,14 @@ def build_evidence_report(collected_artifacts: dict, query: str,
         f"- 检索目标: {str(query)[:200]}",
         "",
     ]
+    # v8.16.1: 草稿先行多路检索补充（DRAFT_EN + MULTI_QUERY + SUMMARY 随
+    # load 后并行产出并入，supervisor 可见该路证据来源与量级）
+    if draft_extra_count:
+        lines.append(
+            f"- 草稿多路检索补充: {draft_extra_count} 条证据"
+            "（DRAFT_EN + MULTI_QUERY + SUMMARY 并行产出，已并入 [n] 清单）"
+        )
+        lines.append("")
     if budget_blocked or dedup_blocked:
         lines.append(
             f"- [SEARCH_BUDGET] 预算拦截: {budget_blocked} 次检索未执行 "
@@ -700,6 +709,23 @@ async def run_agent(
     # 直接进上下文（ToolMessage → 历史可见，追问无需重检索）——不再依赖模型转述
     # （"管道而非漏斗"，历史模型报告 34~176 字极短回执由此根治）。
     if agent_name == "retrieve-agent":
+        # v8.16.1: 草稿先行证据并入——草稿 worker 的多路检索结果（DRAFT_EN +
+        # MULTI_QUERY + SUMMARY，load 后并行产出）pop 进证据清单，随确定性回执
+        # 呈现给 supervisor。best-effort：未就绪/失败不等待、不阻塞主链路。
+        draft_extra_count = 0
+        try:
+            from src.core.tracing import get_request_id
+            from src.core.draft_store import draft_store
+            _draft_extra = draft_store.pop(session_id, get_request_id())
+            if _draft_extra and _draft_extra.get("results"):
+                _items = [r for r in _draft_extra["results"] if r]
+                if _items:
+                    collected_artifacts["main_results"].extend(_items)
+                    draft_extra_count = len(_items)
+                    logger.info(
+                        f"[AgentRunner] 并入草稿多路检索证据 {draft_extra_count} 条")
+        except Exception as _e:
+            logger.debug(f"[AgentRunner] 草稿证据并入跳过: {_e}")
         budget_blocked = sum(
             1 for m in placeholder_results.values()
             if str(getattr(m, "content", "") or "").startswith("[SEARCH_BUDGET]"))
@@ -709,7 +735,8 @@ async def run_agent(
         code_report = build_evidence_report(
             collected_artifacts, query, rag_search_count,
             budget_blocked=budget_blocked, dedup_blocked=dedup_blocked,
-            web_unavailable=(_web_fail_streak >= 2))
+            web_unavailable=(_web_fail_streak >= 2),
+            draft_extra_count=draft_extra_count)
         if result_content:
             logger.info(
                 f"[AgentRunner] retrieve-agent 模型自述({len(result_content)} chars) "

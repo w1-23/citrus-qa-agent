@@ -42,6 +42,10 @@ AGENT_FILES = {
     "analyze-agent": "agents/analyze-agent.md",
 }
 
+# v8.16.1: 草稿先行——分隔符结构化输出模板（独立于系统提示词装配，
+# 仅供草稿 fast 调用使用；不进入 assemble_system_prompt，不动静态前缀）
+STRUCTURED_OUTPUT_FILE = "structured_output.md"
+
 VALID_FORMATS = set(FORMAT_FILES.keys())
 VALID_AGENTS = set(AGENT_FILES.keys())
 
@@ -151,6 +155,15 @@ def build_dynamic_blocks(
         if cards:
             blocks.append(f"<output_guide>\n{cards}\n</output_guide>")
     return "\n\n".join(blocks)
+
+
+def assemble_structured_output_prompt() -> str:
+    """v8.16.1: 草稿先行结构化输出模板（===STRUCTURED_START=== 分隔符格式，非 JSON）。
+
+    仅草稿 fast 调用使用（deepseek_web.draft_worker）；模板缺失时返回空串，
+    调用方据此跳过草稿特性（fail-soft，不阻塞主链路）。
+    """
+    return _read_prompt_cached(STRUCTURED_OUTPUT_FILE)
 
 
 def assemble_agent_prompt(

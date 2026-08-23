@@ -583,6 +583,18 @@ footer {
 .plan-body { margin-top: 6px; line-height: 1.7; }
 .plan-item { color: var(--text-secondary); word-break: break-word; }
 
+/* v8.16.1 草稿先行：预检索草稿面板（灰底 + 标签；首 text 事件清空替换） */
+.draft-panel {
+  background: var(--bg-elevated);
+  border: 1px dashed var(--border-hairline);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+.draft-label { font-size: 11px; color: var(--text-muted); font-weight: 600; margin-bottom: 6px; }
+.draft-body { font-size: 13px; color: var(--text-secondary); line-height: 1.65; white-space: pre-wrap; word-break: break-word; }
+.draft-verified { font-size: 11px; color: var(--text-muted); margin: 2px 0 10px; }
+
 /* v8.5.0 开源版：首次启动 API Key 引导遮罩 */
 .api-setup-overlay {
   position: fixed; inset: 0; z-index: 10000;
@@ -2428,6 +2440,10 @@ async function sendMsg(isFollowUp) {
   var fullText = '';
   var isAnswerStarted = false;
   var renderPending = false;
+  /* v8.16.1 草稿先行：draftShown=草稿面板正在展示；draftWasShown=本轮出现过草稿
+     （首 text 事件清空草稿面板；done 时显示「已通过检索验证」标记） */
+  var draftShown = false;
+  var draftWasShown = false;
 
   var _icons = {thinking: '💭', tool: '⚙', agent: '◆', answer: '…'};
   var _toolCount = 0;   // v8.10h: 本轮工具执行次数（完成摘要保留用）
@@ -2578,8 +2594,27 @@ async function sendMsg(isFollowUp) {
         appendTerminal('── 子Agent「' + (data.agent_name||'') + '」启动 ── ' + (data.task||''));
         break;
       case 'text':
+        // v8.16.1: 收到正式回答首字 → 清空草稿面板（替换为正式回答）
+        if (draftShown) {
+          draftShown = false;
+          var _dpEl = answerDiv.querySelector('.draft-panel');
+          if (_dpEl) _dpEl.remove();
+        }
         if (!isAnswerStarted) { isAnswerStarted=true; clearTimeout(spinnerTimeout); updateStatus('answer','生成回答中...'); answerDiv.style.display=''; collapseReasoning(); }
         fullText+=data.content; updateContextTokens((data.content||'').length * 0.7); renderAnswer(); break;
+      case 'draft':
+        // v8.16.1: 草稿先行——灰底草稿面板 + 「预检索草稿·验证中」标签
+        if (!draftShown) {
+          draftShown = true; draftWasShown = true;
+          answerDiv.style.display = '';
+          var dp = document.createElement('div');
+          dp.className = 'draft-panel';
+          dp.innerHTML = '<div class="draft-label">预检索草稿·验证中</div><div class="draft-body"></div>';
+          answerDiv.appendChild(dp);
+        }
+        var dbEl = answerDiv.querySelector('.draft-body');
+        if (dbEl && data.content) dbEl.textContent = data.content;
+        break;
       case 'context_status': renderContextPanel(data); break;
       case 'status': handleStatusEvent(data); break;
       case 'context_usage': updateContextTokens((data.delta != null ? data.delta : data.total) || 0); break;
@@ -2621,6 +2656,13 @@ async function sendMsg(isFollowUp) {
         }
         if (!fullText&&data.answer) fullText=data.answer;
         if (fullText) answerDiv.innerHTML=renderMarkdownSafe(fullText.replace(/__NEED_COMPLEX__/g,''));
+        // v8.16.1: 草稿曾展示且最终回答存在 → 顶部「已通过检索验证」标记（草稿替换语义闭环）
+        if (draftWasShown && fullText) {
+          var dvb = document.createElement('div');
+          dvb.className = 'draft-verified';
+          dvb.textContent = '✅ 草稿已通过检索验证，以上为最终回答';
+          answerDiv.insertBefore(dvb, answerDiv.firstChild);
+        }
         if (fullText.indexOf('__NEED_COMPLEX__')>=0) {
           var uc=document.createElement('div');uc.style.cssText='margin-top:12px;text-align:center';
           var ub=document.createElement('button');ub.className='need-complex-btn';ub.textContent='信息不足，切换到专家模式深入检索';
@@ -2647,6 +2689,8 @@ async function sendMsg(isFollowUp) {
     fullText = '';
     isAnswerStarted = false;
     renderPending = false;
+    draftShown = false;
+    draftWasShown = false;
     _toolCount = 0;
     answerDiv.style.display = 'none';
     answerDiv.innerHTML = '';
