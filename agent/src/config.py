@@ -117,10 +117,10 @@ class Settings(BaseSettings):
     DRAFT_MAX_CHARS: int = Field(default_factory=lambda: _yaml_val("draft", "max_chars", default=800))
     # v8.16.4: 草稿快调用关思维链开关（HyDE/hints 同款参数）——思维链吃预算→区块尾部
     # 截断→解析失败→降级 200 字的防线上限；厂商参数不兼容时 fail-soft 退回默认重试。
-    # v8.17.7: 默认改为 False（开启思维链）——用户实机诊断关思维链正是提取标签易错
-    # （省略 ===STRUCTURED=== 包裹）根因；v4-flash 带推理后格式更稳，max_tokens 2048
-    # 已为思维链留足余量。
-    DRAFT_THINKING_OFF: bool = Field(default_factory=lambda: _yaml_val("draft", "thinking_off", default=False))
+    # v8.17.14: 默认改为 True（关闭思维链）——用户决策：草稿仅作预检索参考/素材，
+    # 不产出最终答案，推理不增值只拖慢首 token；v8.17.11 回退自由文本后不再依赖
+    # 三区块标签格式（v8.17.7 开思维链是为标签稳定，其前提已消失）。
+    DRAFT_THINKING_OFF: bool = Field(default_factory=lambda: _yaml_val("draft", "thinking_off", default=True))
     # 草稿 HTTP 超时（秒）——非联网调用 2-5s，留足余量防慢响应被自掐
     DRAFT_TIMEOUT_SEC: int = Field(default_factory=lambda: _yaml_val("draft", "timeout_sec", default=15))
     # v8.16.3: 草稿调用输出上限——真空输出根因（v4-flash 思维链吃光 max_tokens，

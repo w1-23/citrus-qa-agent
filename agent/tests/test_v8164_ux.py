@@ -45,17 +45,29 @@ def test_v8164_draft_nothink():
     check("fast 助手被草稿与提取共用",
           "def _call_structured_draft" in inspect.getsource(dw)
           and "def _call_extract_from_answer" in inspect.getsource(dw))
-    check("DRAFT_THINKING_OFF 配置默认关（v8.17.7 开思维链）",
-          settings.DRAFT_THINKING_OFF is False, str(settings.DRAFT_THINKING_OFF))
+    check("DRAFT_THINKING_OFF 配置默认开（v8.17.14 关思维链）",
+          settings.DRAFT_THINKING_OFF is True, str(settings.DRAFT_THINKING_OFF))
     check("DRAFT_TIMEOUT_SEC = 25（有界余量，不归零）",
           settings.DRAFT_TIMEOUT_SEC == 25, str(settings.DRAFT_TIMEOUT_SEC))
     yaml = (ROOT / "config.yaml").read_text(encoding="utf-8")
-    check("yaml: thinking_off: false + timeout_sec: 25",
-          "thinking_off: false" in yaml and "timeout_sec: 25" in yaml)
+    check("yaml: thinking_off: true + timeout_sec: 25",
+          "thinking_off: true" in yaml and "timeout_sec: 25" in yaml)
     cfg = (ROOT / "src/config.py").read_text(encoding="utf-8")
     check("config.py: DRAFT_THINKING_OFF 字段存在", "DRAFT_THINKING_OFF" in cfg)
-    check("config.py: DRAFT_THINKING_OFF 默认 False", "default=False" in cfg
+    check("config.py: DRAFT_THINKING_OFF 默认 True（v8.17.14 关思维链）",
+          "default=True" in cfg
           and "DRAFT_THINKING_OFF" in cfg)
+    # v8.17.14: 联网草稿路径（_responses_web_search）同样关思维链 + fail-soft
+    rsrc = inspect.getsource(dw._responses_web_search)
+    check("联网草稿调用 thinking:disabled（开启时下发）",
+          '"thinking": {"type": "disabled"}' in rsrc)
+    check("联网草稿参数被拒 → 退回默认参数重试一次（防草稿全丢）",
+          "退回默认参数重试一次" in rsrc)
+    check("联网草稿日志含 thinking 标记（off/on）", "thinking={'off' if 'thinking' in payload else 'on'}" in rsrc
+          or "thinking=" in rsrc)
+    # v8.17.14: 诊断盲区修复——summary 空但 calls 有 → 记录原始响应
+    check("联网返回正文空但含引用 → 记录原始响应（诊断盲区修复）",
+          "联网返回正文为空但含引用" in rsrc and "request_id" in rsrc)
 
 
 # ── VF-37 context-detail 端点降级信封 ─────────────────────────────

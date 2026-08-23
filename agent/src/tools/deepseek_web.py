@@ -183,6 +183,13 @@ def _responses_web_search(input_prompt: str, context: str = "") -> tuple[str, li
         "tools": [{"type": "web_search"}],
         "stream": False,
     }
+    # v8.17.14（用户决策）：草稿路径关闭思维链——草稿只作「预检索参考/提取素材」，
+    # 不产出最终答案，推理不增值反而拖慢首 token（实测 v4-flash 带思维链首字延迟
+    # 显著；用户原话"反正后面的 hyde 都不基于他生成"）。与 _fast_llm_call 同款
+    # fail-soft：参数被拒 → 退回默认参数重试一次，防"无输出"。
+    if getattr(settings, "DRAFT_THINKING_OFF", False):
+        # 与 _fast_llm_call 同源字面量（可被 VF-36 源码断言锚定）
+        payload.update({"thinking": {"type": "disabled"}})
     headers = {
         "Authorization": f"Bearer {settings.RESOLVED_MAIN_API_KEY or settings.MAIN_API_KEY}",
         "Content-Type": "application/json",
@@ -190,13 +197,40 @@ def _responses_web_search(input_prompt: str, context: str = "") -> tuple[str, li
     url = _responses_endpoint()
     _to = _web_http_timeout()
     logger.info(f"[draft-web] Responses 调用: {url} model={payload['model']} "
-                f"timeout={_to}s fmt=free-text ctx={'yes' if context else 'no'}")
+                f"timeout={_to}s fmt=free-text ctx={'yes' if context else 'no'} "
+                f"thinking={'off' if 'thinking' in payload else 'on'}")
+    # v8.17.14: thinking:disabled 参数被拒（HTTP 400/422）→ 去掉后原样重试一次
+    # （与 _fast_llm_call 同款 fail-soft，防"参数不兼容→草稿全丢"）
     resp = requests.post(url, headers=headers, json=payload, timeout=_to)
+    if resp.status_code != 200 and "thinking" in payload:
+        _e_txt = resp.text[:300]
+        if resp.status_code in (400, 422):
+            logger.warning(
+                f"[draft-web] thinking:disabled 参数被拒 "
+                f"(HTTP {resp.status_code}: {_e_txt})，退回默认参数重试一次")
+            payload.pop("thinking", None)
+            resp = requests.post(url, headers=headers, json=payload, timeout=_to)
     if resp.status_code != 200:
         raise RuntimeError(
             f"Responses HTTP {resp.status_code}: {resp.text[:300]}")
     body = resp.json()
     summary, calls, _meta = _parse_response_output(body.get("output") or [])
+    if not summary and calls:
+        # v8.17.14 诊断盲区修复：calls 非空但 summary 空（模型只检索未总结）——
+        # 此前不触发 raise 前的 call_empty 日志（仅记 request_id/output 双空时），
+        # 实机 21:48 只见「联网回答无正文」而查不到原始响应。此处补记录后
+        # 返回 ("", calls) 保持 call_empty 语义（draft_worker 回退快速调用）。
+        _debug_s = {
+            "status_code": resp.status_code,
+            "request_id": str(body.get("id", "") or "")[:40],
+            "output_len": len(body.get("output") or []),
+            "calls": len(calls),
+            "output_preview": str(body.get("output") or [])[:300],
+        }
+        logger.warning(
+            f"[draft-web] 联网返回正文为空但含引用（calls={len(calls)}）→ "
+            f"回退快速调用 | raw={_debug_s}")
+        return summary, calls
     if not summary and not calls:
         # v8.17.12（用户方案 B）：call_empty 不再仅仅是 raise——记录 API 原始
         # 响应（request_id/output 前 500 字符）供真机定位（配额/拒答/参数遗漏）
