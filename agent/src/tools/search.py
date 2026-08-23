@@ -373,12 +373,18 @@ def citrus_rag_search(query: str) -> tuple[str, dict]:
             from src.core.progress_bus import emit_progress
             emit_progress("tool_progress", {"message": "正在构建语义假设 (HyDE)...", "tool_call_id": ""})
         except Exception: pass
-        hyde_answer = _cached_hyde(query)
-        if hyde_answer:
-            logger.info(f"[HyDE] generated {len(hyde_answer)} chars for: {query[:60]}...")
+        hyde_parsed = _cached_hyde_parsed(query)
+        if hyde_parsed:
+            # v8.16.3: HyDE 结构化——假想段落 + 3×Multi-Query + 3~5 Summary 全路
+            # 并发检索（每路查询数 1 → 7-9），召回与证据密度提升
+            _hyd_q = 1 + len(hyde_parsed["multi_query"]) + len(hyde_parsed["summary"])
+            logger.info(f"[HyDE] structured {len(hyde_parsed['hyde'])} chars · "
+                        f"{_hyd_q} 路查询 for: {query[:60]}...")
             try:
                 from src.core.progress_bus import emit_progress
-                emit_progress("tool_progress", {"message": f"HyDE 生成完毕 ({len(hyde_answer)}字), 开始向量检索...", "tool_call_id": ""})
+                emit_progress("tool_progress", {
+                    "message": f"HyDE 生成完毕 ({len(hyde_parsed['hyde'])}字, {_hyd_q} 路查询), 开始向量检索...",
+                    "tool_call_id": ""})
             except Exception: pass
         else:
             logger.debug(f"[HyDE] fallback for: {query[:60]}...")
@@ -394,8 +400,17 @@ def citrus_rag_search(query: str) -> tuple[str, dict]:
             cache_key = _rag_cache_key(query, bool(getattr(settings, 'RAG_HYDE_ENABLED', True)), rag)
         t0 = time.perf_counter()
 
-        if hyde_answer:
-            results = rag.search_hyde(original_query=query, hyde_answer=hyde_answer)
+        if hyde_parsed:
+            # 结构化 HyDE 全路并发；queries[0]=HyDE 段作为 rerank 锚（语义≈原始问题）
+            queries = [hyde_parsed["hyde"]] \
+                + hyde_parsed.get("multi_query", [])[:3] \
+                + hyde_parsed.get("summary", [])[:5]
+            if len(queries) < 2:
+                # v8.16.3c: 结构化仅剩 HyDE 段（多路/要点缺失）→ 补原始查询保底多路
+                queries.append(query)
+                logger.info(f"[HyDE] 结构化仅 HyDE 段，补充原始查询保底 → "
+                            f"{len(queries)} 路查询")
+            results = rag.search_multi(queries)
         else:
             results = rag.search(query)
 
@@ -466,30 +481,23 @@ import hashlib
 _hyde_cache: dict[str, str] = {}
 _HYDE_CACHE_MAX = 500
 
-def _cached_hyde(query: str) -> str | None:
-    key = hashlib.md5(query.strip().encode("utf-8")).hexdigest()
-    if key in _hyde_cache:
-        return _hyde_cache[key]
-    answer = _generate_hyde_answer(query)
-    if answer and len(_hyde_cache) >= _HYDE_CACHE_MAX:
-        _hyde_cache.pop(next(iter(_hyde_cache)))
-    if answer:
-        _hyde_cache[key] = answer
-    return answer
-
+# v8.16.3: 结构化 HyDE——一次 fast 调用产出假想段落(hyde) + 3×多路查询 + 3~5 要点，
+# 全部喂 search_multi 并发检索（每路 7-9 查询，替代原单路 HyDE ~1800 字）。
 _HYDE_PROMPT = (
     "You are a scientific literature retrieval assistant for citrus research.\n"
-    "Given a user question, generate a short hypothetical answer paragraph "
-    "that might appear in a citrus research paper.\n\n"
+    "Given a user question, produce EXACTLY three labeled lines in English.\n\n"
+    "HyDE: <a hypothetical 200-500 word paragraph that might appear in a citrus "
+    "research paper, fully answering the question; technical English>\n"
+    "Multi-Query: <q1> | <q2> | <q3>   (3 English query phrases, 15-30 chars "
+    "each, different angles)\n"
+    "Summary: <s1> | <s2> | <s3>   (3-5 key English points extracted from the "
+    "HyDE paragraph, 10-20 chars each)\n\n"
     "Rules:\n"
-    "1. Output in English ONLY, regardless of the question's language. "
-    "If the question is in Chinese, first translate the concepts into standard "
-    "English scientific terms, then write the paragraph in English.\n"
-    "2. Keep it under 250 words.\n"
-    "3. Do not invent specific numbers, p-values, gene IDs, accession numbers, or citations.\n"
-    "4. If uncertain, use generic academic phrasing.\n"
-    "5. Include likely biological mechanisms, gene families, pathways, and domain terms.\n"
-    "6. Output only the paragraph, no preamble.\n"
+    "1. English ONLY, regardless of the question's language. If the question is "
+    "in Chinese, first translate the concepts into standard English scientific terms.\n"
+    "2. Do not invent specific numbers, p-values, gene IDs, accession numbers, or citations.\n"
+    "3. Pipe-separated items with no spaces around pipes.\n"
+    "4. Output only these three lines, no preamble, no markdown fences.\n"
 )
 
 
@@ -502,13 +510,50 @@ def _is_english_answer(text: str) -> bool:
     return cjk / max(len(text), 1) <= 0.05
 
 
-def _generate_hyde_answer(query: str) -> str | None:
-    """Generate a HyDE (Hypothetical Document Embedding) answer via fast LLM.
+def parse_hyde_structured(raw: str) -> dict | None:
+    """v8.16.3: 拆解 HyDE 结构化输出（HyDE:/Multi-Query:/Summary: 三行）。
 
-    v8.15.3c: 空内容重试一次——v4-flash 默认思维链偶发把 max_tokens 预算吃光、
-    返回空 content（agent.log 2026-08-21 19:45 同请求连续两轮"生成结果为空"即此现象，
-    相邻轮次 1591/1476 chars 均成功 → 偶发而非系统性故障）。重试后仍空才降级
-    基础检索；异常/非英文不重试（确定性失败，重试无意义）。
+    容错：剥代码围栏；HyDE 段落可跨行折叠（模型换行不断词）；缺失字段降为空列表；
+    HyDE 段缺失/过短(<30)/非英文 → None（调用方降级基础检索）。
+    """
+    if not raw or not raw.strip():
+        return None
+    text = re.sub(r"^```[^\n]*\n?", "", raw.strip())
+    text = re.sub(r"\n```", "", text)
+    result: dict = {"hyde": "", "multi_query": [], "summary": []}
+    current: str | None = None
+    for ln in text.split("\n"):
+        s = ln.strip()
+        if not s:
+            continue
+        low = s.lower()
+        if low.startswith("hyde:"):
+            result["hyde"] = s[5:].strip()
+            current = "hyde"
+        elif low.startswith("multi-query:"):
+            result["multi_query"] = [q.strip() for q in s[12:].split("|") if q.strip()]
+            current = "mq"
+        elif low.startswith("summary:"):
+            result["summary"] = [p.strip() for p in s[8:].split("|") if p.strip()]
+            current = "sum"
+        elif current == "hyde":
+            result["hyde"] = (result["hyde"] + " " + s).strip()
+        # Multi-Query / Summary 续行忽略（提示词约束单行）
+    result["hyde"] = re.sub(r"\s+", " ", result["hyde"]).strip()
+    if not result["hyde"] or len(result["hyde"]) < 30:
+        return None
+    if not _is_english_answer(result["hyde"]):
+        return None
+    return result
+
+
+def _generate_hyde_structured(query: str) -> str | None:
+    """Generate structured HyDE (HyDE + Multi-Query + Summary) via fast LLM.
+
+    v8.15.3c 同款防线: 空 content 重试一次（v4-flash 思维链偶发吃光 max_tokens）。
+    返回结构化原文文本（调用方 parse_hyde_structured 拆解）。
+    兼容: 模型忽略模板只输出英文纯段落 → 仍返回（调用方退化为单路 HyDE）;
+    非英文/不可解析 → None 回退基础检索（确定性失败不重试）。
     """
     try:
         from openai import OpenAI
@@ -518,32 +563,69 @@ def _generate_hyde_answer(query: str) -> str | None:
             timeout=15,  # v8.3.1: 3s 太短导致 flash 生成假想答案频繁超时降级（每次检索白等+丢 hyde_dense 一路）
         )
         answer = ""
+        extra: dict = {}
+        if getattr(settings, "HYDE_THINKING_OFF", True):
+            # v8.16.3c: 实测 22:02:33/44 连续两次真空输出（成功调用但 content 为空，
+            # "第 N 次返回为空"日志实证）——v4-flash 思维链吃光预算（draft call
+            # 1024→2048 同款事故）。DeepSeek chat 端点关闭思维链参数；不兼容时抛
+            # 异常 → 走下方 except fail-soft 回退基础检索（最差=现状 1 路查询）
+            extra["extra_body"] = {"thinking": {"type": "disabled"}}
         for attempt in (1, 2):
             resp = client.chat.completions.create(
                 model=settings.RESOLVED_FAST_MODEL,
                 messages=[
                     {"role": "system", "content": _HYDE_PROMPT},
-                    {"role": "user", "content": f"User question:\n{query}\n\nHypothetical answer paragraph:"},
+                    {"role": "user", "content": f"User question:\n{query}\n\nStructured output:"},
                 ],
                 temperature=0.2,
                 max_tokens=settings.HYDE_MAX_TOKENS,
+                **extra,
             )
             answer = (resp.choices[0].message.content or "").strip()
             if answer:
                 break
             logger.warning(f"[HyDE] 第 {attempt} 次生成结果为空，重试一次")
-        # v8.4.2: 强制英文校验（中文 query 时常跟随生成中文，破坏英文向量匹配）
         if not answer:
             logger.warning("[HyDE] 两次生成均为空，回退基础检索")
             return None
-        if not _is_english_answer(answer):
+        parsed = parse_hyde_structured(answer)
+        if parsed is None and _is_english_answer(answer):
+            # 旧式纯段落兼容：忽略模板只输段落 → 单路 HyDE 退化
+            logger.info(f"[HyDE] 结构化模板未遵守（纯段落），按单路 HyDE 兼容: {answer[:40]!r}...")
+            return answer
+        if parsed is None:
             logger.warning(
-                f"[HyDE] 输出非英文（CJK 占比过高），回退基础检索: {answer[:60]!r}")
+                f"[HyDE] 输出不可解析（非英文/缺 HyDE 段），回退基础检索: {answer[:60]!r}")
             return None
-        return answer if len(answer) >= 30 else None
+        return answer.strip()
     except Exception as e:
         logger.warning(f"[HyDE] generation failed (fallback to basic retrieval): {e}")
         return None
+
+
+def _cached_hyde(query: str) -> str | None:
+    key = hashlib.md5(query.strip().encode("utf-8")).hexdigest()
+    if key in _hyde_cache:
+        return _hyde_cache[key]
+    answer = _generate_hyde_structured(query)
+    if answer and len(_hyde_cache) >= _HYDE_CACHE_MAX:
+        _hyde_cache.pop(next(iter(_hyde_cache)))
+    if answer:
+        _hyde_cache[key] = answer
+    return answer
+
+
+def _cached_hyde_parsed(query: str) -> dict | None:
+    """取缓存/生成结构化 HyDE → 拆解；旧式纯段落退化为单路 {hyde, [], []}。"""
+    raw = _cached_hyde(query)
+    if not raw:
+        return None
+    parsed = parse_hyde_structured(raw)
+    if parsed:
+        return parsed
+    if _is_english_answer(raw):
+        return {"hyde": raw, "multi_query": [], "summary": []}
+    return None
 
 # 2. Web search provider
 

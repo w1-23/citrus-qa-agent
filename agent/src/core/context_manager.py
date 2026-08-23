@@ -64,7 +64,11 @@ class ContextManager:
         self._memory = memory_store
         self._budget = budget
         self._fast_llm = None
+        self._fast_llm_nothink = None
         self._compact_llm = None
+        # v8.16.3: format_hint 会话级缓存（(session_id, mode) → 非 fallback 格式），
+        # 追问轮直接复用，省一次 fast 调用；上限 256 防会话膨胀
+        self._hint_fmt_cache: dict[tuple, str] = {}
         if budget:
             from src.guardrails.history_compactor import compact_messages
             async def _compact(msgs, query="", prior_summary=""):
@@ -77,7 +81,22 @@ class ContextManager:
                 )
             budget.set_compact_fn(_compact)
 
-    def _get_fast_llm(self):
+    def _get_fast_llm(self, thinking_off: bool = False):
+        # v8.16.3: hints 属高频低价值 fast 调用——关闭思维链（v8.15.3 同款
+        # model_kwargs={"thinking":{"type":"disabled"}})；实测日志 hints_ms 38s
+        # 即 v4-flash 思维链吃掉整个 load 段。失败向下游 except 兜底（fail-soft）。
+        if thinking_off:
+            if self._fast_llm_nothink is None:
+                from src.core.llm_pool import get_llm as _pool_get_llm
+                self._fast_llm_nothink = _pool_get_llm(
+                    model=settings.RESOLVED_FAST_MODEL,
+                    api_key=settings.RESOLVED_FAST_API_KEY,
+                    base_url=settings.RESOLVED_FAST_BASE_URL,
+                    temperature=0,
+                    timeout=12,
+                    thinking_off=True,
+                )
+            return self._fast_llm_nothink
         if self._fast_llm is None:
             from src.core.llm_pool import get_llm as _pool_get_llm
             self._fast_llm = _pool_get_llm(
@@ -174,7 +193,7 @@ class ContextManager:
 
         _ltm_ms = (time.perf_counter() - _t_ltm0) * 1000
         _t_hints0 = time.perf_counter()
-        suggestions, format_hint = await self._generate_hints(query)
+        suggestions, format_hint = await self._generate_hints(query, session_id, mode)
 
         if suggestions:
             ctx.search_suggestions = suggestions
@@ -263,11 +282,18 @@ class ContextManager:
         return view_msgs, False
 
     async def _generate_hints(
-        self, query: str
+        self, query: str, session_id: str | None = None, mode: str | None = None,
     ) -> tuple[list[str], str | None]:
+        """v8.16.3: 检索建议 + 格式预判。
+
+        合并为一次 fast 调用（JSON 双键输出）；format_hint 按 (session, mode)
+        缓存——追问轮省去 format 部分（原两条快 LLM 并行链 → 首轮 1 次调用、
+        追问轮 1 次调用）。两条都 fail-soft：异常 → 空建议 / fallback。
+        fallback 不缓存（闲聊/不确定抢锁会话格式会污染后续实质问题的预判）。
+        """
         async def gen_suggestions() -> list[str]:
             try:
-                llm = self._get_fast_llm()
+                llm = self._get_fast_llm(thinking_off=True)
                 resp = await llm.ainvoke([
                     SystemMessage(content=(
                         "Extract 2-3 English search angles (5-15 keywords each) "
@@ -289,31 +315,58 @@ class ContextManager:
                 logger.debug(f"[ContextManager] suggestions gen failed: {e}")
                 return []
 
-        async def gen_format_hint() -> str | None:
+        async def gen_merged() -> tuple[list[str], str | None]:
+            """一次调用同轮输出 suggestions + format（省一条 fast LLM 往返）。"""
             try:
-                llm = self._get_fast_llm()
+                llm = self._get_fast_llm(thinking_off=True)
                 resp = await llm.ainvoke([
                     SystemMessage(content=(
-                        "Classify output format. Output exactly ONE word:\n"
-                        "fact / compare / method / design / review / task / fallback\n"
-                        "fact: factual query | compare: comparison | method: mechanism/pathway\n"
-                        "design: experiment design | review: paper/review writing | task: file ops\n"
-                        "fallback: uncertain or chitchat"
+                        "From the user's query, extract search angles and "
+                        "classify output format. Output a JSON object with "
+                        "exactly two keys:\n"
+                        '{"suggestions": ["2-3 English search angles (5-15 '
+                        'keywords each)", ...], "format": "one_of"}\n'
+                        "If the input is greeting/chitchat, suggestions must be [].\n"
+                        'format values: "fact" factual query | "compare" comparison | '
+                        '"method" mechanism/pathway | "design" experiment design | '
+                        '"review" paper/review writing | "task" file operations | '
+                        '"fallback" uncertain or chitchat\n'
+                        'Example: {"suggestions": ["citrus HLB integrated control", '
+                        '"vector psyllid management economics"], "format": "method"}'
                     )),
                     HumanMessage(content=query),
                 ])
-                hint = resp.content.strip().lower()
+                import json, re
+                content = resp.content.strip()
+                content = re.sub(r"```\w*\n?", "", content)
+                content = re.sub(r"\n```", "", content)
+                data = json.loads(content)
+                if not isinstance(data, dict):
+                    return [], None
+                suggestions_raw = data.get("suggestions", [])
+                suggestions = ([s for s in suggestions_raw[:3]
+                                if isinstance(s, str) and s]
+                               if isinstance(suggestions_raw, list) else [])
                 valid = {"fact", "compare", "method", "design", "review", "task", "fallback"}
-                return hint if hint in valid else "fallback"
+                fmt = str(data.get("format", "")).strip().lower()
+                return suggestions, (fmt if fmt in valid else "fallback")
             except Exception as e:
-                logger.debug(f"[ContextManager] format_hint gen failed: {e}")
-                return None
+                logger.debug(f"[ContextManager] merged hints gen failed: {e}")
+                return [], None
 
-        s_task = asyncio.create_task(gen_suggestions())
-        f_task = asyncio.create_task(gen_format_hint())
-        suggestions = await s_task
-        format_hint = await f_task
-        return suggestions, format_hint
+        cache_key = (session_id, mode) if (session_id and mode) else None
+        cached_fmt = self._hint_fmt_cache.get(cache_key) if cache_key else None
+        if cached_fmt:
+            # 追问轮：format 已缓存 → 只补 suggestons（1 次调用，省 format 段 100%）
+            suggestions = await gen_suggestions()
+            return suggestions, cached_fmt
+
+        suggestions, fmt = await gen_merged()
+        if cache_key and fmt and fmt != "fallback":
+            if len(self._hint_fmt_cache) >= 256:
+                self._hint_fmt_cache.pop(next(iter(self._hint_fmt_cache)))
+            self._hint_fmt_cache[cache_key] = fmt
+        return suggestions, fmt
 
 
 def build_human_message(

@@ -81,6 +81,11 @@ class Settings(BaseSettings):
     # v8.4.3 指令A: RETRIEVE_CONVERGE_MIN_DOCS 已移除（动态阈值已过滤 chunk，
     # 全部证据应进入报告，代码级收敛不再需要）
     HYDE_MAX_TOKENS: int = Field(default_factory=lambda: _yaml_val("retrieval", "hyde_max_tokens", default=512))
+    # v8.16.3c: HyDE 结构化生成关闭思维链——实测 22:02:33/44 连续两次真空输出
+    # （content 为空，"第 N 次返回为空"日志实证=成功调用但内容空，非超时/解析），
+    # 与 draft call 同一根因：v4-flash 思维链吃光预算。thinking:disabled 为 DeepSeek
+    # chat 端点厂商参数（v8.15.3 同款通道）；不兼容时抛异常→现有 fail-soft 回退基础检索
+    HYDE_THINKING_OFF: bool = Field(default_factory=lambda: _yaml_val("retrieval", "hyde_thinking_off", default=True))
     RRF_WEIGHT_ORIG_DENSE: float = Field(default_factory=lambda: _yaml_val("retrieval", "rrf_weights", "orig_dense", default=1.0))
     RRF_WEIGHT_HYDE_DENSE: float = Field(default_factory=lambda: _yaml_val("retrieval", "rrf_weights", "hyde_dense", default=1.0))
     RRF_WEIGHT_BM25: float = Field(default_factory=lambda: _yaml_val("retrieval", "rrf_weights", "bm25", default=1.0))
@@ -109,9 +114,12 @@ class Settings(BaseSettings):
     # 前端 3-5s 见「预检索草稿·验证中」；草稿衍生查询并入多路检索。
     DRAFT_ENABLED: bool = Field(default_factory=lambda: _yaml_val("draft", "enabled", default=True))
     DRAFT_LABEL: str = Field(default_factory=lambda: _yaml_val("draft", "label", default="预检索草稿·验证中"))
-    DRAFT_MAX_CHARS: int = Field(default_factory=lambda: _yaml_val("draft", "max_chars", default=300))
+    DRAFT_MAX_CHARS: int = Field(default_factory=lambda: _yaml_val("draft", "max_chars", default=800))
     # 草稿 HTTP 超时（秒）——非联网调用 2-5s，留足余量防慢响应被自掐
     DRAFT_TIMEOUT_SEC: int = Field(default_factory=lambda: _yaml_val("draft", "timeout_sec", default=15))
+    # v8.16.3: 草稿调用输出上限——真空输出根因（v4-flash 思维链吃光 max_tokens，
+    # v8.15.3c HyDE 同款事故）：1024→2048 给思维链留足余量（结构化区块实际 400-800 tokens）
+    DRAFT_MAX_TOKENS: int = Field(default_factory=lambda: _yaml_val("draft", "max_tokens", default=2048))
     DRAFT_MAX_ANGLES: int = Field(default_factory=lambda: _yaml_val("draft", "max_angles", default=3))
     # 已确认：SUMMARY 上限 3 条（不做 5-8），与草稿提示词「恰好 3 条」一致
     DRAFT_SUMMARY_POINTS: int = Field(default_factory=lambda: _yaml_val("draft", "summary_points", default=3))
