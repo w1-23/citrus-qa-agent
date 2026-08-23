@@ -560,11 +560,16 @@ def _draft_search_multi(queries: list) -> list:
 async def draft_worker(query: str, session_id: str) -> None:
     """v8.17 草稿先行后台任务（load 节点 create_task 启动，fire-and-forget）。
 
-    用户要求（v8.17 决策）：
+    用户要求（v8.17 决策 + v8.17.1 修订）：
       - **原生回答用于草稿**：一次 DeepSeek API 调用直接回答原始问题 → 草稿展示；
-      - **联网模式只决定该调用是否带原生联网**：web 开 → Responses+原生
+      - **联网只发生一次**（v8.17.1）：唯一一次原生联网调用在本 worker（传入用户
+        原始问题之时）执行；retrieve-agent 的 ReAct 循环不再调用任何联网工具
+        （白名单已剔除 + prompt 禁止），因此**无需设定联网停止条件/早停规则**；
+      - **联网开关只决定这次调用是否带原生联网**：web 开 → Responses+原生
         web_search（回答即联网综述，附 [Wn] 引用）；web 关 → 非联网 fast 调用
         （ANSWER + MULTI_QUERY + SUMMARY 一体分隔符输出）；
+      - **v8.17.1 联网失败回退**：原生联网调用失败 → **回退到快速非联网调用**
+        （与 web 关同一路径），确保草稿恒存在（用户要求"联网失败草稿不消失"）；
       - **后续提取也从里面提取**：检索素材（MULTI_QUERY/SUMMARY）从原生回答
         提炼（web 关同一调用内提取；web 开为读取回答的二级提取调用）；
       - **HyDE 部分额外调用**：由 citrus_rag_search 内部独立结构化生成（本链路不动）；
@@ -590,35 +595,43 @@ async def draft_worker(query: str, session_id: str) -> None:
     draft_zh: str = ""
     parsed: dict = {}
     web_items: list = []
+    web_fallback = False
 
     if web_mode:
         # ── 联网路径：原生联网回答（草稿）→ 二级提取检索素材 ──
+        # v8.17.1: 失败不跳过——回退到快速非联网调用（草稿恒在）
         try:
             summary, calls = await asyncio.to_thread(_responses_web_search, query)
         except Exception as e:
-            logger.warning(f"[draft-web] 原生联网回答失败（跳过草稿）: {e}")
-            _draft_blog("draft_skipped",
-                        reason=f"call_exception:{type(e).__name__}:{str(e)[:120]}",
-                        mode="web")
-            return
-        draft_zh = (summary or "").strip()
-        web_items = _to_web_items(calls)
-        if not draft_zh:
-            logger.info("[draft-web] 联网回答无正文，跳过")
-            _draft_blog("draft_skipped", reason="call_empty", mode="web")
-            return
-        try:
-            raw_extract = await asyncio.to_thread(
-                _call_extract_from_answer, query, draft_zh)
-            if raw_extract:
-                # v8.17: 提取块仅 MULTI_QUERY/SUMMARY（无 ANSWER），不强制草稿字段
-                parsed = _parse_structured_response(raw_extract, require_answer=False)
-        except StructuredParseError as e:
-            logger.warning(f"[draft-web] 检索素材提取格式异常（跳过并入）: {e}")
-        except Exception as e:
-            logger.warning(f"[draft-web] 检索素材提取异常（跳过并入）: {e}")
-    else:
-        # ── 非联网路径：一次 fast 调用产出 原生回答(ANSWER) + 检索素材(MQ/SUMMARY) ──
+            logger.warning(f"[draft-web] 原生联网回答失败，回退快速调用: {e}")
+            _draft_blog("draft_web_fallback",
+                        reason=f"call_exception:{type(e).__name__}:{str(e)[:120]}")
+            web_fallback = True
+        if not web_fallback:
+            draft_zh = (summary or "").strip()
+            web_items = _to_web_items(calls)
+            if not draft_zh:
+                logger.info("[draft-web] 联网回答无正文，回退快速调用")
+                _draft_blog("draft_web_fallback", reason="call_empty")
+                web_fallback = True
+            else:
+                try:
+                    raw_extract = await asyncio.to_thread(
+                        _call_extract_from_answer, query, draft_zh)
+                    if raw_extract:
+                        # v8.17: 提取块仅 MULTI_QUERY/SUMMARY（无 ANSWER），不强制草稿字段
+                        parsed = _parse_structured_response(raw_extract, require_answer=False)
+                except StructuredParseError as e:
+                    logger.warning(f"[draft-web] 检索素材提取格式异常（跳过并入）: {e}")
+                except Exception as e:
+                    logger.warning(f"[draft-web] 检索素材提取异常（跳过并入）: {e}")
+
+    if web_fallback or not web_mode:
+        if web_fallback:
+            # v8.17.1: 联网失败 → 草稿来源降级为快速调用（source=local，web_mode 落仓 False）
+            web_mode = False
+            web_items = []
+        # ── 非联网/回退路径：一次 fast 调用产出 原生回答(ANSWER) + 检索素材(MQ/SUMMARY) ──
         try:
             raw = await asyncio.to_thread(_call_structured_draft, query)
         except Exception as e:

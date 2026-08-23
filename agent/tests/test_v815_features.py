@@ -84,8 +84,11 @@ def test_v815_tool_registry_gating():
         check("本地检索仍注册", get_tool_spec("citrus_rag_search") is not None)
         # v8.15: 联网搜索工具始终注册（前端开关是总开关，不在注册层剔除）
         check("联网搜索工具始终注册", get_tool_spec("deepseek_web_search") is not None)
+        # v8.17.1: retrieve-agent 白名单**不再含**联网工具（唯一一次原生联网在草稿层，
+        # ReAct 循环不做联网——无需联网停止条件；代码级兜底）
         names = ar._resolve_tool_names("retrieve-agent")
-        check("retrieve-agent 含本地+联网", names == ["citrus_rag_search", "deepseek_web_search"],
+        check("retrieve-agent 白名单仅本地检索（无 deepseek_web_search）",
+              names == ["citrus_rag_search"] and "deepseek_web_search" not in names,
               str(names))
 
         # 场景 B：学术开启恢复
@@ -94,8 +97,8 @@ def test_v815_tool_registry_gating():
         check("学术工具恢复注册", get_tool_spec("academic_search") is not None)
         check("全文工具恢复注册", get_tool_spec("fetch_fulltext") is not None)
         names2 = ar._resolve_tool_names("retrieve-agent")
-        expect = ["citrus_rag_search", "academic_search", "fetch_fulltext", "deepseek_web_search"]
-        check("retrieve-agent 工具列表齐全", names2 == expect, str(names2))
+        expect = ["citrus_rag_search", "academic_search", "fetch_fulltext"]
+        check("retrieve-agent 工具列表（学术开，仍无联网）", names2 == expect, str(names2))
     finally:
         settings.ACADEMIC_ENABLED = _aca
         init_tool_registry()

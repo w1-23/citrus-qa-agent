@@ -152,10 +152,11 @@ def test_v8153_prompt_mechanisms():
           "政府工作报告" in ra and "最新新闻" in ra)
     check("retrieve-agent 早停阈值规则(通过≤2/过滤≥50%)",
           "通过 ≤2 条" in ra and "过滤占比 ≥50%" in ra)
-    check("retrieve-agent 联网失败禁再调", "[ERR_NETWORK]" in ra and "禁止再次调用" in ra)
-    # v8.15.3d: 原始问题直传 + 仲裁规则标记
-    check("retrieve-agent 联网原始问题直传说明",
-          "自动直传" in ra and "搜索参考关键词" in ra)
+    # v8.17.1: retrieve-agent 不再联网——「联网检索限制」替代旧"失败禁再调/直传"说明
+    check("retrieve-agent 禁止联网调用（v8.17.1）",
+          "禁止调用 `deepseek_web_search`" in ra and "联网检索限制（v8.17.1，强制）" in ra)
+    check("retrieve-agent 联网由草稿层唯一执行",
+          "唯一一次原生联网" in ra and "草稿层" in ra)
     check("decision_guide 含覆盖表+自审", "数据源覆盖边界与检索前自审" in dg)
     check("decision_guide 含回答前自审(引用对齐)", "回答前自审" in dg and "引用对齐" in dg)
     check("decision_guide 含证据来源仲裁规则", "证据来源仲裁规则" in dg)

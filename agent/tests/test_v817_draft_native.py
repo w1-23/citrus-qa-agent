@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-"""v8.17 原生回答草稿 + UCR 优先回归：
+"""v8.17 原生回答草稿 + UCR 优先回归（含 v8.17.1 联网一次化修订）：
 
-  VF-39  品种意图检测（_is_variety_intent）+ UCR 优先检索接线（search_multi ucr_boost）
-  VF-40  draft_worker 联网路径（原生联网回答草稿 + 二级提取 + [Wn]/落仓）与非联网路径
-  VF-41  回执「原生回答参考」段 + 提示词 UCR 优先标记 + snapshot 新增结构
+  VF-39  品种意图检测（_is_variety_intent）+ UCR 优先接线（回执聚拢置前）
+  VF-40  draft_worker 联网/非联网路径（v8.17.1: 联网失败→回退快速调用，草稿恒在）
+  VF-41  回执「原生回答参考」段 + 提示词 UCR 优先标记 + snapshot
+  VF-42  v8.17.1 联网一次化接线（白名单无联网 + prompt 限制 + decision_guide 规则）
 
 全部离线、无模型、无网络（调用打桩；接线断言读源码）。
 """
@@ -149,12 +150,21 @@ def test_v817_draft_worker_paths():
     check("联网路径 web_items 带 url", (payload or {}).get("web_items", [{}])[0].get("url", "").startswith("https"))
     draft_store.clear()
 
-    # ── 联网路径失败 → draft_skipped（call_exception + mode=web）──
+    # ── 联网路径失败 → v8.17.1 回退快速调用（草稿恒在，不跳过）──
     q2 = asyncio.Queue()
     set_request_queue(q2)
     records.clear()
+    draft_store.clear()
+    real_call2 = dw._call_structured_draft
     try:
         dw._responses_web_search = lambda inp: (_ for _ in ()).throw(RuntimeError("web down"))
+        dw._call_structured_draft = lambda qry: (
+            "===STRUCTURED_START===\n"
+            "ANSWER: 回退快速调用产出的原生回答草稿，覆盖台州本地品种与课题。\n"
+            "MULTI_QUERY: a1|a2|a3\nSUMMARY: s1|s2|s3\n"
+            "===STRUCTURED_END===\n")
+        dw._draft_search_multi = lambda queries: (
+            [{"title": "fb-1", "doi": "10.d/f", "year": 2026, "text": "b"}] if len(queries) > 1 else [])
         dw._draft_blog = recorder
         tracing.set_web_search_enabled(True)
         try:
@@ -163,14 +173,27 @@ def test_v817_draft_worker_paths():
             tracing.set_web_search_enabled(False)
     finally:
         dw._responses_web_search = real_resp
+        dw._call_structured_draft = real_call2
+        dw._draft_search_multi = real_search
         dw._draft_blog = real_blog
+        evs2 = []
         while not q2.empty():
-            q2.get_nowait()
+            evs2.append(q2.get_nowait())
         clear_request_queue()
-    ev, fields = records[-1]
-    check("联网失败 → draft_skipped + call_exception:RuntimeError + mode=web",
-          ev == "draft_skipped" and fields.get("reason", "").startswith("call_exception:RuntimeError:")
-          and fields.get("mode") == "web", str(records[-1]))
+    # 回退后：draft 事件仍发出（source=local）+ draft_web_fallback 日志 + 落仓 web_mode=False
+    d_ev2 = next((it for it in evs2 if it.get("event") == "draft"), {})
+    d2 = json.loads(d_ev2["data"]) if d_ev2.get("data") else {}
+    check("v8.17.1 联网失败 → 回退快速调用，draft 事件仍发出",
+          bool(d2.get("content")) and d2["content"].startswith("回退快速调用"), str(d2)[:120])
+    check("回退草稿 source=local（来源标识如实降级）", d2.get("source") == "local")
+    blog_evs = {e for e, _ in records}
+    check("draft_web_fallback 业务日志已记", "draft_web_fallback" in blog_evs, str(records))
+    pay2 = draft_store.pop("sess-web2", "-")
+    check("回退落仓 web_mode=False（快速调用而非联网）",
+          pay2 is not None and pay2.get("web_mode") is False
+          and len(pay2.get("results") or []) == 1, str(pay2)[:160])
+    check("回退落仓无 web_items（无 [Wn]）", pay2 is not None and not (pay2.get("web_items") or []))
+    draft_store.clear()
 
     # ── 非联网路径默认（web 关）：queries 来自 ANSWER 一体提取 ──
     q3 = asyncio.Queue()
@@ -250,6 +273,46 @@ def test_v817_fusion_and_prompts():
         check("snapshot structured_extract 已生成", "MULTI_QUERY:" in txt2)
     else:
         check("snapshot structured_extract 已生成", False, "缺快照")
+
+
+# ── VF-42 v8.17.1 联网一次化接线（草稿层唯一联网，ReAct 不再联网）────────
+def test_v8171_web_once_wiring():
+    print("[VF-42] 联网一次化：白名单 + prompt 限制 + 规则")
+    ar = (ROOT / "src/core/agent_runner.py").read_text(encoding="utf-8")
+    ra = (ROOT / "src/prompts/agents/retrieve-agent.md").read_text(encoding="utf-8")
+    dg = (ROOT / "src/prompts/system/decision_guide.md").read_text(encoding="utf-8")
+    dw = (ROOT / "src/tools/deepseek_web.py").read_text(encoding="utf-8")
+
+    # 代码级兜底：白名单不含 deepseek_web_search
+    names = None
+    from src.core import agent_runner as _ar
+    names = _ar._resolve_tool_names("retrieve-agent")
+    check("白名单不含 deepseek_web_search", "deepseek_web_search" not in names, str(names))
+    check("白名单仍注册本地检索", "citrus_rag_search" in names)
+
+    # prompt 限制
+    check("retrieve-agent.md 禁止联网调用", "禁止调用 `deepseek_web_search`" in ra
+          and "联网检索限制（v8.17.1，强制）" in ra)
+    check("retrieve-agent.md 仅禁止块提及工具名（数据源表/自审区已移除）",
+          ra.count("deepseek_web_search") == 1)  # 唯一次数=「禁止调用」块
+
+    # web_search_status 提示块改为"仅告知，不授予联网"
+    check("web_search_status 提示不再教调联网", "你无需也**不能**调用联网工具" in ar
+          or "仅做本地检索（citrus_rag_search）" in ar)
+
+    # decision_guide 规则
+    check("decision_guide 联网仅草稿层唯一一次", "联网仅由草稿层唯一一次执行" in dg
+          and "不要指示检索子代理联网补" in dg)
+    check("decision_guide 原生回答段使用规则 v8.17.1",
+          "原生回答参考段的使用规则（v8.17.1）" in dg
+          and "作为回答骨架" in dg and "填充/修正" in dg)
+    check("decision_guide 检索子代理不再联网（无停止条件）",
+          "检索子代理不再承担联网职责" in dg and "无需联网停止条件" in dg)
+
+    # 草稿层回退
+    check("draft_worker 联网失败回退快速调用",
+          "draft_web_fallback" in dw
+          and "回退到快速非联网调用（草稿恒在）" in dw)
 
 
 if __name__ == "__main__":

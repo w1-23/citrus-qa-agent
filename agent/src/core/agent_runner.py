@@ -357,15 +357,19 @@ async def run_agent(
     tools = [_TOOL_REGISTRY_BY_NAME[n] for n in tool_names if n in _TOOL_REGISTRY_BY_NAME]
 
     # v8.15: 联网搜索状态提示——向检索子代理明示本次请求是否开启联网（前端「联网」开关）。
-    # 开关关时模型应避免空调用 deepseek_web_search（即便误调用，工具执行层也会短路 [DISABLED]）。
+    # v8.17.1: retrieve-agent 不再调用联网工具（白名单已剔除）——唯一的原生联网在
+    # 草稿层（用户原始问题传入时）完成，其回答与 [Wn] 引用汇入最终回执；此处仅
+    # 告知子代理"联网是否已由草稿层执行"，不授予任何联网能力。
     try:
         if agent_name == "retrieve-agent":
             from src.core.tracing import web_search_enabled as _req_web_on
-            _web_hint = ("<web_search_status>\n本次联网搜索已开启：本地覆盖不足的最新/实时信息可使用 "
-                         "deepseek_web_search（每轮 ≤1 次）；引用会带网址进入「联网搜索」证据组。\n"
-                         "</web_search_status>\n" if _req_web_on() else
-                         "<web_search_status>\n本次联网搜索未开启（前端「联网」开关关闭）：请勿调用 "
-                         "deepseek_web_search，本地不足时如实声明缺口。\n</web_search_status>\n")
+            _web_hint = ("<web_search_status>\n本次联网搜索已由草稿层执行（前端「联网」开关开启）："
+                         "原生联网回答与 [Wn] 引用已汇入最终回执，你无需也**不能**调用联网工具，"
+                         "仅做本地检索（citrus_rag_search）。\n</web_search_status>\n"
+                         if _req_web_on() else
+                         "<web_search_status>\n本次联网搜索未开启（前端「联网」开关关闭）："
+                         "草稿层已用快速非联网调用作答；你仅做本地检索（citrus_rag_search），"
+                         "本地不足时如实声明缺口。\n</web_search_status>\n")
             _extra_block = (_web_hint + _extra_block) if _extra_block else _web_hint
     except Exception:
         pass
@@ -878,9 +882,11 @@ def _make_tool_call_dict(tc) -> dict:
 
 def _resolve_tool_names(agent_name: str) -> list[str]:
     mapping = {
+        # v8.17.1: retrieve-agent 不再可调用 deepseek_web_search——
+        # 唯一一次原生联网在草稿层（用户原始问题传入时）完成，ReAct 循环
+        # 只做本地检索，无需联网停止条件（代码级兜底；prompt 层另有禁止指令）。
         "retrieve-agent": [
             "citrus_rag_search", "academic_search", "fetch_fulltext",
-            "deepseek_web_search",
         ],
         "write-agent": ["write_local_file"],
         "analyze-agent": [
@@ -889,8 +895,8 @@ def _resolve_tool_names(agent_name: str) -> list[str]:
     }
     names = mapping.get(agent_name, [])
     # v8.15: 学术联网门控——academic_search/fetch_fulltext 随 ACADEMIC_ENABLED
-    # （默认关，代码保留不删）。deepseek_web_search 始终注册：启用与否由
-    # 前端「联网」开关逐请求决定（工具执行层读取请求 contextvar 短路）。
+    # （默认关，代码保留不删）。deepseek_web_search 仍全局注册（供草稿层及
+    # 其他场景直接调用函数），但不再进入 retrieve-agent 白名单。
     if not getattr(settings, "ACADEMIC_ENABLED", False):
         names = [n for n in names if n not in ("academic_search", "fetch_fulltext")]
     return names
