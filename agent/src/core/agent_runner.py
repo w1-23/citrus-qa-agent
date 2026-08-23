@@ -156,7 +156,8 @@ def build_evidence_report(collected_artifacts: dict, query: str,
                           dedup_blocked: int = 0,
                           web_unavailable: bool = False,
                           draft_extra_count: int = 0,
-                          draft_answer: str = "") -> str:
+                          draft_answer: str = "",
+                          ucr_first: bool = False) -> str:
     """确定性证据回执（v8.4.6，纯函数可单测）。
 
     检索回执由代码组装而非模型转述——保证"管道而非漏斗"：
@@ -174,8 +175,15 @@ def build_evidence_report(collected_artifacts: dict, query: str,
       - v8.17: draft_answer 非空时渲染「原生回答参考（草稿预答）」段——用户要求
         "最后融合原生回答进行生成"：原生回答作为草稿级预答素材注入 supervisor，
         与检索证据共同融合生成最终回答（标注来源，非检索证据）。
+      - v8.17 修订: ucr_first=True 时主文献按来源**聚拢置前**——UCR 品种库条目
+        （[UCR] 前缀）稳定分区到回执 [n] 清单前部（组内保序，非按分重排），
+        supervisor 更易优先引用；**仅展示层排序，不改检索融合**（混合库无物理
+        分区，两阶段检索路由在架构上不可行，见修正1）。
     """
     main = _dedup_evidence_items(list(collected_artifacts.get("main_results") or []))
+    if ucr_first:
+        main = ([r for r in main if src_of(r) == "ucr"]
+                + [r for r in main if src_of(r) != "ucr"])
     web = list(collected_artifacts.get("web_results") or [])
     lines = [
         "## 检索回执（系统组装）",
@@ -225,8 +233,10 @@ def build_evidence_report(collected_artifacts: dict, query: str,
     # 与 [n]/[Wn] 证据共同融合生成最终回答；位置紧跟引用导引（截断线前恒可见）。
     if draft_answer and draft_answer.strip():
         _da = draft_answer.strip()
-        if len(_da) > 800:
-            _da = _da[:800] + " …"
+        # v8.17 修订: 成功解析的草稿不截断（修正2「草稿=API 原生返回，不经
+        # 降级/截断/摘要化」）——4000 仅为安全阀防 token 失控（模板约束约 300-600 字）
+        if len(_da) > 4000:
+            _da = _da[:4000] + " …"
         lines.append("## 原生回答参考（草稿预答，非检索证据）")
         lines.append(
             "以下为模型对用户问题的原生预答草稿，仅作融合参考：可采纳其正确判断，"
@@ -768,6 +778,13 @@ async def run_agent(
             except Exception as e:
                 logger.warning(f"[AgentRunner] 草稿并入失败（跳过）: {e}")
         draft_extra_count = len(_draft.get("results") or []) if _draft else 0
+        # v8.17 修订: UCR 优先改为「提示词引导 + 回执聚拢置前」——品种意图命中时
+        # 回执 [UCR] 条目前置（展示层排序，键=关键词匹配；不做检索层路由/加权）
+        try:
+            from src.tools.search import _is_variety_intent
+            _ucr_first = _is_variety_intent(query)
+        except Exception:
+            _ucr_first = False
         budget_blocked = sum(
             1 for m in placeholder_results.values()
             if str(getattr(m, "content", "") or "").startswith("[SEARCH_BUDGET]"))
@@ -779,7 +796,8 @@ async def run_agent(
             budget_blocked=budget_blocked, dedup_blocked=dedup_blocked,
             web_unavailable=(_web_fail_streak >= 2),
             draft_extra_count=draft_extra_count,
-            draft_answer=draft_answer)
+            draft_answer=draft_answer,
+            ucr_first=_ucr_first)
         if result_content:
             logger.info(
                 f"[AgentRunner] retrieve-agent 模型自述({len(result_content)} chars) "

@@ -641,7 +641,8 @@ async def draft_worker(query: str, session_id: str) -> None:
                 try:
                     emit_draft(draft_zh, str(
                         getattr(settings, "DRAFT_LABEL", "预检索草稿·验证中")
-                        or "预检索草稿·验证中"))
+                        or "预检索草稿·验证中"),
+                        source="web" if web_mode else "local")
                     logger.info(f"[draft] 降级草稿已推送前端 ({len(draft_zh)} 字, q={query[:40]!r})")
                 except Exception as _e2:
                     logger.debug(f"[draft] emit_draft 失败: {_e2}")
@@ -657,14 +658,16 @@ async def draft_worker(query: str, session_id: str) -> None:
             return
 
     # ── 草稿展示（原生回答）──
-    max_chars = max(int(getattr(settings, "DRAFT_MAX_CHARS", 800) or 800), 20)
-    draft_display = draft_zh[:max_chars]
+    # v8.17 修订（修正2）: 草稿=API 原生返回，成功路径**不截断/不降级/不摘要**
+    # （完整内容上屏；模板约束约 300-600 字，前端面板高度自适应）；
+    # source 标识随事件下发（修正4：前端展示 draft.source 徽标）。
+    _source = "web" if web_mode else "local"
     try:
-        emit_draft(draft_display, str(
+        emit_draft(draft_zh, str(
             getattr(settings, "DRAFT_LABEL", "预检索草稿·验证中")
-            or "预检索草稿·验证中"))
-        logger.info(f"[draft] 草稿已推送前端 ({len(draft_display)} 字, "
-                    f"{'web' if web_mode else 'local'} 模式, q={query[:40]!r})")
+            or "预检索草稿·验证中"), source=_source)
+        logger.info(f"[draft] 草稿已推送前端 ({len(draft_zh)} 字, "
+                    f"{_source} 模式, q={query[:40]!r})")
     except Exception as e:
         logger.debug(f"[draft] emit_draft 失败: {e}")
 

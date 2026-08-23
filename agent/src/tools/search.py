@@ -428,14 +428,9 @@ def citrus_rag_search(query: str) -> tuple[str, dict]:
                 queries.append(query)
                 logger.info(f"[HyDE] 结构化仅 HyDE 段，补充原始查询保底 → "
                             f"{len(queries)} 路查询")
-            # v8.17: 品种意图 → UCR 品种库优先命中（来源加权置前，见 multi_retriever）
-            _ucr_boost = _is_variety_intent(query)
-            if _ucr_boost:
-                logger.info(f"[citrus_rag_search] 品种意图 → UCR 优先检索: {str(query)[:40]}...")
-            results = rag.search_multi(queries, ucr_boost=_ucr_boost)
+            results = rag.search_multi(queries)
         else:
-            # v8.17: 无结构化 HyDE 时同走 ucr_boost（保持品种优先一致）
-            results = rag.search_multi([query], ucr_boost=_is_variety_intent(query))
+            results = rag.search(query)
 
         elapsed = (time.perf_counter() - t0) * 1000
 

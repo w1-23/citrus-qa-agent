@@ -592,6 +592,8 @@ footer {
   margin-bottom: 10px;
 }
 .draft-label { font-size: 11px; color: var(--text-muted); font-weight: 600; margin-bottom: 6px; }
+/* v8.17 修订: 草稿来源徽标（web=原生联网 / local=快速回答） */
+.draft-source { font-weight: 400; color: #6aa9ff; }
 .draft-body { font-size: 13px; color: var(--text-secondary); line-height: 1.65; white-space: pre-wrap; word-break: break-word; }
 /* v8.16.4: 草稿 3 态体验——面板底部阶段提示 + 占位动画文案 */
 .draft-phase { font-size: 11px; color: #6aa9ff; margin-top: 6px; }
@@ -2619,6 +2621,8 @@ async function sendMsg(isFollowUp) {
       case 'draft':
         // v8.16.1: 草稿先行——灰底草稿面板 + 「预检索草稿·验证中」标签
         // v8.16.4: 占位「正在生成预览…」在展示中 → 原位升级为草稿面板
+        // v8.17 修订: 来源徽标卫 data.source（web=原生联网 30-115s；local=快速回答 3-5s）
+        var _srcName = (data.source === 'web') ? '原生联网' : '快速回答';
         var _upEl = answerDiv.querySelector('.draft-panel');
         if (previewShown && _upEl) {
           previewShown = false;
@@ -2626,6 +2630,9 @@ async function sendMsg(isFollowUp) {
           var _lb = _upEl.querySelector('.draft-label');
           var _bd = _upEl.querySelector('.draft-body');
           if (_lb) _lb.textContent = '预检索草稿·验证中';
+          var _sb = _upEl.querySelector('.draft-source');
+          if (!_sb) { _sb = document.createElement('span'); _sb.className = 'draft-source'; _lb.parentNode.insertBefore(_sb, _lb.nextSibling); }
+          _sb.textContent = ' · ' + _srcName;
           if (_bd) { _bd.classList.remove('draft-hint'); if (data.content) _bd.textContent = data.content; }
           var _fp = _upEl.querySelector('.draft-phase');
           if (!_fp) { _fp = document.createElement('div'); _fp.className = 'draft-phase'; _upEl.appendChild(_fp); }
@@ -2637,8 +2644,11 @@ async function sendMsg(isFollowUp) {
           answerDiv.style.display = '';
           var dp = document.createElement('div');
           dp.className = 'draft-panel';
-          dp.innerHTML = '<div class="draft-label">预检索草稿·验证中</div><div class="draft-body"></div><div class="draft-phase">草稿已生成 · 正在扩展检索证据…</div>';
+          dp.innerHTML = '<div class="draft-label">预检索草稿·验证中<span class="draft-source"> · ' + _srcName + '</span></div><div class="draft-body"></div><div class="draft-phase">草稿已生成 · 正在扩展检索证据…</div>';
           answerDiv.appendChild(dp);
+        } else {
+          var _sb2 = answerDiv.querySelector('.draft-panel .draft-source');
+          if (_sb2) _sb2.textContent = ' · ' + _srcName;
         }
         var dbEl = answerDiv.querySelector('.draft-body');
         if (dbEl && data.content) dbEl.textContent = data.content;
