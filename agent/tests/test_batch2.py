@@ -392,8 +392,9 @@ def test_ag22_output_routing():
     import yaml
     cfg = yaml.safe_load(open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                            'config.yaml'), encoding='utf-8'))
-    check("retrieve-agent cap=40000",
-          cfg['agent']['tool_result_caps']['retrieve-agent'] == 40000)
+    # v8.16.2: 40000→60000（rich 场景回执 47.6K 旧 cap 截掉文末 [Wn] 清单，实证根因）
+    check("retrieve-agent cap=60000",
+          cfg['agent']['tool_result_caps']['retrieve-agent'] == 60000)
 
 
 def test_ag26_budget_forward():

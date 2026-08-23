@@ -407,7 +407,10 @@ def test_evidence_report_builder():
           "Ruby1 受低温诱导，Corky 转座子插入启动子。" in rep
           and "WRKY75 结合启动子。" in rep)
     check("web 补充条目", "[W1]" in rep)
-    check("引用编号指引", "引用编号请使用上述" in rep)
+    # v8.16.2: 引用导引前置（截尾防护——旧文末位置会被 cap 截断吃掉）
+    check("引用编号指引（前置,在 [W1] 之前）",
+          "引用编号请使用下列" in rep
+          and rep.find("引用编号请使用下列") < rep.find("[W1]"))
 
 
 def test_draft_publish():
