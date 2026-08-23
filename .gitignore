@@ -49,3 +49,9 @@ readme2.md
 
 # 发布产物（v8.5.0）
 dist/
+
+# 实验/论文资产（本地保留，不入主仓库；复用脚本如需入库走独立分支）
+experiment/
+paper/
+agent/scripts/
+make-mobile-leaf.mjs
