@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
-"""v8.17 原生回答草稿 + UCR 优先回归（v8.17.1 联网一次化 + v8.17.9 提取前移）：
+"""v8.17 原生回答草稿 + UCR 优先回归（v8.17.1 联网一次化 + v8.17.10 自由文本回退）：
 
   VF-39  品种意图检测（_is_variety_intent）+ UCR 优先接线（回执聚拢置前）
   VF-40  draft_worker 联网/非联网路径（v8.17.1: 联网失败→回退快速调用，草稿恒在；
-         v8.17.9: 联网调用一次产出 [ANSWER]/[MQ]/[SUMMARY] 三区块，草稿=[ANSWER]）
+         v8.17.10: 联网自由文本输出，草稿=output_text 全文 + [Wn] web_items）
   VF-41  回执「原生回答参考」段 + 提示词 UCR 优先标记 + snapshot
   VF-42  v8.17.1 联网一次化接线（白名单无联网 + prompt 限制 + decision_guide 规则）
-  VF-43  v8.17.9 联网三区块一次产出（提取前移：不再二次提取；三区块独立解析 +
-         worker 并入 + 未按区块输出 fail-soft）
-  VF-44  关键词降级兜底（联网未产出区块 → 从原生回答提炼检索角度）+ MQ:/SUM: 缩写
-  VF-45  v8.17.10 指代性追问修复（会话历史注入 + 拒绝型草稿带上下文重试）
+  VF-43  v8.17.10 联网自由文本产出（草稿=output_text、[Wn] 进侧栏、关键词兜底并入、
+         空正文回退快速调用草稿恒在）
+  VF-44  关键词降级兜底（素材并入保底）+ MQ:/SUM: 缩写容错
+  VF-45  v8.17.10 指代性追问修复（会话历史注入）+ 拒绝检测保留 + 模板历史留档
 
 全部离线、无模型、无网络（调用打桩；接线断言读源码）。
 """
@@ -110,16 +110,11 @@ def test_v817_draft_worker_paths():
         records.append((event, fields))
 
     try:
-        # v8.17.9: 联网调用一次产出 [ANSWER]/[MQ]/[SUMMARY] 三区块
-        # （提取前移——不再需要二级提取调用）
+        # v8.17.10 回退: 联网调用自由文本输出（草稿=output_text 全文）
         dw._responses_web_search = lambda inp, ctx="": (
-            "[ANSWER]\n柑橘品种资源：UCR 库是世界最重要种质资源库之一，保存栽培品种、"
-            "野生种与杂交后代；中国原产如温州蜜柑、椪柑，日本品种如宫川、清见。……"
-            "\n[/ANSWER]\n"
-            "[MQ]\n- UCR citrus germplasm accessions\n- Chinese origin citrus cultivars\n"
-            "- Japanese citrus mandarin varieties\n[/MQ]\n"
-            "[SUMMARY]\n- UCR germplasm collection\n- Chinese origin mandarins\n"
-            "- Japanese satsuma varieties\n[/SUMMARY]",
+            "柑橘品种资源：UCR 库是世界最重要种质资源库之一，保存栽培品种、野生种与"
+            "杂交后代；中国原产如温州蜜柑、椪柑，日本品种如宫川、清见。\n"
+            "详见 [UCR variety collection](https://ucr.example/variety)。",
             [{"url": "https://ucr.example/variety", "title": "UCR variety collection"}])
         dw._draft_search_multi = lambda queries: (
             [{"title": "draft-web-1", "doi": "10.d/w", "year": 2026, "text": "body"}]
@@ -144,10 +139,9 @@ def test_v817_draft_worker_paths():
     ddata = json.loads(draft_ev["data"]) if draft_ev.get("data") else {}
     check("联网路径发出 draft 事件（原生联网回答）", bool(ddata.get("content"))
           and ddata["content"].startswith("柑橘品种资源"), str(ddata)[:120])
-    check("v8.17.9 草稿=[ANSWER] 提取（不含 [MQ]/[SUMMARY] 标签污染）",
-          bool(ddata.get("content")) and "[MQ]" not in ddata["content"]
-          and "[/ANSWER]" not in ddata["content"]
-          and "germplasm accessions" not in ddata["content"], str(ddata)[:200])
+    check("v8.17.10 自由文本草稿=output_text 全文（无标签污染、含真实网址）",
+          bool(ddata.get("content"))
+          and "ucr.example/variety" in ddata["content"], str(ddata)[:200])
     check("draft 事件带 source=web（修正4 前端来源标识）",
           ddata.get("source") == "web", str(ddata)[:120])
 
@@ -239,51 +233,41 @@ def test_v817_draft_worker_paths():
     draft_store.clear()
 
 
-# ── VF-43 v8.17.9 联网三区块一次产出（提取前移）+ 解析器兜底 ──────
-def test_v8179_web_three_block():
-    print("[VF-43] 联网三区块一次产出：/ [ANSWER]/[MQ]/[SUMMARY] 独立解析 + worker 并入")
+# ── VF-43 v8.17.10 联网自由文本产出（草稿=output_text + [Wn] web_items）──
+def test_v81710_web_free_text():
+    print("[VF-43] 联网自由文本：草稿=output_text 全文 + 引用 [Wn] 进 web_items + worker 并入")
     import asyncio
     import src.tools.deepseek_web as dw
-    from src.prompts.loader import assemble_structured_web_prompt
     from src.core.progress_bus import (
         set_request_queue, clear_request_queue)
     from src.core.draft_store import draft_store
     from src.core import tracing
 
-    wp = assemble_structured_web_prompt()
-    check("联网模板非空且含三区块", bool(wp) and "[ANSWER]" in wp
-          and "[MQ]" in wp and "[SUMMARY]" in wp and "[/ANSWER]" in wp)
-    check("联网模板强调三区块全输出", "三个区块必须全部输出" in wp)
+    # 解析器保留但不再被 draft_worker 调用（回退方案停用三区块）
+    import inspect as _inspect
+    _resp_src = _inspect.getsource(dw._responses_web_search)
+    check("draft_worker 不再解析三区块（提取前移已回退）",
+          "def _parse_web_three_block" in (ROOT / "src/tools/deepseek_web.py").read_text(encoding="utf-8")
+          and "_parse_web_three_block(" not in _inspect.getsource(dw.draft_worker))
+    check("联网调用为自由文本形态（fmt=free-text，不调用 structured_web 模板）",
+          "fmt=free-text" in _resp_src
+          and "assemble_structured_web_prompt" not in _resp_src)
 
-    # 解析器级：三区块独立解析
-    p3 = dw._parse_web_three_block(
-        "[ANSWER]\n柑橘黄龙病综合防控草稿正文。\n[/ANSWER]\n"
-        "[MQ]\n- citrus HLB integrated management 2025\n- ACP monitoring Florida\n"
-        "- dsRNA biopesticide trial\n[/MQ]\n"
-        "[SUMMARY]\n- ACP trap decline 9%\n- Cq 37.73 near threshold\n[/SUMMARY]")
-    check("三区块 → 草稿=[ANSWER] 素材=[MQ]+[SUMMARY]",
-          p3["draft_zh"].startswith("柑橘黄龙病综合防控草稿")
-          and len(p3["multi_query"]) == 3
-          and p3["multi_query"][0] == "citrus HLB integrated management 2025"
-          and len(p3["summary"]) == 2, str(p3))
-    p3b = dw._parse_web_three_block("[MQ]\n- aaa\n- bbb\n[/MQ]\n[ANSWER]\nx\n[/ANSWER]")
-    check("缺 [SUMMARY] → 仅对应素材为空，草稿不受影响",
-          p3b["draft_zh"] == "x" and p3b["multi_query"] == ["aaa", "bbb"]
-          and p3b["summary"] == [], str(p3b))
-
-    # worker 级：web 路径三区块一次产出 → 草稿=[ANSWER] + 素材并入（草稿证据 >0）
+    # worker 级：web 路径自由文本 → 草稿=output_text 全文 + [Wn] 引用 + 关键词兜底并入
     real_resp = dw._responses_web_search
     real_search = dw._draft_search_multi
+    real_ctx = dw._recent_human_context_sync
+    real_join = dw._join_human_context
     q = asyncio.Queue()
     set_request_queue(q)
     draft_store.clear()
     try:
         dw._responses_web_search = lambda inp, ctx="": (
-            "[ANSWER]\n2025 年柑橘黄龙病防控：媒介监测与精准施药联用。\n[/ANSWER]\n"
-            "[MQ]\n- citrus HLB integrated management 2025\n- ACP monitoring Florida\n"
-            "- dsRNA biopesticide trial\n[/MQ]\n"
-            "[SUMMARY]\n- ACP trap decline 9%\n- Cq 37.73 near threshold\n[/SUMMARY]",
+            "2025 年柑橘黄龙病防控：结合 [来源页面](https://w.example/hlb) 的最新报道，"
+            "媒介监测与精准施药联用是当前主流策略。……" ,
             [{"url": "https://w.example/hlb", "title": "HLB 2025"}])
+        dw._recent_human_context_sync = lambda sid, max_items=3: []
+        dw._join_human_context = lambda items: ""
         dw._draft_search_multi = lambda queries: (
             [{"title": "draft-tol-1", "doi": "10.t/1", "year": 2026, "text": "body"}]
             if len(queries) > 1 else [])
@@ -294,52 +278,66 @@ def test_v8179_web_three_block():
             tracing.set_web_search_enabled(False)
     finally:
         dw._responses_web_search = real_resp
+        dw._recent_human_context_sync = real_ctx
+        dw._join_human_context = real_join
         dw._draft_search_multi = real_search
         items = []
         while not q.empty():
             items.append(q.get_nowait())
         clear_request_queue()
     payload = draft_store.pop("sess-tol", "-")
-    check("三区块产出 → 草稿正文=[ANSWER]（不含标签）",
+    check("自由文本 → 草稿=output_text 全文（不改写不截断）",
           payload is not None and payload.get("answer_text", "").startswith(
-              "2025 年柑橘黄龙病防控：媒介监测与精准施药联用。"), str(payload)[:200])
-    check("三区块产出 → 草稿多路检索并入（queries>1）",
+              "2025 年柑橘黄龙病防控：结合"), str(payload)[:200])
+    check("自由文本 → [Wn] 引用进 web_items（侧栏 WEB 组）",
+          payload is not None and len(payload.get("web_items") or []) == 1
+          and (payload.get("web_items") or [{}])[0].get("url", "").startswith("https"),
+          str(payload)[:200])
+    check("自由文本 → 关键词兜底并入（queries>1, results=1）",
           payload is not None and len(payload.get("results") or []) == 1
           and payload.get("queries_n", 0) > 1
           and payload.get("web_mode") is True, str(payload)[:200])
+    draft_ev = next((it for it in items if it.get("event") == "draft"), {})
+    ddata = json.loads(draft_ev["data"]) if draft_ev.get("data") else {}
+    check("自由文本草稿事件推前端（content=全文）", bool(ddata.get("content"))
+          and ddata["content"].startswith("2025 年柑橘黄龙病防控：结合"),
+          str(ddata)[:120])
+    check("draft 事件 source=web", ddata.get("source") == "web", str(ddata)[:120])
     draft_store.clear()
 
-    # ── 联网未按区块输出（自由文本）→ fail-soft：草稿仍落仓，不阻塞 ──
+    # ── 联网空正文 → fail-soft：回退快速调用，草稿仍落仓（草稿恒在）──
     q2 = asyncio.Queue()
     set_request_queue(q2)
     draft_store.clear()
+    real_call_sd = dw._call_structured_draft
     try:
-        dw._responses_web_search = lambda inp, ctx="": (
-            "2025 年柑橘黄龙病防控进展极简版：媒介监测与精准施药。",
-            [])
+        dw._responses_web_search = lambda inp, ctx="": ("", [])
+        dw._call_structured_draft = lambda qry: (
+            "===STRUCTURED_START===\n"
+            "ANSWER: 回退快速调用产出的原生回答草稿，覆盖台州本地品种与课题。\n"
+            "MULTI_QUERY: a1|a2|a3\nSUMMARY: s1|s2|s3\n"
+            "===STRUCTURED_END===\n")
         dw._draft_search_multi = lambda queries: (
             [{"title": "fb-kw", "doi": "10.k/f", "year": 2026, "text": "b"}]
             if len(queries) > 1 else [])
         tracing.set_web_search_enabled(True)
         try:
-            asyncio.run(dw.draft_worker("HLB 2025 防控进展", "sess-fail"))
+            asyncio.run(dw.draft_worker("HLB 2025 防控进展", "sess-empty"))
         finally:
             tracing.set_web_search_enabled(False)
     finally:
         dw._responses_web_search = real_resp
+        dw._call_structured_draft = real_call_sd
         dw._draft_search_multi = real_search
         items2 = []
         while not q2.empty():
             items2.append(q2.get_nowait())
         clear_request_queue()
-    payload2 = draft_store.pop("sess-fail", "-")
-    check("未按区块输出 fail-soft：草稿正文仍落仓（回退整段文本）",
+    payload2 = draft_store.pop("sess-empty", "-")
+    check("联网空正文 → 回退快速调用：草稿仍落仓（web_mode=False）",
           payload2 is not None and payload2.get("answer_text", "").startswith(
-              "2025 年柑橘黄龙病防控进展极简版")
-          and payload2.get("web_mode") is True, str(payload2)[:200])
-    draft_ev2 = next((it for it in items2 if it.get("event") == "draft"), {})
-    check("未按区块输出 fail-soft：草稿事件仍推前端",
-          bool(draft_ev2) and "极简版" in str(draft_ev2.get("data", ""))[:200])
+              "回退快速调用") and payload2.get("web_mode") is False,
+          str(payload2)[:160])
     draft_store.clear()
 
 
@@ -544,9 +542,9 @@ def test_v8171_web_once_wiring():
           and "回退到快速非联网调用（草稿恒在）" in dw)
 
 
-# ── VF-45 v8.17.10 指代性追问修复（会话历史注入 + 拒绝型草稿重试）─────────
+# ── VF-45 v8.17.10 指代性追问修复（会话历史注入 + 自由文本产出）─────────
 def test_v81710_deferral_context():
-    print("[VF-45] 指代性追问：会话历史注入 + 拒绝型草稿带上下文重试")
+    print("[VF-45] 指代性追问：会话历史注入 + 自由文本草稿产出")
     import asyncio
     import src.tools.deepseek_web as dw
     from src.core.progress_bus import (
@@ -562,7 +560,7 @@ def test_v81710_deferral_context():
     check("context 注入 input（对话背景段）", "对话背景（最近的用户问题" in src
           and "用户问题：{input_prompt}" in src)
 
-    # 2) 拒绝型检测纯函数
+    # 2) 拒绝型检测纯函数（保留定义，回退方案不再用于 worker 重试）
     check("拒绝检测：短道歉文本命中", dw._looks_like_refusal(
         "抱歉，我目前无法定位您所说的\"上一个问题\"。在当前会话中，我没有可用的历史提问记录或上下文。"))
     check("拒绝检测：正常长回答不命中", not dw._looks_like_refusal(
@@ -574,7 +572,7 @@ def test_v81710_deferral_context():
           dw._join_human_context([]) == ""
           and dw._join_human_context(["问题A", "问题B"]) == "问题A\n问题B")
 
-    # 4) worker 级：首次拒绝型（无 ctx 注入不可得时仍重试）→ 二次正常 → 草稿=[ANSWER]
+    # 4) worker 级：自由文本 + context 注入（指代解析由模型凭对话背景完成）→ 草稿落仓
     real_resp = dw._responses_web_search
     real_search = dw._draft_search_multi
     real_ctx = dw._recent_human_context_sync
@@ -589,19 +587,13 @@ def test_v81710_deferral_context():
         return ["2025年后黄龙病田间感染的新报道"]
 
     try:
-        def first_refusal(inp, ctx=""):
+        def free_text_ok(inp, ctx=""):
             calls.append(ctx)
-            return ("[ANSWER]\n抱歉，我目前无法定位您所说的\"上一个问题\"，请提供更多信息。\n"
-                    "[/ANSWER]", [])
-        def then_ok(inp, ctx=""):
-            return ("[ANSWER]\n基于您上一个问题（2025年后黄龙病田间感染），最新报道如下："
-                    "2025 年 Florida 果园发病率 3.2%，木虱带菌率 9%。……\n[/ANSWER]\n"
-                    "[MQ]\n- citrus HLB incidence Florida 2025\n- ACP infectivity survey\n"
-                    "- HLB epidemic spread data\n[/MQ]\n"
-                    "[SUMMARY]\n- Florida incidence 3.2%\n- ACP infectivity 9%\n[/SUMMARY]",
+            return ("基于您上一个问题（2025年后黄龙病田间感染），最新报道如下："
+                    "2025 年 Florida 果园发病率 3.2%，木虱带菌率 9%。\n"
+                    "详见 [HLB 2025 survey](https://w.example/hlb2025)。",
                     [{"url": "https://w.example/hlb2025", "title": "HLB 2025 survey"}])
-        resp_seq = iter([first_refusal, then_ok])
-        dw._responses_web_search = lambda inp, ctx="": next(resp_seq)(inp, ctx)
+        dw._responses_web_search = free_text_ok
         dw._recent_human_context_sync = fake_ctx
         dw._join_human_context = lambda items: "\n".join(items)
         dw._draft_search_multi = lambda queries: (
@@ -624,32 +616,33 @@ def test_v81710_deferral_context():
             items.append(q.get_nowait())
         clear_request_queue()
     payload = draft_store.pop("sess-ctx", "-")
-    check("拒绝型首次 → 带上下文重试 → 草稿=[ANSWER]（指代已解析）",
+    check("自由文本草稿=output_text 全文（指代由模型凭对话背景解析）",
           payload is not None and payload.get("answer_text", "").startswith(
               "基于您上一个问题（2025年后黄龙病田间感染）"),
           str(payload)[:200])
-    check("带上下文重试 → 素材并入（mj+sum → queries>1）",
+    check("自由文本 → [Wn] 引用 + 关键词兜底并入",
           payload is not None and len(payload.get("results") or []) == 1
           and len(payload.get("web_items") or []) == 1,
           str(payload)[:200])
-    check("重试注入的 context 携带历史问题", any(
+    check("注入的 context 携带历史问题", any(
         "2025年后黄龙病田间感染的新报道" in c for c in calls), str(calls))
     draft_ev = next((it for it in items if it.get("event") == "draft"), {})
-    check("拒绝型重试草稿事件仍推前端（内容=重试回答）",
+    check("自由文本草稿事件仍推前端（内容=全文）",
           bool(draft_ev) and "基于您上一个问题" in str(draft_ev.get("data", ""))[:300])
     draft_store.clear()
 
-    # 5) 模板含上下文说明，快照同步
-    wp = (ROOT / "src/prompts/structured_web.md").read_text(encoding="utf-8")
-    check("联网模板含指代处理规则", "若用户问题含指代" in wp
-          and "不要拒绝回答" in wp and "对话背景" in wp)
+    # 5) 模板作为历史参考保留（不再被调用），快照同步
+    import inspect as _inspect
+    _resp_src = _inspect.getsource(dw._responses_web_search)
+    check("_responses_web_search 不再调用 structured_web 模板（自由文本形态）",
+          "assemble_structured_web_prompt" not in _resp_src)
     snap = (ROOT / "src/prompts/snapshots/structured_web.txt")
     if snap.exists():
         txt = snap.read_text(encoding="utf-8")
-        check("snapshot structured_web 同步（含上下文规则）",
-              "若用户问题含指代" in txt and "不要拒绝回答" in txt)
+        check("snapshot structured_web 保留（历史参考标记）",
+              "不再被 _responses_web_search 调用" in txt)
     else:
-        check("snapshot structured_web 同步（含上下文规则）", False, "缺快照")
+        check("snapshot structured_web 保留（历史参考标记）", False, "缺快照")
 
 
 if __name__ == "__main__":
