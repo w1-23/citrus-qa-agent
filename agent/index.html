@@ -594,6 +594,12 @@ footer {
 .draft-label { font-size: 11px; color: var(--text-muted); font-weight: 600; margin-bottom: 6px; }
 /* v8.17 修订: 草稿来源徽标（web=原生联网 / local=快速回答） */
 .draft-source { font-weight: 400; color: #6aa9ff; }
+/* v8.17.2 手风琴: 草稿完成默认收缩——正文隐藏，点击标签行展开/收起（不强制擦除） */
+.draft-label.draft-head { cursor: pointer; user-select: none; }
+.draft-label.draft-head::before { content: '▸ '; font-size: 10px; color: var(--text-muted); }
+.draft-panel.open .draft-label.draft-head::before { content: '▾ '; }
+.draft-panel .draft-body { display: none; }
+.draft-panel.open .draft-body { display: block; }
 .draft-body { font-size: 13px; color: var(--text-secondary); line-height: 1.65; white-space: pre-wrap; word-break: break-word; }
 /* v8.16.4: 草稿 3 态体验——面板底部阶段提示 + 占位动画文案 */
 .draft-phase { font-size: 11px; color: #6aa9ff; margin-top: 6px; }
@@ -2612,9 +2618,16 @@ async function sendMsg(isFollowUp) {
       case 'text':
         // v8.16.1: 收到正式回答首字 → 清空草稿面板（替换为正式回答）
         // v8.16.4: 占位（previewShown）与草稿面板（draftShown）统一在此移除
+        // v8.17.2: 不强制擦除——草稿面板保留为手风琴（收缩），正式回答照常生成
         var _dpEl = answerDiv.querySelector('.draft-panel');
-        if (_dpEl) _dpEl.remove();
-        draftShown = false;
+        if (_dpEl) {
+          /* 保持正文收缩（即使此前被用户展开，首字到达后弹回收缩态，
+             避免与正式回答视觉叠加）；面板本身不删除、可随时点击展开 */
+          _dpEl.classList.remove('open');
+          var _lb0 = _dpEl.querySelector('.draft-phase');
+          if (_lb0 && data.content) _lb0.textContent = '正式回答已生成 · 草稿保留可展开查看';
+        }
+        draftShown = true;   /* v8.17.2: 面板保留，draftShown 维持 true（不再置 false） */
         previewShown = false;
         if (!isAnswerStarted) { isAnswerStarted=true; clearTimeout(spinnerTimeout); updateStatus('answer','生成回答中...'); answerDiv.style.display=''; collapseReasoning(); }
         fullText+=data.content; updateContextTokens((data.content||'').length * 0.7); renderAnswer(); break;
@@ -2622,6 +2635,7 @@ async function sendMsg(isFollowUp) {
         // v8.16.1: 草稿先行——灰底草稿面板 + 「预检索草稿·验证中」标签
         // v8.16.4: 占位「正在生成预览…」在展示中 → 原位升级为草稿面板
         // v8.17 修订: 来源徽标卫 data.source（web=原生联网 30-115s；local=快速回答 3-5s）
+        // v8.17.2: 手风琴——草稿写完后默认收缩（正文隐藏，点击标签展开）
         var _srcName = (data.source === 'web') ? '原生联网' : '快速回答';
         var _upEl = answerDiv.querySelector('.draft-panel');
         if (previewShown && _upEl) {
@@ -2637,6 +2651,9 @@ async function sendMsg(isFollowUp) {
           var _fp = _upEl.querySelector('.draft-phase');
           if (!_fp) { _fp = document.createElement('div'); _fp.className = 'draft-phase'; _upEl.appendChild(_fp); }
           _fp.textContent = '草稿已生成 · 正在扩展检索证据…';
+          /* v8.17.2: 占位 → 草稿升级：标签行变可点击头（带箭头）+ 默认收缩 */
+          if (_lb) { _lb.classList.add('draft-head'); _lb.onclick = function(){ _upEl.classList.toggle('open'); }; }
+          _upEl.classList.remove('open');
           break;
         }
         if (!draftShown) {
@@ -2644,7 +2661,9 @@ async function sendMsg(isFollowUp) {
           answerDiv.style.display = '';
           var dp = document.createElement('div');
           dp.className = 'draft-panel';
-          dp.innerHTML = '<div class="draft-label">预检索草稿·验证中<span class="draft-source"> · ' + _srcName + '</span></div><div class="draft-body"></div><div class="draft-phase">草稿已生成 · 正在扩展检索证据…</div>';
+          /* v8.17.2: 标签行含 draft-head（点击展开/收缩），默认收缩（无 open） */
+          dp.innerHTML = '<div class="draft-label draft-head">预检索草稿·验证中<span class="draft-source"> · ' + _srcName + '</span></div><div class="draft-body"></div><div class="draft-phase">草稿已生成 · 正在扩展检索证据…</div>';
+          dp.querySelector('.draft-label').onclick = function(){ dp.classList.toggle('open'); };
           answerDiv.appendChild(dp);
         } else {
           var _sb2 = answerDiv.querySelector('.draft-panel .draft-source');
@@ -2704,10 +2723,11 @@ async function sendMsg(isFollowUp) {
         if (!fullText&&data.answer) fullText=data.answer;
         if (fullText) answerDiv.innerHTML=renderMarkdownSafe(fullText.replace(/__NEED_COMPLEX__/g,''));
         // v8.16.1: 草稿曾展示且最终回答存在 → 顶部「已通过检索验证」标记（草稿替换语义闭环）
+        // v8.17.2: 面板保留（手风琴收缩），标记语义更新为「已通过检索验证 · 可展开查看」
         if (draftWasShown && fullText) {
           var dvb = document.createElement('div');
           dvb.className = 'draft-verified';
-          dvb.textContent = '✅ 草稿已通过检索验证，以上为最终回答';
+          dvb.textContent = '✅ 草稿已通过检索验证（上方为最终回答，草稿供核对）';
           answerDiv.insertBefore(dvb, answerDiv.firstChild);
         }
         if (fullText.indexOf('__NEED_COMPLEX__')>=0) {
@@ -2747,7 +2767,9 @@ async function sendMsg(isFollowUp) {
        draft 事件到达 → 原位升级为草稿面板；首 text 事件 → 移除占位 */
     previewShown = false;
     var _ppNew = document.createElement('div');
-    _ppNew.className = 'draft-panel';
+    /* v8.17.2: 占位阶段展开显示（preview open）；草稿事件到达后升级为
+       可点击头并收缩（见 case 'draft'） */
+    _ppNew.className = 'draft-panel open';
     _ppNew.innerHTML = '<div class="draft-label">正在生成预览…</div><div class="draft-body draft-hint">正在为你酝酿一份完整回答预览…</div>';
     answerDiv.appendChild(_ppNew);
     previewShown = true;

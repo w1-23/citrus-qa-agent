@@ -258,6 +258,13 @@ def test_v817_fusion_and_prompts():
     check("前端 draft.source 徽标接线（修正4）",
           ".draft-source" in idx and "data.source === 'web'" in idx
           and "原生联网" in idx and "快速回答" in idx)
+    # v8.17.2: 草稿手风琴——完成默认收缩 + 不强制擦除
+    check("前端草稿手风琴（draft-head 可点击头部）",
+          "draft-head" in idx and "classList.remove('open')" in idx
+          and "_dpEl.classList.remove('open')" in idx)
+    check("前端草稿不强制擦除（text 事件保留面板）",
+          "面板保留" in idx and "draftShown = true;" in idx
+          and "_dpEl.remove()" not in idx.split("case 'text'")[1].split("case 'draft'")[0])
 
     snap = (ROOT / "src/prompts/snapshot.py").read_text(encoding="utf-8")
     check("snapshot 渲染 structured_extract.txt", '"structured_extract.txt"' in snap)
