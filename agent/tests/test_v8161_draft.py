@@ -116,22 +116,48 @@ def test_v8161_parse_structured():
     except dw.StructuredParseError:
         check("空响应 → 抛错", True)
 
+    # ── v8.17: 容忍缺失 END 标记（日志实证模型偶发在 ANSWER 后提前收尾）──
+    raw_noend = ("===STRUCTURED_START===\n"
+                 "ANSWER: 柑橘黄龙病防控要点：无根治手段，以综合防控为主。\n"
+                 "MULTI_QUERY: citrus HLB control|HLB vector management|HLB resistant varieties\n")
+    p7 = dw._parse_structured_response(raw_noend)
+    check("v8.17 缺 END 标记 → 容忍解析", p7["draft_zh"].startswith("柑橘黄龙病防控要点"),
+          str(p7))
+    check("v8.17 缺 END 标记 → MQ 仍解析", p7["multi_query"] == [
+        "citrus HLB control", "HLB vector management", "HLB resistant varieties"],
+        str(p7["multi_query"]))
+
+    # ── v8.17: ANSWER 字段 = 草稿（DRAFT_ZH 别名）──
+    raw_answer = ("===STRUCTURED_START===\n"
+                  "ANSWER: 品种来源综述草稿。\n"
+                  "MULTI_QUERY: a|b|c\nSUMMARY: x|y|z\n"
+                  "===STRUCTURED_END===\n")
+    p8 = dw._parse_structured_response(raw_answer)
+    check("v8.17 ANSWER 字段归一为草稿（DRAFT_ZH 别名）",
+          p8["draft_zh"] == "品种来源综述草稿。", str(p8))
+
 
 # ── VF-20 草稿模板 + config 默认值 ────────────────────────────────
 def test_v8161_prompt_and_config():
     print("[VF-20] structured_output 模板 + config")
-    from src.prompts.loader import assemble_structured_output_prompt
+    from src.prompts.loader import assemble_structured_output_prompt, \
+        assemble_structured_extract_prompt
 
     prompt = assemble_structured_output_prompt()
     check("模板非空", bool(prompt))
     check("模板含 START 分隔符", "===STRUCTURED_START===" in prompt)
     check("模板含 END 分隔符", "===STRUCTURED_END===" in prompt)
-    # v8.16.3: 草稿纯中文预览——模板仅 DRAFT_ZH 一个字段（DRAFT_EN/MULTI_QUERY/SUMMARY 已移除）
-    check("模板含 DRAFT_ZH 字段", "DRAFT_ZH:" in prompt)
-    check("模板不再含检索字段", all(f not in prompt for f in ("DRAFT_EN", "MULTI_QUERY", "SUMMARY")),
-          "v8.16.3 DRAFT_EN/MULTI_QUERY/SUMMARY 应从模板消失")
+    # v8.17: 原生回答草稿 + 检索素材一体（从原生回答提取）
+    check("模板含 ANSWER 字段（原生回答）", "ANSWER:" in prompt)
+    check("模板恢复检索素材字段（v8.17 从原生回答提取）",
+          "MULTI_QUERY:" in prompt and "SUMMARY:" in prompt)
     check("模板禁止 JSON/围栏", "不要输出 JSON" in prompt and "不要输出 Markdown 代码块" in prompt)
-    check("模板 DRAFT_ZH 300-600 字约束", "300-600" in prompt)
+    check("模板强调 END 收尾", "不得遗漏收尾标记" in prompt or "以 `===STRUCTURED_END===` 结尾" in prompt)
+    check("模板 ANSWER 300-600 字约束", "300-600" in prompt)
+
+    ep = assemble_structured_extract_prompt()
+    check("v8.17 提取模板非空且含 MQ/SUMMARY",
+          bool(ep) and "MULTI_QUERY:" in ep and "SUMMARY:" in ep)
 
     check("DRAFT_ENABLED 默认开", settings.DRAFT_ENABLED is True)
     check("DRAFT_LABEL 默认文案", settings.DRAFT_LABEL == "预检索草稿·验证中", settings.DRAFT_LABEL)
@@ -165,28 +191,34 @@ def test_v8161_draft_event_and_worker():
           ev.get("content") == "2026年柑橘政策初判…"
           and ev.get("label") == "预检索草稿·验证中", str(ev))
 
-    # 2) draft_worker 全链路（打桩调用；v8.16.3: 纯前端预览——事件发出、不检索、不落仓）
+    # 2) draft_worker 全链路（打桩调用与检索；v8.17: 原生回答落仓 + 检索并入）
     q2 = asyncio.Queue()
     set_request_queue(q2)
     draft_store.clear()
 
     real_call = dw._call_structured_draft
+    real_search = dw._draft_search_multi
 
     class _FakeCallZh:
         def __call__(self, query):
             return ("===STRUCTURED_START===\n"
-                    "DRAFT_ZH: 2026年柑橘黄龙病综合防治技术现状，核心结论：无根治手段，"
+                    "ANSWER: 2026年柑橘黄龙病综合防治技术现状，核心结论：无根治手段，"
                     "综合管理以三角管理（病原-寄主-媒介）为框架。主要维度：①病原靶向——"
                     "化学治疗与热疗仍为田间主要手段；②媒介防控——化学防治、经济阈值与"
                     "生物防治（寄生蜂、虫生真菌）；③寄主管理——清除病树与无病苗。"
                     "具体证据与展开将在正式回答中给出。\n"
+                    "MULTI_QUERY: citrus HLB integrated management|HLB vector psyllid control|HLB resistant rootstocks\n"
+                    "SUMMARY: no radical cure triangle management|vector chemical biological control|infected tree removal\n"
                     "===STRUCTURED_END===\n")
 
     try:
         dw._call_structured_draft = _FakeCallZh()
+        dw._draft_search_multi = lambda queries: [
+            {"title": "draft-h1", "doi": "10.d/1", "year": 2026, "text": "body"}]
         asyncio.run(dw.draft_worker("2026柑橘政策", "sess-1"))
     finally:
         dw._call_structured_draft = real_call
+        dw._draft_search_multi = real_search
         items2 = []
         while not q2.empty():
             items2.append(q2.get_nowait())
@@ -195,14 +227,18 @@ def test_v8161_draft_event_and_worker():
     check("worker 发出 draft 事件", any(it["event"] == "draft" for it in items2), str(items2)[:200])
     draft_ev = next((it for it in items2 if it["event"] == "draft"), {})
     ddata = json.loads(draft_ev["data"]) if draft_ev.get("data") else {}
-    check("草稿内容 = DRAFT_ZH 完整预览", ddata.get("content", "").startswith(
+    check("草稿内容 = 原生回答完整预览", ddata.get("content", "").startswith(
         "2026年柑橘黄龙病综合防治技术现状"), str(ddata)[:120])
-    check("v8.16.3 草稿≥140 字（完整预览，非 100-150 短句）",
+    check("v8.17 草稿≥140 字（完整预览）",
           len(ddata.get("content", "")) >= 140, str(len(ddata.get("content", ""))))
     check("草稿标签 = 预检索草稿·验证中", ddata.get("label") == "预检索草稿·验证中", str(ddata))
 
-    check("v8.16.3 草稿不落仓（纯前端展示，检索独立）",
-          draft_store.pop("sess-1", "-") is None)
+    # v8.17: 原生回答 + 检索结果并入 draft_store（供 agent_runner 融合/证据）
+    payload = draft_store.pop("sess-1", "-")
+    check("v8.17 草稿落仓（原生回答 + 多路检索并入）",
+          payload is not None and len(payload.get("results") or []) == 1,
+          str({k: (v if k != "answer_text" else str(v)[:30]) for k, v in (payload or {}).items()}))
+    check("落仓含原生回答文本", bool(payload and payload.get("answer_text")))
     draft_store.clear()
 
     # 3) fail-soft：解析失败不抛异常、不落仓
@@ -263,10 +299,17 @@ def test_v8161_evidence_report_draft_line():
             "web_results": []}
     base = build_evidence_report(arts, "citrus hlb", 2)
     check("默认无草稿行", "草稿多路检索补充" not in base)
+    check("默认无原生回答段", "原生回答参考" not in base)
     with_draft = build_evidence_report(arts, "citrus hlb", 2, draft_extra_count=4)
     check("draft_extra_count=4 → 回执明示补充 4 条",
           "草稿多路检索补充: 4 条证据" in with_draft, with_draft[:300])
-    check("补充行含三路来源说明", "DRAFT_EN + MULTI_QUERY + SUMMARY" in with_draft)
+    check("补充行含三路来源说明", "原始问题 + MULTI_QUERY + SUMMARY" in with_draft)
+    # v8.17: 原生回答融合段（用户要求"最后融合原生回答进行生成"）
+    with_na = build_evidence_report(arts, "citrus hlb", 2,
+                                    draft_answer="原生预答内容123")
+    check("v8.17 原生回答参考段渲染",
+          "原生回答参考（草稿预答，非检索证据）" in with_na
+          and "原生预答内容123" in with_na, with_na[:300])
 
 
 # ── VF-24 源码接线断言（防接线回归，VF-17 同款模式）────────────────
@@ -283,11 +326,12 @@ def test_v8161_wiring_assertions():
           "draft_worker(query, session_id)" in ex and "草稿先行启动提前到 load 开头" in ex)
     check("light load 启动 draft_worker（全场景草稿）",
           "draft_worker(query, session_id)" in lg)
-    # v8.16.3: 草稿证据并入已移除（草稿=纯前端预览），draft_store.pop 不再出现于 agent_runner
-    check("agent_runner 不再并入草稿仓（草稿与检索解耦）",
-          "draft_store.pop" not in ar and "草稿多路检索补充" in ar)
-    check("deepseek_web 含分隔符解析与 worker",
-          "def _parse_structured_response" in dw and "async def draft_worker" in dw)
+    # v8.17: 草稿证据并入恢复——pop draft_store + 回执「原生回答参考」段 + 补充行
+    check("agent_runner 草稿并入恢复（pop + 原生回答段）",
+          "draft_store.pop" in ar and "原生回答参考" in ar and "草稿多路检索补充" in ar)
+    check("deepseek_web 含解析/worker/草稿检索入口",
+          "def _parse_structured_response" in dw and "async def draft_worker" in dw
+          and "def _draft_search_multi" in dw)
     check("前端 draft 事件分支", "case 'draft':" in idx)
     check("前端草稿标签文案", "预检索草稿·验证中" in idx)
     check("前端首 text 清空草稿", "draftShown = false" in idx)

@@ -45,6 +45,8 @@ AGENT_FILES = {
 # v8.16.1: 草稿先行——分隔符结构化输出模板（独立于系统提示词装配，
 # 仅供草稿 fast 调用使用；不进入 assemble_system_prompt，不动静态前缀）
 STRUCTURED_OUTPUT_FILE = "structured_output.md"
+# v8.17: 联网模式专用——从原生回答中提炼检索素材（MULTI_QUERY/SUMMARY）
+STRUCTURED_EXTRACT_FILE = "structured_extract.md"
 
 VALID_FORMATS = set(FORMAT_FILES.keys())
 VALID_AGENTS = set(AGENT_FILES.keys())
@@ -162,8 +164,18 @@ def assemble_structured_output_prompt() -> str:
 
     仅草稿 fast 调用使用（deepseek_web.draft_worker）；模板缺失时返回空串，
     调用方据此跳过草稿特性（fail-soft，不阻塞主链路）。
+    v8.17: 模板升级为原生回答草稿（ANSWER）+ 检索素材（MULTI_QUERY/SUMMARY）一体。
     """
     return _read_prompt_cached(STRUCTURED_OUTPUT_FILE)
+
+
+def assemble_structured_extract_prompt() -> str:
+    """v8.17: 联网模式专用——从原生联网回答中提炼检索素材模板。
+
+    供 deepseek_web.draft_worker 联网路径的二级提取调用使用；
+    模板缺失时返回空串（调用方跳过检索素材提取，草稿仍照常展示）。
+    """
+    return _read_prompt_cached(STRUCTURED_EXTRACT_FILE)
 
 
 def assemble_agent_prompt(

@@ -52,16 +52,17 @@ web_search:
   # 90s 覆盖实测区间并留余量；执行层对应预算见 agent.tool_timeouts。
   timeout_sec: 90
 
-# ── 草稿先行（v8.16.1）──
-# load 结束后台发起一次 fast 模型调用（非联网），一次性产出:
-#   DRAFT_ZH（中文草稿→前端「预检索草稿·验证中」3-5s 上屏）
-#   DRAFT_EN（英文→HyDE 复用，喂 search_multi）
-#   MULTI_QUERY（3 个英文角度） + SUMMARY（3 条英文要点） → 并入多路检索
-# 与联网解耦：联网回答仍走 deepseek_web_search（30-70s，引用可靠），草稿不依赖它。
+# ── 草稿先行（v8.16.1 / v8.17 原生回答草稿）──
+# load 节点后台发起 DeepSeek API 调用**直接回答用户原始问题** → 草稿（前端
+# 「预检索草稿·验证中」上屏）；检索素材（MULTI_QUERY + SUMMARY）从原生回答中提取
+# 喂 search_multi 并入证据；HyDE 假想段由 citrus_rag_search 独立额外调用；
+# 最终回答融合原生回答（回执「原生回答参考」段）与检索证据生成。
+# **联网开关只决定草稿/回答的 API 是否开启原生联网**：开 → Responses+原生
+# web_search（草稿即联网综述，附 [Wn] 引用，延迟 30-115s）；关 → 非联网快速回答（3-5s）。
 draft:
   enabled: true                     # 总开关（关=零草稿调用，链路完全回退 v8.15.3f 行为）
   label: "预检索草稿·验证中"         # 事件 label（前端 index.html 同文案兜底）
-  max_chars: 800                    # v8.16.3: DRAFT_ZH 完整预览展示上限（模板约 300-600 字，此值为防超长兜底截断）
+  max_chars: 800                    # v8.16.3: 完整预览展示上限（模板约 300-600 字，此值为防超长兜底截断）
   thinking_off: true                # v8.16.4: 草稿生成关思维链（降级 200 字根因防线；参数不兼容时 fail-soft 退回默认重试）
   timeout_sec: 25                   # v8.16.4: 15→25——草稿完整生成余量；有界防 API 挂死泄漏（不归零）
   # v8.16.3: 输出上限 1024→2048——fast 模型(depseek-v4-flash)思维链偶发吃光
@@ -69,7 +70,7 @@ draft:
   max_tokens: 2048                  # 结构化区块实际 400-800 tokens，留足思维链余量
   max_angles: 3                     # MULTI_QUERY 最多取前 N 条（提示词恰好 3）
   summary_points: 3                 # SUMMARY 最多取前 N 条（已确认上限 3，不做 5-8）
-  extra_retrieval: true             # v8.16.3 已废弃：草稿通道检索整体移除（草稿=纯前端预览），开关仅保留兼容
+  extra_retrieval: true             # v8.17 恢复生效：原生回答提取的 MQ/SUMMARY 喂 search_multi 并入证据
 
 model:
   main: "deepseek-v4-flash"   # v8.3.1: 全部切换 Flash 正式版（V4 Pro 已移除）

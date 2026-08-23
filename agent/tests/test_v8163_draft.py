@@ -118,7 +118,7 @@ def test_v8163_fallback_draft():
     check("fallback: 去代码围栏",
           dw._fallback_draft_zh("```text\n你好世界柑橘\n```") == "你好世界柑橘")
     check("fallback: 空输入", dw._fallback_draft_zh("") == "")
-    check("fallback: 上限 200 字", len(dw._fallback_draft_zh("字" * 500)) == 200)
+    check("fallback: 上限 300 字（v8.17 去残句）", len(dw._fallback_draft_zh("字" * 500)) == 300)
 
     # 2) worker 全链路：非空但无分隔符 → 降级草稿事件 + draft_fallback 日志 + 不落仓
     real_call = dw._call_structured_draft
@@ -344,8 +344,11 @@ def test_v8163_wiring_163():
     check("HYDE_THINKING_OFF 配置字段存在",
           "HYDE_THINKING_OFF" in cfg)
     check("HyDE 预算 HYDE_MAX_TOKENS 引用", "settings.HYDE_MAX_TOKENS" in se)
-    check("draft_worker 不再检索（无 rag.search_multi 调用）", "rag.search_multi" not in dw)
-    check("agent_runner 不再 pop 草稿仓", "draft_store.pop" not in
+    # v8.17: 草稿检索并入恢复（_draft_search_multi + agent_runner pop）
+    check("draft_worker 草稿检索入口恢复（_draft_search_multi）",
+          "def _draft_search_multi" in dw and "rag.search_multi" in dw)
+    check("agent_runner 恢复 pop 草稿仓（v8.17 融合 + 证据并入）",
+          "draft_store.pop" in
           (root / "src/core/agent_runner.py").read_text(encoding="utf-8"))
     check("草稿 create_task 在 ctx_mgr.load 之前",
           ex.index("create_task(draft_worker(query, session_id))") < ex.index("ctx_mgr.load(session_id, query, mode)"))

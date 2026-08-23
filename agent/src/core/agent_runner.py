@@ -155,7 +155,8 @@ def build_evidence_report(collected_artifacts: dict, query: str,
                           budget_blocked: int = 0,
                           dedup_blocked: int = 0,
                           web_unavailable: bool = False,
-                          draft_extra_count: int = 0) -> str:
+                          draft_extra_count: int = 0,
+                          draft_answer: str = "") -> str:
     """确定性证据回执（v8.4.6，纯函数可单测）。
 
     检索回执由代码组装而非模型转述——保证"管道而非漏斗"：
@@ -170,6 +171,9 @@ def build_evidence_report(collected_artifacts: dict, query: str,
         从文尾切掉的正是 [W1..W8] URL 清单与引用提示 → supervisor 无法挂 [Wn]
         → 回答概括化（v8.16.2 实证）。重排后截断只会损失主文献尾部,
         必读的 [Wn] 清单与编号导引恒在截断线之前；cap 同步 40000→60000。
+      - v8.17: draft_answer 非空时渲染「原生回答参考（草稿预答）」段——用户要求
+        "最后融合原生回答进行生成"：原生回答作为草稿级预答素材注入 supervisor，
+        与检索证据共同融合生成最终回答（标注来源，非检索证据）。
     """
     main = _dedup_evidence_items(list(collected_artifacts.get("main_results") or []))
     web = list(collected_artifacts.get("web_results") or [])
@@ -180,12 +184,12 @@ def build_evidence_report(collected_artifacts: dict, query: str,
         f"- 检索目标: {str(query)[:200]}",
         "",
     ]
-    # v8.16.1: 草稿先行多路检索补充（DRAFT_EN + MULTI_QUERY + SUMMARY 随
-    # load 后并行产出并入，supervisor 可见该路证据来源与量级）
+    # v8.16.1: 草稿先行多路检索补充（v8.17: 原始问题 + 自原生回答提取的
+    # MULTI_QUERY + SUMMARY 并行产出并入，supervisor 可见该路证据来源与量级）
     if draft_extra_count:
         lines.append(
             f"- 草稿多路检索补充: {draft_extra_count} 条证据"
-            "（DRAFT_EN + MULTI_QUERY + SUMMARY 并行产出，已并入 [n] 清单）"
+            "（原始问题 + MULTI_QUERY + SUMMARY 自原生回答提取，已并入 [n] 清单）"
         )
         lines.append("")
     if budget_blocked or dedup_blocked:
@@ -216,6 +220,20 @@ def build_evidence_report(collected_artifacts: dict, query: str,
         "联网事实必须挂 [Wn]。追问可直接引用证据回执内容，无需重复检索已覆盖的角度。"
     )
     lines.append("")
+    # v8.17: 原生回答参考（草稿预答）——用户要求"最后融合原生回答进行生成"：
+    # 草稿=DeepSeek 原生回答，作为草稿级预答素材注入 supervisor（非检索证据），
+    # 与 [n]/[Wn] 证据共同融合生成最终回答；位置紧跟引用导引（截断线前恒可见）。
+    if draft_answer and draft_answer.strip():
+        _da = draft_answer.strip()
+        if len(_da) > 800:
+            _da = _da[:800] + " …"
+        lines.append("## 原生回答参考（草稿预答，非检索证据）")
+        lines.append(
+            "以下为模型对用户问题的原生预答草稿，仅作融合参考：可采纳其正确判断，"
+            "但最终回答必须以检索证据为准，缺失细节按既有仲裁规则处理。")
+        _quoted_da = "\n".join(f"> {ln}" for ln in _da.splitlines())
+        lines.append(_quoted_da)
+        lines.append("")
     # v8.15.3f: 联网综述正文单独成段（此前 summary 只进工具 content、不进回执，
     # supervisor 只看到 URL 无正文 → cited=0 短回答）。综述是 DeepSeek 原生联网
     # 读完全网后生成的回答正文，是联网证据的核心正文，必须在回执里可见。
@@ -723,10 +741,33 @@ async def run_agent(
     # 直接进上下文（ToolMessage → 历史可见，追问无需重检索）——不再依赖模型转述
     # （"管道而非漏斗"，历史模型报告 34~176 字极短回执由此根治）。
     if agent_name == "retrieve-agent":
-        # v8.16.3: 草稿证据并入已移除——草稿改为纯前端预览，不再写入 draft_store
-        # （检索由 citrus_rag_search 的 HyDE 结构化独立承担）。draft_extra_count 保留
-        # 参数兼容（恒 0），build_evidence_report 的补充行仅在建置调用方显式传入时出现。
-        draft_extra_count = 0
+        # v8.17: 草稿证据并入恢复——草稿=DeepSeek 原生回答（草稿纯展示 → 原生回答
+        # 参考 + 检索并入）：pop draft_store（键=session|request）后
+        #   ① 原生回答 → draft_answer（回执「原生回答参考」段，最终回答融合）
+        #   ② 草稿多路检索结果 → main_results（[n] 清单）
+        #   ③ 联网路径引用 → web_results（[Wn] 清单）
+        # best-effort：任何失败零阻塞（fail-soft）。
+        draft_answer = ""
+        try:
+            from src.core.draft_store import draft_store
+            from src.core.tracing import get_request_id as _req_id
+            _draft = draft_store.pop(session_id, _req_id())
+        except Exception:
+            _draft = None
+        if _draft:
+            try:
+                _draft_results = _draft.get("results") or []
+                collected_artifacts["main_results"].extend(_draft_results)
+                for _w in (_draft.get("web_items") or []):
+                    if isinstance(_w, dict):
+                        collected_artifacts["web_results"].append(_w)
+                draft_answer = str(_draft.get("answer_text") or "")
+                logger.info(f"[AgentRunner] 草稿证据并入: {len(_draft_results)} 条 / "
+                            f"web {len(_draft.get('web_items') or [])} 条 / "
+                            f"原生回答 {len(draft_answer)} 字")
+            except Exception as e:
+                logger.warning(f"[AgentRunner] 草稿并入失败（跳过）: {e}")
+        draft_extra_count = len(_draft.get("results") or []) if _draft else 0
         budget_blocked = sum(
             1 for m in placeholder_results.values()
             if str(getattr(m, "content", "") or "").startswith("[SEARCH_BUDGET]"))
@@ -737,7 +778,8 @@ async def run_agent(
             collected_artifacts, query, rag_search_count,
             budget_blocked=budget_blocked, dedup_blocked=dedup_blocked,
             web_unavailable=(_web_fail_streak >= 2),
-            draft_extra_count=draft_extra_count)
+            draft_extra_count=draft_extra_count,
+            draft_answer=draft_answer)
         if result_content:
             logger.info(
                 f"[AgentRunner] retrieve-agent 模型自述({len(result_content)} chars) "

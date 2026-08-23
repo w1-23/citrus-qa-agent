@@ -562,8 +562,15 @@ class MultiBatchRetriever:
                             weights: List[float], stream_labels: List[str],
                             rerank_query: str, mode: str, t0: float,
                             stage_ms: Dict[str, float], n_queries: int = 1,
-                            fallback_query: Optional[str] = None) -> List[Dict]:
-        """去重 → RRF → 候选全文 → rerank → 动态阈值 → 空归因 → 日志，返回 passed 证据。"""
+                            fallback_query: Optional[str] = None,
+                            boost_src: Optional[str] = None,
+                            boost_factor: float = 1.25) -> List[Dict]:
+        """去重 → RRF → 候选全文 → rerank → 动态阈值 → 空归因 → 日志，返回 passed 证据。
+
+        v8.17: boost_src 非空时对指定来源（如 ucr）命中加权（rerank_score × boost_factor）
+        并重排置前——品种类问题优先命中 UCR 品种库的检索层落地；加权在阈值判定
+        之前执行（被加权条目更易通过且排在前列，后续 evidence 呈 [UCR] 先行）。
+        """
         # 每流独立「分数降序 → 按 global_idx 去重（保留最高分）」
         deduped: List[List[Tuple[int, float]]] = []
         for hits in streams:
@@ -589,6 +596,16 @@ class MultiBatchRetriever:
             if fallback_query is not None:
                 return self.search(fallback_query)
             return []
+
+        # v8.17: 来源加权（UCR 优先）——加权后重排（boost_src 置前、分数降序）
+        if boost_src:
+            for _c in reranked:
+                if _c.get("_src") == boost_src:
+                    _c["rerank_score"] = round(
+                        float(_c.get("rerank_score", 0) or 0) * float(boost_factor or 1.0), 4)
+            reranked.sort(key=lambda _c: (
+                -(1 if _c.get("_src") == boost_src else 0),
+                -float(_c.get("rerank_score", 0) or 0)))
 
         top_score = reranked[0].get("rerank_score", 0)
         dynamic_thresh = top_score * settings.DYNAMIC_THRESHOLD_RATIO
@@ -640,7 +657,12 @@ class MultiBatchRetriever:
                            "filtered": len(filtered), "query": rerank_query}
         return passed
 
-    def search_multi(self, queries: List[str]) -> List[Dict]:
+    def search_multi(self, queries: List[str], ucr_boost: bool = False) -> List[Dict]:
+        """多路并发检索。
+
+        v8.17: ucr_boost=True 时对 UCR 品种库来源（batch_source=ucr）命中加权并置前
+        ——品种类问题优先命中 UCR（search.py 检测品种意图后传入）。
+        """
         if not queries:
             return []
         _t0 = time.time()
@@ -689,6 +711,7 @@ class MultiBatchRetriever:
             t0=_t0,
             stage_ms={"embed": dt_embed, "vector": dt_vector, "bm25": dt_bm25},
             n_queries=len(queries),
+            boost_src=("ucr" if ucr_boost else None),
         )
 
     def search(self, query: str) -> List[Dict]:

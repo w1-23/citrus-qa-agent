@@ -234,6 +234,24 @@ def _is_citrus_related(text: str) -> bool:
 
     return any(kw.lower() in text.lower() for kw in _CITRUS_KEYWORDS)
 
+
+# v8.17: 品种意图检测——品种/品系/品种库/种质/登记等词触发 UCR 品种库优先命中
+# （UCR 批次 batch_source=ucr，evidence 前缀 [UCR]）。误报（如"品种改良"）无害：
+# boost 只是把 UCR 命中前置加权，不改变全库召回。
+_VARIETY_INTENT_KEYWORDS = [
+    "品种", "品系", "栽培品种", "品种库", "品种特性", "品种资源",
+    "种质", "育种", "登记", "注册品种", "variet", "cultivar", "cultivars",
+    "ucr", "crc", "accession", "registry", "germplasm",
+]
+
+
+def _is_variety_intent(query: str) -> bool:
+    """品种类问题判定（纯函数可单测）——命中即对 UCR 来源加权。"""
+    if not query:
+        return False
+    q = str(query).lower()
+    return any(kw in q for kw in _VARIETY_INTENT_KEYWORDS)
+
 def _extract_doi(text: str) -> str | None:
 
     match = re.search(r'''(10\.\d{4,}/[^\s"'\]\)]+)''', text)
@@ -410,9 +428,14 @@ def citrus_rag_search(query: str) -> tuple[str, dict]:
                 queries.append(query)
                 logger.info(f"[HyDE] 结构化仅 HyDE 段，补充原始查询保底 → "
                             f"{len(queries)} 路查询")
-            results = rag.search_multi(queries)
+            # v8.17: 品种意图 → UCR 品种库优先命中（来源加权置前，见 multi_retriever）
+            _ucr_boost = _is_variety_intent(query)
+            if _ucr_boost:
+                logger.info(f"[citrus_rag_search] 品种意图 → UCR 优先检索: {str(query)[:40]}...")
+            results = rag.search_multi(queries, ucr_boost=_ucr_boost)
         else:
-            results = rag.search(query)
+            # v8.17: 无结构化 HyDE 时同走 ucr_boost（保持品种优先一致）
+            results = rag.search_multi([query], ucr_boost=_is_variety_intent(query))
 
         elapsed = (time.perf_counter() - t0) * 1000
 

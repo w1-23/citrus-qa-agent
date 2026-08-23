@@ -36,11 +36,15 @@ def test_v8164_draft_nothink():
     print("[VF-36] 草稿关思维链(fail-soft) + timeout 25")
     import src.tools.deepseek_web as dw
 
-    src = inspect.getsource(dw._call_structured_draft)
+    # v8.17: thinking/fail-soft 逻辑收敛到 _fast_llm_call（草稿/提取共用）
+    src = inspect.getsource(dw._fast_llm_call)
     check("草稿调用携带 thinking:disabled",
           '"thinking": {"type": "disabled"}' in src)
     check("参数被拒 → 第 1 次退回默认参数重试（防无草稿）",
           "退回默认参数重试一次" in src)
+    check("fast 助手被草稿与提取共用",
+          "def _call_structured_draft" in inspect.getsource(dw)
+          and "def _call_extract_from_answer" in inspect.getsource(dw))
     check("DRAFT_THINKING_OFF 配置默认开",
           settings.DRAFT_THINKING_OFF is True, str(settings.DRAFT_THINKING_OFF))
     check("DRAFT_TIMEOUT_SEC = 25（有界余量，不归零）",
