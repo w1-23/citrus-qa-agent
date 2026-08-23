@@ -47,6 +47,9 @@ AGENT_FILES = {
 STRUCTURED_OUTPUT_FILE = "structured_output.md"
 # v8.17: 联网模式专用——从原生回答中提炼检索素材（MULTI_QUERY/SUMMARY）
 STRUCTURED_EXTRACT_FILE = "structured_extract.md"
+# v8.17.9: 联网模式专用——单独联网调用一次产出 [ANSWER]/[MQ]/[SUMMARY] 三区块
+# （用户方案：提取前移，联网调用直接结构化输出，不再二次提取）
+STRUCTURED_WEB_FILE = "structured_web.md"
 
 VALID_FORMATS = set(FORMAT_FILES.keys())
 VALID_AGENTS = set(AGENT_FILES.keys())
@@ -172,10 +175,22 @@ def assemble_structured_output_prompt() -> str:
 def assemble_structured_extract_prompt() -> str:
     """v8.17: 联网模式专用——从原生联网回答中提炼检索素材模板。
 
-    供 deepseek_web.draft_worker 联网路径的二级提取调用使用；
-    模板缺失时返回空串（调用方跳过检索素材提取，草稿仍照常展示）。
+    v8.17.9 起不再被 draft_worker 调用（联网路径改为三区块一次产出，
+    structured_web.md），保留此函数与模板文件仅作备用/历史兼容。
+    模板缺失时返回空串。
     """
     return _read_prompt_cached(STRUCTURED_EXTRACT_FILE)
+
+
+def assemble_structured_web_prompt() -> str:
+    """v8.17.9: 联网模式专用——单独联网调用（Responses+web_search）的
+    instructions 模板：[ANSWER]/[MQ]/[SUMMARY] 三区块一次产出。
+
+    用户方案"提取前移"：联网调用直接结构化输出，草稿=[ANSWER]，
+    检索素材=[MQ]+[SUMMARY]，不再二次提取。模板缺失时返回空串
+    （此时 _responses_web_search 退回自由文本形态，草稿恒在）。
+    """
+    return _read_prompt_cached(STRUCTURED_WEB_FILE)
 
 
 def assemble_agent_prompt(

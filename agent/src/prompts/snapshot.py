@@ -24,6 +24,7 @@ def render_all(include_strategy_cards: bool = True) -> dict[str, str]:
         build_agent_extra_block,
         assemble_structured_output_prompt,  # v8.16.1: 草稿先行结构化模板
         assemble_structured_extract_prompt,  # v8.17: 联网模式检索素材提取模板
+        assemble_structured_web_prompt,  # v8.17.9: 联网调用三区块一次产出模板
         VALID_AGENTS,
         VALID_FORMATS,
     )
@@ -47,6 +48,8 @@ def render_all(include_strategy_cards: bool = True) -> dict[str, str]:
     out["structured_output.txt"] = assemble_structured_output_prompt()
     # v8.17: 联网模式检索素材提取模板
     out["structured_extract.txt"] = assemble_structured_extract_prompt()
+    # v8.17.9: 联网调用三区块一次产出模板
+    out["structured_web.txt"] = assemble_structured_web_prompt()
     return out
 
 

@@ -156,24 +156,43 @@ def _responses_web_search(input_prompt: str) -> tuple[str, list[dict]]:
 
     与 deepseek_web_search 同端点/同超时/同解析，但为「用户原始问题直答」形态：
     返回 (summary 正文, 去重引用清单)；失败抛异常（调用方 fail-soft 跳过草稿）。
+    v8.17.9（用户方案"提取前移"）：instructions 携带 structured_web.md 三区块
+    模板（[ANSWER]/[MQ]/[SUMMARY] 一次产出），草稿=[ANSWER]、检索素材=[MQ]+
+    [SUMMARY]，不再需要二次提取调用。模板缺失/instructions 参数被拒时
+    自动退回无 instructions 的自由文本形态（fail-soft，草稿恒在，
+    后续由 draft_worker 的解析器兜底）。
     """
+    from src.prompts.loader import assemble_structured_web_prompt
+    instructions = assemble_structured_web_prompt()
     payload = {
         "model": get_deepseek_model(),
         "input": input_prompt,
         "tools": [{"type": "web_search"}],
         "stream": False,
     }
+    if instructions:
+        payload["instructions"] = instructions
     headers = {
         "Authorization": f"Bearer {settings.RESOLVED_MAIN_API_KEY or settings.MAIN_API_KEY}",
         "Content-Type": "application/json",
     }
     url = _responses_endpoint()
     _to = _web_http_timeout()
-    logger.info(f"[draft-web] Responses 调用: {url} model={payload['model']} timeout={_to}s")
+    logger.info(f"[draft-web] Responses 调用: {url} model={payload['model']} "
+                f"timeout={_to}s instructions={'yes' if instructions else 'no'}")
     resp = requests.post(url, headers=headers, json=payload, timeout=_to)
     if resp.status_code != 200:
-        raise RuntimeError(
-            f"Responses HTTP {resp.status_code}: {resp.text[:300]}")
+        if instructions and resp.status_code in (400, 422):
+            # v8.17.9: instructions 参数被厂商拒绝（DeepSeek Responses 参数兼容
+            # 未实测）→ 退回自由文本形态重试一次（fail-soft，草稿恒在）
+            logger.warning(
+                f"[draft-web] instructions 参数被拒 HTTP {resp.status_code}，"
+                f"退回无 instructions 形态重试: {resp.text[:200]}")
+            payload.pop("instructions", None)
+            resp = requests.post(url, headers=headers, json=payload, timeout=_to)
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Responses HTTP {resp.status_code}: {resp.text[:300]}")
     body = resp.json()
     summary, calls, _meta = _parse_response_output(body.get("output") or [])
     if not summary and not calls:
@@ -422,6 +441,51 @@ def _parse_tolerant_labels(raw_text: str) -> dict:
     return result
 
 
+# v8.17.9: 联网调用一次产出的三区块标签（用户方案：提取前移）
+_WEB_ANS_TAG_RE = re.compile(r"\[ANSWER\]\s*(.*?)\s*\[/ANSWER\]", re.IGNORECASE | re.DOTALL)
+_WEB_MQ_TAG_RE = re.compile(r"\[MQ\]\s*(.*?)\s*\[/MQ\]", re.IGNORECASE | re.DOTALL)
+_WEB_SUM_TAG_RE = re.compile(r"\[SUMMARY\]\s*(.*?)\s*\[/SUMMARY\]", re.IGNORECASE | re.DOTALL)
+
+
+def _strip_tag_items(block: str) -> list:
+    """区块内 '- ' 列表项 → 字符串列表（容忍行首 -/•/* 与空白）。"""
+    items = []
+    for line in (block or "").splitlines():
+        s = line.strip().lstrip("-•* ").strip()
+        if s and not s.startswith("```"):
+            items.append(s)
+    return items
+
+
+def _parse_web_three_block(raw_text: str) -> dict:
+    """v8.17.9: 解析联网调用一次产出的 [ANSWER]/[MQ]/[SUMMARY] 三区块。
+
+    用户方案"提取前移"的解析端：单一响应内同时含草稿正文与检索素材，
+    三区块独立解析、互不影响——[ANSWER] 缺失只丢草稿正文（调用方回退
+    自由文本/无草稿，fail-soft）；[MQ]/[SUMMARY] 缺失只丢对应检索素材
+    （后续 draft_worker 关键词降级兜底）。返回
+    {"answer": str, "draft_zh": str, "multi_query": list, "summary": list}。
+    """
+    text = _strip_code_fence(raw_text or "")
+    result: dict = {
+        "answer": "",
+        "draft_zh": "",
+        "multi_query": [],
+        "summary": [],
+    }
+    m_ans = _WEB_ANS_TAG_RE.search(text)
+    if m_ans:
+        result["answer"] = m_ans.group(1).strip()
+        result["draft_zh"] = result["answer"]
+    m_mq = _WEB_MQ_TAG_RE.search(text)
+    if m_mq:
+        result["multi_query"] = _strip_tag_items(m_mq.group(1))
+    m_sum = _WEB_SUM_TAG_RE.search(text)
+    if m_sum:
+        result["summary"] = _strip_tag_items(m_sum.group(1))
+    return result
+
+
 def _parse_structured_response(raw_text: str, require_answer: bool = True) -> dict:
     """从 DeepSeek 响应中提取结构化字段（分隔符定位，不依赖 JSON 解析）。
 
@@ -599,10 +663,12 @@ def _call_structured_draft(query: str) -> str | None:
 
 
 def _call_extract_from_answer(query: str, answer: str) -> str | None:
-    """v8.17: 联网模式专用二级提取——从原生联网回答中提炼 MULTI_QUERY/SUMMARY。
+    """v8.17: 联网模式二级提取——从原生联网回答中提炼 MULTI_QUERY/SUMMARY。
 
-    满足"后续提取也从里面提取"（联网路径的原生回答是自由文本，需一次读取
-    该回答的提取调用）；提取失败不阻塞草稿展示（调用方 fail-soft）。
+    **v8.17.9 起废弃备用**：用户方案"提取前移"——单独联网调用经 instructions
+    直接一次产出 [ANSWER]/[MQ]/[SUMMARY] 三区块（structured_web.md），
+    draft_worker 不再调用本函数（保留定义仅为历史兼容/回滚兜底）；
+    提取失败不阻塞草稿展示（调用方 fail-soft）。
     """
     from src.prompts.loader import assemble_structured_extract_prompt
     prompt = assemble_structured_extract_prompt()
@@ -704,7 +770,7 @@ def _extract_keywords_from_text(text: str, max_items: int = 3) -> list:
 async def draft_worker(query: str, session_id: str) -> None:
     """v8.17 草稿先行后台任务（load 节点 create_task 启动，fire-and-forget）。
 
-    用户要求（v8.17 决策 + v8.17.1 修订）：
+    用户要求（v8.17 决策 + v8.17.1 修订 + v8.17.9 提取前移）：
       - **原生回答用于草稿**：一次 DeepSeek API 调用直接回答原始问题 → 草稿展示；
       - **联网只发生一次**（v8.17.1）：唯一一次原生联网调用在本 worker（传入用户
         原始问题之时）执行；retrieve-agent 的 ReAct 循环不再调用任何联网工具
@@ -714,12 +780,16 @@ async def draft_worker(query: str, session_id: str) -> None:
         （ANSWER + MULTI_QUERY + SUMMARY 一体分隔符输出）；
       - **v8.17.1 联网失败回退**：原生联网调用失败 → **回退到快速非联网调用**
         （与 web 关同一路径），确保草稿恒存在（用户要求"联网失败草稿不消失"）；
-      - **后续提取也从里面提取**：检索素材（MULTI_QUERY/SUMMARY）从原生回答
-        提炼（web 关同一调用内提取；web 开为读取回答的二级提取调用）；
+      - **v8.17.9 提取前移（用户方案）**：单独联网调用经 instructions 携带
+        structured_web.md 模板**一次产出 [ANSWER]/[MQ]/[SUMMARY] 三区块**——
+        草稿=[ANSWER]、检索素材=[MQ]+[SUMMARY]，同一响应内同源产出，
+        **不再需要二次提取调用**（_call_extract_from_answer 废弃备用），
+        格式约束放在调用端（比两阶段解析容错更高、LLM 调用 2 次→1 次）；
       - **HyDE 部分额外调用**：由 citrus_rag_search 内部独立结构化生成（本链路不动）；
       - **最后融合原生回答进行生成**：草稿（原生回答）经 draft_store → agent_runner
         并入确定性回执「原生回答参考」段，supervisor 融合生成最终回答；
-      - 草稿检索并入恢复：提取出的 MQ/SUMMARY 喂 search_multi，结果进 [n] 证据。
+      - 草稿检索并入恢复：MQ/SUMMARY 喂 search_multi，结果进 [n] 证据；
+        MQ/SUMMARY 缺失（模型未按区块输出）→ 关键词降级兜底（v8.17.8）。
 
     注意: 本任务执行严格 fail-soft——任何异常只记日志，绝不阻塞主链路。
     v8.16.2: 业务日志 draft_done / draft_skipped——"草稿未显示"类问题第一现场。
@@ -752,43 +822,30 @@ async def draft_worker(query: str, session_id: str) -> None:
                         reason=f"call_exception:{type(e).__name__}:{str(e)[:120]}")
             web_fallback = True
         if not web_fallback:
-            draft_zh = (summary or "").strip()
             web_items = _to_web_items(calls)
+            raw_web = (summary or "").strip()
+            # v8.17.9（用户方案"提取前移"）：联网调用经 instructions 一次产出
+            # [ANSWER]/[MQ]/[SUMMARY] 三区块 → 直接解析，不再二次提取调用。
+            # 草稿正文 = [ANSWER]；检索素材 = [MQ] + [SUMMARY]；
+            # 模型未按区块输出（instructions 被拒退回自由文本形态）时：
+            #   draft_zh 回退整段文本（草稿恒在），素材交给下方关键词降级兜底。
+            parsed = _parse_web_three_block(raw_web)
+            draft_zh = (parsed.get("draft_zh") or "").strip() or raw_web
             if not draft_zh:
                 logger.info("[draft-web] 联网回答无正文，回退快速调用")
                 _draft_blog("draft_web_fallback", reason="call_empty")
                 web_fallback = True
-            elif draft_zh:
-                raw_extract: str | None = None
-                try:
-                    raw_extract = await asyncio.to_thread(
-                        _call_extract_from_answer, query, draft_zh)
-                    if raw_extract:
-                        # v8.17: 提取块仅 MULTI_QUERY/SUMMARY（无 ANSWER），不强制草稿字段
-                        # v8.17.6: 无包裹标记也容错解析；仍为空则留痕（预览）便于诊断
-                        parsed = _parse_structured_response(raw_extract, require_answer=False)
-                        if not (parsed.get("multi_query") or parsed.get("summary")):
-                            logger.warning(
-                                f"[draft-web] 检索素材提取结果为空（MQ/SUMMARY 未识别），"
-                                f"raw_preview={raw_extract[:120]!r}")
-                        else:
-                            logger.info(
-                                f"[draft] 标签行解析成功 | mq="
-                                f"{len(parsed.get('multi_query') or [])} sum="
-                                f"{len(parsed.get('summary') or [])}")
-                    else:
-                        # v8.17.8: 提取调用空返回不再静默——留痕（fast 空 content/模板缺失）
-                        logger.warning(
-                            f"[draft-web] 检索素材提取调用返回空（原回答 {len(draft_zh)} 字），"
-                            f"转关键词降级兜底")
-                except StructuredParseError as e:
-                    preview = (f" raw_preview={raw_extract[:120]!r}"
-                               if raw_extract else "")
-                    logger.warning(f"[draft-web] 检索素材提取格式异常（跳过并入）: {e}{preview}")
-                except Exception as e:
-                    preview = (f" raw_preview={raw_extract[:120]!r}"
-                               if raw_extract else "")
-                    logger.warning(f"[draft-web] 检索素材提取异常（跳过并入）: {e}{preview}")
+            else:
+                _mq_n = len(parsed.get("multi_query") or [])
+                _sm_n = len(parsed.get("summary") or [])
+                if _mq_n or _sm_n:
+                    logger.info(
+                        f"[draft] 联网三区块一次产出 | mq={_mq_n} sum={_sm_n} "
+                        f"(草稿 {len(draft_zh)} 字)")
+                else:
+                    logger.warning(
+                        f"[draft-web] 联网未产出 MQ/SUMMARY 区块（转关键词兜底），"
+                        f"raw_preview={raw_web[:120]!r}")
 
     if web_fallback or not web_mode:
         if web_fallback:
