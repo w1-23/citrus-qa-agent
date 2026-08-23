@@ -2387,6 +2387,33 @@ function _refIdSort(items) {
     return ka < kb ? -1 : (ka > kb ? 1 : 0);
   });
 }
+/* v8.17.3: 联网引用编号紧凑重排——回答只引用了部分 [Wn]（如 [W1][W3][W7]），
+   侧栏/徽章条/正文保留原始跳跃编号（W1/W3/W7 断层）。这里把「被引用的 W 条目」
+   按原始编号升序压缩为连续编号（W1..Wk），使展示从 [W1][W2][W3] 连续、无跳跃。
+   仅压缩 [Wn]（联网网址），本地 [n] / 历史 [Hn] 保持原样（其编号与回执顺序对应）。
+   纯展示层重排：不动后端回执编号，只影响本条消息的 UI 呈现。 */
+function _buildCompactRefMap(citedList) {
+  var used = [];
+  for (var i = 0; i < (citedList || []).length; i++) {
+    var rid = citedList[i] && citedList[i].ref_id;
+    if (rid != null && /^W\d+$/i.test(String(rid)) && used.indexOf(String(rid)) < 0) {
+      used.push(String(rid));
+    }
+  }
+  used = _refIdSort(used.map(function (r) { return {ref_id: r}; }))
+      .map(function (o) { return o.ref_id; });
+  var map = {};
+  for (var j = 0; j < used.length; j++) map[used[j]] = 'W' + (j + 1);
+  return map;
+}
+/* 正文 [Wn] 引用按紧凑映射重写；[n]/[Hn] 保持原样。 */
+function _rewriteWRefsInText(text, map) {
+  if (!text || !map) return text;
+  return text.replace(/\[(W\d+)\]/gi, function (full, wid) {
+    var norm = String(wid).toUpperCase();
+    return '[' + (map[norm] != null ? map[norm] : norm) + ']';
+  });
+}
 
 async function sendMsg(isFollowUp) {
   if (isFollowUp === undefined) isFollowUp = false;
@@ -2504,6 +2531,9 @@ async function sendMsg(isFollowUp) {
     if (!renderPending) {
       renderPending = true;
       requestAnimationFrame(function() {
+        /* v8.17.2+ 面板保护：重渲染不抹掉草稿手风琴面板（先摘除，重绘后插回顶部） */
+        var _dpKeep = answerDiv.querySelector('.draft-panel');
+        if (_dpKeep) _dpKeep.remove();
         var s = fullText.replace(/__NEED_COMPLEX__/g, '');
         var frx = /---\s*\*\*.. \u6df1\u5165\u63a2\u7d22.*?\*\*([\s\S]*?)$/;
         var m = s.match(frx);
@@ -2517,6 +2547,7 @@ async function sendMsg(isFollowUp) {
           }
         }
         answerDiv.innerHTML = renderMarkdownSafe(main);
+        if (_dpKeep) answerDiv.insertBefore(_dpKeep, answerDiv.firstChild);
         if (qs.length > 0) {
           var cc = document.createElement('div'); cc.className = 'follow-up-container';
           var cl = document.createElement('div'); cl.className = 'follow-up-label'; cl.textContent = '深入探索（点击追问）'; cc.appendChild(cl);
@@ -2700,9 +2731,25 @@ async function sendMsg(isFollowUp) {
         updateStatus('answer', '✅ 第 ' + (data.index||'') + '/' + (data.total||'') + ' 章完成');
         break;
       case 'citations':
-        roundHistory.push({roundId:currentRoundId,query:currentQuery,cited:data.cited||[],uncited:data.uncited||[],historical:data.historical||[]});
+        // v8.17.3: 联网引用编号紧凑重排——回答只引用了部分 [Wn]（如 [W1][W3][W7]），
+        // 先压缩被引用 W 条目的编号为连续 W1..Wk（原跳跃编号 W1/W3/W7 → W1/W2/W3），
+        // 再同步重写正文 [Wn] 引用并重渲染，最后才写入 roundHistory（侧栏同编号）。
+        var _cited0 = data.cited || [];
+        var _wmap = _buildCompactRefMap(_cited0);
+        if (Object.keys(_wmap).length > 0) {
+          for (var _ci = 0; _ci < _cited0.length; _ci++) {
+            var _oldR = _cited0[_ci] && _cited0[_ci].ref_id;
+            if (_oldR != null && _wmap[String(_oldR)] != null) {
+              _cited0[_ci].ref_id = _wmap[String(_oldR)];
+            }
+          }
+          // 正文 [Wn] 引用同步重排（text 流式已完成，fullText 已完整）
+          fullText = _rewriteWRefsInText(fullText, _wmap);
+          renderAnswer();
+        }
+        roundHistory.push({roundId:currentRoundId,query:currentQuery,cited:_cited0,uncited:data.uncited||[],historical:data.historical||[]});
         renderRoundSidebar(); citationsDiv.style.display='';
-        var cited=data.cited||[];
+        var cited = _cited0;
         if (cited.length>0) {
           var c=document.createElement('div'); c.style.cssText='margin-top:10px;padding-top:10px;border-top:1px solid var(--border-hairline)';
           c.innerHTML='<div style="font-size:11px;color:var(--text-muted);margin-bottom:5px">引用 ('+cited.length+'篇)</div>';
@@ -2721,7 +2768,13 @@ async function sendMsg(isFollowUp) {
           showBanner('⚠ 回答引用编号(' + (data.citation_count||0) + ')多于检索文献(' + (data.retrieval_count||0) + ')');
         }
         if (!fullText&&data.answer) fullText=data.answer;
-        if (fullText) answerDiv.innerHTML=renderMarkdownSafe(fullText.replace(/__NEED_COMPLEX__/g,''));
+        if (fullText) {
+          /* v8.17.2+ 面板保护：done 重渲染不抹掉草稿手风琴面板 */
+          var _dpD = answerDiv.querySelector('.draft-panel');
+          if (_dpD) _dpD.remove();
+          answerDiv.innerHTML=renderMarkdownSafe(fullText.replace(/__NEED_COMPLEX__/g,''));
+          if (_dpD) answerDiv.insertBefore(_dpD, answerDiv.firstChild);
+        }
         // v8.16.1: 草稿曾展示且最终回答存在 → 顶部「已通过检索验证」标记（草稿替换语义闭环）
         // v8.17.2: 面板保留（手风琴收缩），标记语义更新为「已通过检索验证 · 可展开查看」
         if (draftWasShown && fullText) {

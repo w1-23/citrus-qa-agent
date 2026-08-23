@@ -265,6 +265,14 @@ def test_v817_fusion_and_prompts():
     check("前端草稿不强制擦除（text 事件保留面板）",
           "面板保留" in idx and "draftShown = true;" in idx
           and "_dpEl.remove()" not in idx.split("case 'text'")[1].split("case 'draft'")[0])
+    # v8.17.3: 联网引用编号紧凑重排（[W1][W3][W7] → [W1][W2][W3]）
+    check("前端引用紧凑重排函数存在", "_buildCompactRefMap" in idx
+          and "_rewriteWRefsInText" in idx and "仅压缩 [Wn]（联网网址）" in idx)
+    check("citations 事件接入重排（重写全文 + roundHistory 同步）",
+          "_wmap" in idx and "_rewriteWRefsInText(fullText, _wmap)" in idx
+          and "renderAnswer()" in idx)
+    check("渲染保护不抹草稿面板（renderAnswer/done）",
+          "面板保护" in idx and "_dpKeep" in idx and "_dpD" in idx)
 
     snap = (ROOT / "src/prompts/snapshot.py").read_text(encoding="utf-8")
     check("snapshot 渲染 structured_extract.txt", '"structured_extract.txt"' in snap)
