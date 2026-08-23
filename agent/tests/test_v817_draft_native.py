@@ -289,6 +289,42 @@ def test_v8176_tolerant_extract():
           and payload.get("web_mode") is True, str(payload)[:200])
     draft_store.clear()
 
+    # ── v8.17.7: 提取完全失败（纯文本无标签）→ fail-soft：草稿仍落仓，主链路不阻塞 ──
+    q2 = asyncio.Queue()
+    set_request_queue(q2)
+    draft_store.clear()
+    try:
+        dw._responses_web_search = lambda inp: (
+            "2025 年柑橘黄龙病防控进展极简版：媒介监测与精准施药。",
+            [])
+        dw._call_extract_from_answer = lambda qry, ans: (
+            "模型没有按模板输出,这是纯文本回答,没有任何标签行。")
+        dw._draft_search_multi = lambda queries: (_ for _ in ()).throw(
+            AssertionError("不应在提取失败时触发多路检索"))
+        tracing.set_web_search_enabled(True)
+        try:
+            asyncio.run(dw.draft_worker("HLB 2025 防控进展", "sess-fail"))
+        finally:
+            tracing.set_web_search_enabled(False)
+    finally:
+        dw._responses_web_search = real_resp
+        dw._call_extract_from_answer = real_extract
+        dw._draft_search_multi = real_search
+        items2 = []
+        while not q2.empty():
+            items2.append(q2.get_nowait())
+        clear_request_queue()
+    payload2 = draft_store.pop("sess-fail", "-")
+    check("提取失败 fail-soft：草稿正文仍落仓（原生回答参考段不丢）",
+          payload2 is not None and payload2.get("answer_text", "").startswith(
+              "2025 年柑橘黄龙病防控进展极简版")
+          and (payload2.get("results") or []) == []
+          and payload2.get("web_mode") is True, str(payload2)[:200])
+    draft_ev2 = next((it for it in items2 if it.get("event") == "draft"), {})
+    check("提取失败 fail-soft：草稿事件仍推前端（内容=原生回答）",
+          bool(draft_ev2) and "极简版" in str(draft_ev2.get("data", ""))[:200])
+    draft_store.clear()
+
 
 # ── VF-41 原生回答段 + 提示词标记 + snapshot ──────────────────────
 def test_v817_fusion_and_prompts():

@@ -36,24 +36,26 @@ def test_v8164_draft_nothink():
     print("[VF-36] 草稿关思维链(fail-soft) + timeout 25")
     import src.tools.deepseek_web as dw
 
-    # v8.17: thinking/fail-soft 逻辑收敛到 _fast_llm_call（草稿/提取共用）
+    # v8.17.7: thinking/fail-soft 逻辑收敛到 _fast_llm_call（草稿/提取共用）
     src = inspect.getsource(dw._fast_llm_call)
-    check("草稿调用携带 thinking:disabled",
+    check("草稿调用支持 thinking:disabled（开启时下发）",
           '"thinking": {"type": "disabled"}' in src)
     check("参数被拒 → 第 1 次退回默认参数重试（防无草稿）",
           "退回默认参数重试一次" in src)
     check("fast 助手被草稿与提取共用",
           "def _call_structured_draft" in inspect.getsource(dw)
           and "def _call_extract_from_answer" in inspect.getsource(dw))
-    check("DRAFT_THINKING_OFF 配置默认开",
-          settings.DRAFT_THINKING_OFF is True, str(settings.DRAFT_THINKING_OFF))
+    check("DRAFT_THINKING_OFF 配置默认关（v8.17.7 开思维链）",
+          settings.DRAFT_THINKING_OFF is False, str(settings.DRAFT_THINKING_OFF))
     check("DRAFT_TIMEOUT_SEC = 25（有界余量，不归零）",
           settings.DRAFT_TIMEOUT_SEC == 25, str(settings.DRAFT_TIMEOUT_SEC))
     yaml = (ROOT / "config.yaml").read_text(encoding="utf-8")
-    check("yaml: thinking_off: true + timeout_sec: 25",
-          "thinking_off: true" in yaml and "timeout_sec: 25" in yaml)
+    check("yaml: thinking_off: false + timeout_sec: 25",
+          "thinking_off: false" in yaml and "timeout_sec: 25" in yaml)
     cfg = (ROOT / "src/config.py").read_text(encoding="utf-8")
     check("config.py: DRAFT_THINKING_OFF 字段存在", "DRAFT_THINKING_OFF" in cfg)
+    check("config.py: DRAFT_THINKING_OFF 默认 False", "default=False" in cfg
+          and "DRAFT_THINKING_OFF" in cfg)
 
 
 # ── VF-37 context-detail 端点降级信封 ─────────────────────────────

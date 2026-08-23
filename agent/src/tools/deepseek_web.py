@@ -529,10 +529,13 @@ def _parse_structured_response(raw_text: str, require_answer: bool = True) -> di
 def _fast_llm_call(system_prompt: str, user_content: str) -> str | None:
     """统一 fast 模型调用（草稿 / 检索素材提取共用）。
 
-    防线（v8.15.3c / v8.16.3 / v8.16.4 实战沉淀）：
+    防线（v8.15.3c / v8.16.3 / v8.16.4 / v8.17.7 实战沉淀）：
       - 空 content 重试一次（v4-flash 思维链偶发吃光预算）
-      - v8.16.4: 默认关思维链（thinking:disabled）；厂商参数被拒时第 1 次
+      - v8.16.4: 支持关思维链（thinking:disabled）；厂商参数被拒时第 1 次
         自动退回默认参数重试（fail-soft，防"无输出"）
+      - v8.17.7: 默认**开启**思维链（不发送 disabled）——用户实机诊断确认
+        关思维链正是提取标签易省略包裹/出错的根因；v4-flash 带推理后结构化
+        标签格式更稳（config draft.thinking_off=false）
       - 异常不吞掉（call_exception 标签由调用方区分）
     """
     if not system_prompt:
@@ -545,7 +548,7 @@ def _fast_llm_call(system_prompt: str, user_content: str) -> str | None:
     )
     max_tokens = max(int(getattr(settings, "DRAFT_MAX_TOKENS", 2048) or 2048), 256)
     extra: dict = {}
-    if getattr(settings, "DRAFT_THINKING_OFF", True):
+    if getattr(settings, "DRAFT_THINKING_OFF", False):
         extra["extra_body"] = {"thinking": {"type": "disabled"}}
     answer = ""
     for attempt in (1, 2):
