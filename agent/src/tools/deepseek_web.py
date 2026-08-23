@@ -156,22 +156,23 @@ def _responses_web_search(input_prompt: str) -> tuple[str, list[dict]]:
 
     与 deepseek_web_search 同端点/同超时/同解析，但为「用户原始问题直答」形态：
     返回 (summary 正文, 去重引用清单)；失败抛异常（调用方 fail-soft 跳过草稿）。
-    v8.17.9（用户方案"提取前移"）：instructions 携带 structured_web.md 三区块
-    模板（[ANSWER]/[MQ]/[SUMMARY] 一次产出），草稿=[ANSWER]、检索素材=[MQ]+
-    [SUMMARY]，不再需要二次提取调用。模板缺失/instructions 参数被拒时
-    自动退回无 instructions 的自由文本形态（fail-soft，草稿恒在，
-    后续由 draft_worker 的解析器兜底）。
+    v8.17.9（用户方案"提取前移"）：三区块格式化指令**直接拼入 input**
+    （与 v8.15.3d 同款做法——不传 instructions 参数，避免 API 参数兼容风险），
+    要求模型输出 [ANSWER]/[MQ]/[SUMMARY] 三区块，草稿=[ANSWER]、检索素材=
+    [MQ]+[SUMMARY]，不再需要二次提取调用。模板缺失时退回自由文本形态
+    （fail-soft，草稿恒在，后续由 draft_worker 的解析器兜底）。
     """
     from src.prompts.loader import assemble_structured_web_prompt
-    instructions = assemble_structured_web_prompt()
+    _fmt = assemble_structured_web_prompt()
+    _input = input_prompt
+    if _fmt:
+        _input = f"{_fmt}\n\n---\n\n用户问题：{input_prompt}"
     payload = {
         "model": get_deepseek_model(),
-        "input": input_prompt,
+        "input": _input,
         "tools": [{"type": "web_search"}],
         "stream": False,
     }
-    if instructions:
-        payload["instructions"] = instructions
     headers = {
         "Authorization": f"Bearer {settings.RESOLVED_MAIN_API_KEY or settings.MAIN_API_KEY}",
         "Content-Type": "application/json",
@@ -179,20 +180,11 @@ def _responses_web_search(input_prompt: str) -> tuple[str, list[dict]]:
     url = _responses_endpoint()
     _to = _web_http_timeout()
     logger.info(f"[draft-web] Responses 调用: {url} model={payload['model']} "
-                f"timeout={_to}s instructions={'yes' if instructions else 'no'}")
+                f"timeout={_to}s fmt={'yes' if _fmt else 'no'}")
     resp = requests.post(url, headers=headers, json=payload, timeout=_to)
     if resp.status_code != 200:
-        if instructions and resp.status_code in (400, 422):
-            # v8.17.9: instructions 参数被厂商拒绝（DeepSeek Responses 参数兼容
-            # 未实测）→ 退回自由文本形态重试一次（fail-soft，草稿恒在）
-            logger.warning(
-                f"[draft-web] instructions 参数被拒 HTTP {resp.status_code}，"
-                f"退回无 instructions 形态重试: {resp.text[:200]}")
-            payload.pop("instructions", None)
-            resp = requests.post(url, headers=headers, json=payload, timeout=_to)
-        if resp.status_code != 200:
-            raise RuntimeError(
-                f"Responses HTTP {resp.status_code}: {resp.text[:300]}")
+        raise RuntimeError(
+            f"Responses HTTP {resp.status_code}: {resp.text[:300]}")
     body = resp.json()
     summary, calls, _meta = _parse_response_output(body.get("output") or [])
     if not summary and not calls:
