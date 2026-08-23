@@ -380,9 +380,10 @@ def test_ag22_output_routing():
     print("[AG-22] 输出路由与证据保真（INV-05）")
     prom = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                              'src', 'prompts', 'agents', 'retrieve-agent.md'), encoding='utf-8').read()
-    check("retrieve 无需报告（v8.10m 消除矛盾）",
-          "无需撰写检索报告" in prom and "系统代码确定性组装" in prom
-          and "核心结论与证据点" not in prom)
+    check("retrieve 无需报告（v8.10m 消除矛盾；v8.17.4 收尾一句结论）",
+          "无需撰写报告" in prom and "系统代码确定性组装" in prom
+          and "核心结论与证据点" not in prom
+          and "一句话总结论" in prom and "收尾时输出" in prom)
     # v8.4.3 指令A: 收敛由模型自然判断（不再按文献数代码强制），保留三阶段与轮次上限
     check("retrieve 三阶段工作流", "阶段 1" in prom and "阶段 3" in prom
           and "轮次上限 3 轮" in prom)
