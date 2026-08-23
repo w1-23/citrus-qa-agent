@@ -228,6 +228,35 @@ def emit_draft(content: str, label: str = "预检索草稿·验证中",
                            "source": source or "local"})
 
 
+# ── v8.17.13: 草稿任务注册表（SSE 延迟关闭用）────────────────────────
+# draft_worker 是 fire-and-forget 任务（expert/light load 节点 create_task），
+# 联网路径 30-115s，可能晚于主回答（实测 52s vs 21.7s）。main.py 在放 SSE
+# sentinel 前查询本会话草稿任务并等待其完成，保证晚到的 draft 事件有消费者。
+_DRAFT_TASKS: dict = {}
+_DRAFT_TASKS_LOCK: object = None  # GIL + 单事件循环足够；保留字段避免重复锁
+
+
+def set_draft_task(session_id: str, task) -> None:
+    """注册当前会话的草稿任务（重复注册用新任务覆盖，旧任务不回收——由自身结束）。"""
+    if not session_id:
+        return
+    _DRAFT_TASKS[session_id] = task
+
+
+def get_draft_task(session_id: str):
+    """返回会话当前草稿任务（无则 None）。"""
+    if not session_id:
+        return None
+    return _DRAFT_TASKS.get(session_id)
+
+
+def clear_draft_task(session_id: str) -> None:
+    """会话草稿任务结束/请求完成时清理注册（不 cancel 任务，任务自身 fail-soft）。"""
+    if not session_id:
+        return
+    _DRAFT_TASKS.pop(session_id, None)
+
+
 def emit_status(stage: str, **kwargs) -> None:
     """Emit a generic status event (backward compat)."""
     payload = {"stage": stage}

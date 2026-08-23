@@ -1013,6 +1013,14 @@ async def draft_worker(query: str, session_id: str) -> None:
     _draft_blog("draft_done", zh_len=len(draft_zh), queries_n=queries_n,
                 items=len(results), web=len(web_items), mode="web" if web_mode else "local")
 
+    # v8.17.13: 草稿任务结束 → 清理 SSE 延迟关闭注册（任务已 done，
+    # main.py 的 wait_for 立即放行；清理防跨请求残留）
+    try:
+        from src.core.progress_bus import clear_draft_task
+        clear_draft_task(session_id)
+    except Exception:
+        pass
+
 
 def _draft_blog(event: str, **fields) -> None:
     """v8.16.2: 草稿业务日志（fail-soft：日志失败绝不影响草稿链路）。"""

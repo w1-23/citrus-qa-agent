@@ -10,6 +10,7 @@
          空正文回退快速调用草稿恒在）
   VF-44  关键词降级兜底（素材并入保底）+ MQ:/SUM: 缩写容错
   VF-45  v8.17.10 指代性追问修复（会话历史注入）+ 拒绝检测保留 + 模板历史留档
+  VF-46  v8.17.13 SSE 延迟关闭（草稿任务晚于主回答时连接保持至草稿完成）
 
 全部离线、无模型、无网络（调用打桩；接线断言读源码）。
 """
@@ -650,6 +651,68 @@ def test_v81710_deferral_context():
               "不再被 _responses_web_search 调用" in txt)
     else:
         check("snapshot structured_web 保留（历史参考标记）", False, "缺快照")
+
+
+# ── VF-46 v8.17.13 SSE 延迟关闭（草稿任务晚于主回答时连接不提前断）──
+def test_v81713_draft_sse_keepalive():
+    print("[VF-46] SSE 延迟关闭：草稿任务晚于主回答时连接保持至草稿完成")
+    import asyncio
+    import inspect as _inspect
+    import src.tools.deepseek_web as dw
+    from src.core.progress_bus import (
+        set_draft_task, get_draft_task, clear_draft_task, _DRAFT_TASKS)
+
+    # 1) 注册表纯函数：set/get/clear/覆盖（容器本身不涉事件循环）
+    _DRAFT_TASKS.clear()
+    token1 = object()
+    token2 = object()
+    set_draft_task("sess-a", token1)
+    check("set_draft_task 注册", get_draft_task("sess-a") is token1)
+    check("get_draft_task 无会话 → None", get_draft_task("") is None
+          and get_draft_task("nope") is None)
+    set_draft_task("sess-a", token2)   # 覆盖
+    check("重复注册覆盖", get_draft_task("sess-a") is token2)
+    clear_draft_task("sess-a")
+    check("clear_draft_task 清理", get_draft_task("sess-a") is None)
+    _DRAFT_TASKS.clear()
+
+    # 2) expert/light load 节点注册草稿任务（接线源码断言）
+    eg_src = (ROOT / "src/graph/expert_graph.py").read_text(encoding="utf-8")
+    lg_src = (ROOT / "src/graph/light_graph.py").read_text(encoding="utf-8")
+    check("expert_load 注册草稿任务（set_draft_task）",
+          "set_draft_task(session_id, _dtask)" in eg_src
+          and "asyncio.create_task(draft_worker(query, session_id))" in eg_src)
+    check("light_load 注册草稿任务（set_draft_task）",
+          "set_draft_task(session_id, _dtask)" in lg_src)
+
+    # 3) main.py SSE 放 sentinel 前等待草稿任务（u2207 关键修复）
+    mp_src = (ROOT / "src/api/main.py").read_text(encoding="utf-8")
+    check("main.py 等待草稿任务再关闭（get_draft_task + wait_for）",
+          "get_draft_task(sid)" in mp_src
+          and "wait_for" in mp_src
+          and "asyncio.shield(_draft_task)" in mp_src
+          and "DRAFT_SSE_WAIT_SEC" in mp_src)
+    check("等待草稿位置在 sentinel 之前（顺序断言）",
+          mp_src.index("get_draft_task(sid)") < mp_src.index("event_queue.put(None)"),
+          "get_draft_task 应在 put(None) 之前")
+
+    # 4) draft_worker 结束清理注册（fail-soft）
+    dw_src = (ROOT / "src/tools/deepseek_web.py").read_text(encoding="utf-8")
+    check("draft_worker 结束清理（clear_draft_task）",
+          "clear_draft_task(session_id)" in dw_src)
+
+    # 5) 语义级：草稿任务 done → wait_for 应立即放行（不阻塞 SSE）
+    async def _sim():
+        _DRAFT_TASKS.clear()
+        done_fut = asyncio.Future()
+        done_fut.set_result(None)
+        set_draft_task("sess-x", done_fut)
+        t = get_draft_task("sess-x")
+        if t is not None and not t.done():
+            await asyncio.wait_for(asyncio.shield(t), timeout=115)
+        return True
+    check("已完成草稿任务 → 等待立即放行", asyncio.run(_sim()))
+    _DRAFT_TASKS.clear()
 
 
 if __name__ == "__main__":

@@ -106,8 +106,10 @@ async def load_context_node(state: AgentState) -> dict:
         # 不入证据回执（light 保持"本地基础检索+速度优先"，见 AGENT_CHANGES v8.16.1）
         try:
             from src.tools.deepseek_web import draft_worker
+            from src.core.progress_bus import set_draft_task
             import asyncio as _asyncio
-            _asyncio.create_task(draft_worker(query, session_id))
+            _dtask = _asyncio.create_task(draft_worker(query, session_id))
+            set_draft_task(session_id, _dtask)
         except Exception as _e:
             logger.warning(f"[LightGraph:load] 草稿先行启动失败（跳过）: {_e}")
         return result
