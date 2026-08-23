@@ -307,8 +307,8 @@ def test_v8161_evidence_report_draft_line():
     # v8.17: 原生回答融合段（用户要求"最后融合原生回答进行生成"）
     with_na = build_evidence_report(arts, "citrus hlb", 2,
                                     draft_answer="原生预答内容123")
-    check("v8.17 原生回答参考段渲染",
-          "原生回答参考（草稿预答，非检索证据）" in with_na
+    check("v8.17 原生回答参考段渲染（v8.17.4 头文案）",
+          "原生回答参考（草稿预答）" in with_na
           and "原生预答内容123" in with_na, with_na[:300])
 
 

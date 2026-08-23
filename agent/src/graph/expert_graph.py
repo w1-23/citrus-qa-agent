@@ -62,16 +62,26 @@ def check_citation_support(answer: str, main_results: list,
     ∪ 长期记忆(LTM)。历史轮次检索的证据（引用编号在会话证据库中）不再误报。
     检测但不强制改写（只标记 + 日志 + 前端轻提示）。
     """
-    cited = {int(n) for n in re.findall(r"\[(\d{1,3})\]", answer or "")}
+    # v8.17.4: 双轨引用统计——[n]（本地/品种库）+ [Wn]（联网）+ [Hn]（历史）
+    # 全部计入引用数；此前只认 [n]，[Wn] 引用多时误报"引用>文献"（根因 B 修复）。
+    # 支撑判定：本地检索 或 联网检索 或 历史/记忆 任一存在即视为有支撑
+    # （联网引用 [Wn] 由 DeepSeek 原生联网回答产生，v8.17.4 起默认可信）。
+    import re as _re
+    cited = {int(n) for n in _re.findall(r"\[(\d{1,3})\]", answer or "")}
+    cited_wn = len(_re.findall(r"\[[WH]\d{1,3}\]", answer or "", _re.IGNORECASE))
     unique_dois = count_unique_docs(main_results)
-    supported = ((bool(retrieval_tool_called) and unique_dois > 0)
+    retrieval_tool_called = bool(retrieval_tool_called) or cited_wn > 0
+    supported = ((retrieval_tool_called and (unique_dois > 0 or cited_wn > 0))
                  or evidence_count > 0 or ltm_chars > 0)
     return {
-        "citation_count": len(cited),
+        "citation_count": len(cited) + cited_wn,
         "retrieval_count": unique_dois,
+        "web_citation_count": cited_wn,
         "evidence_count": evidence_count,
-        "citation_supported": (not cited) or supported,
-        "citation_unsupported": bool(cited) and not supported,
+        "citation_supported": (not cited and cited_wn == 0) or supported,
+        "citation_unsupported": (cited or cited_wn > 0) and not supported,
+        # v8.17.4: 失配判定——本地 [n] 数量 > 本地文献 + 容差时才提示；
+        # [Wn]/[Hn] 不计入失配（它们对应联网/历史来源，无需本地 chunk 校验）
         "citation_mismatch": bool(cited) and supported and len(cited) > unique_dois + 2,
     }
 

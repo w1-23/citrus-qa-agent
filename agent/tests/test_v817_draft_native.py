@@ -239,8 +239,9 @@ def test_v817_fusion_and_prompts():
             "web_results": []}
     rep = build_evidence_report(arts, "variety question", 1,
                                 draft_extra_count=3, draft_answer="原生预答：温州蜜柑源自中国。")
-    check("回执含原生回答参考段（融合素材）",
-          "原生回答参考（草稿预答，非检索证据）" in rep and "温州蜜柑源自中国" in rep)
+    check("回执含原生回答参考段（v8.17.4 默认可信）",
+          "原生回答参考（草稿预答）" in rep and "温州蜜柑源自中国" in rep
+          and "默认可信" in rep)
     check("回执含草稿检索补充行", "草稿多路检索补充: 3 条证据" in rep)
 
     ra = (ROOT / "src/prompts/agents/retrieve-agent.md").read_text(encoding="utf-8")
@@ -251,8 +252,9 @@ def test_v817_fusion_and_prompts():
     dg = (ROOT / "src/prompts/system/decision_guide.md").read_text(encoding="utf-8")
     check("decision_guide.md 含 UCR 优先策略", "品种/品种特性类问题优先 UCR 品种库（v8.17）" in dg)
     check("decision_guide.md 不残留'来源加权'", "UCR 来源加权" not in dg)
-    check("decision_guide.md 补「原生回答参考」仲裁规则⑨（修正4）",
-          "9. **原生回答参考（v8.17）**" in dg and "仅供融合参考、不是检索证据" in dg)
+    check("decision_guide.md 规则⑨ v8.17.4 默认可信（不再'仅供参考'）",
+          "9. **原生回答参考（v8.17，v8.17.4 升级为默认可信）**" in dg
+          and "原生联网回答默认可信" in dg and "仅供融合参考、不是检索证据" not in dg)
 
     idx = (ROOT / "index.html").read_text(encoding="utf-8")
     check("前端 draft.source 徽标接线（修正4）",
@@ -318,11 +320,28 @@ def test_v8171_web_once_wiring():
     # decision_guide 规则
     check("decision_guide 联网仅草稿层唯一一次", "联网仅由草稿层唯一一次执行" in dg
           and "不要指示检索子代理联网补" in dg)
-    check("decision_guide 原生回答段使用规则 v8.17.1",
-          "原生回答参考段的使用规则（v8.17.1）" in dg
+    check("decision_guide 原生回答段使用规则（v8.17.1 / v8.17.4）",
+          "原生回答参考段的使用规则" in dg
           and "作为回答骨架" in dg and "填充/修正" in dg)
     check("decision_guide 检索子代理不再联网（无停止条件）",
           "检索子代理不再承担联网职责" in dg and "无需联网停止条件" in dg)
+
+    # v8.17.4: 模型自述不再被确定性回执覆盖（合并输出，[Wn] 裁决可达 supervisor）
+    check("agent_runner 模型自述与确定性回执合并（不覆盖）",
+          "检索员判定（模型总结论）" in ar
+          and "与确定性回执" in ar and "v8.17.4 不再覆盖" in ar)
+    check("回执头文案 v8.17.4 默认可信",
+          "v8.17.4：默认可信" in ar and "原生回答参考（草稿预答）" in ar)
+    check("decision_guide 规则⑨ v8.17.4 默认可信 + [Wn] 直接引用",
+          "原生联网回答默认可信" in dg and "无需本地向量库交叉验证" in dg
+          and "检索员判定段（v8.17.4）" in dg)
+    check("decision_guide 本地[ n ]有则以本地为准",
+          "本地 [n] 已覆盖的同一事实 → 以本地 [n] 为准" in dg)
+    # v8.17.4: 引用统计认 [Wn]/[Hn]（双轨引用，不误报 mismatch）
+    eg = (ROOT / "src/graph/expert_graph.py").read_text(encoding="utf-8")
+    check("citation 统计双轨（[Wn]/[Hn] 计入）",
+          "cited_wn" in eg and "web_citation_count" in eg
+          and "v8.17.4: 失配判定" in eg)
 
     # 草稿层回退
     check("draft_worker 联网失败回退快速调用",

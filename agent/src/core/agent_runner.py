@@ -237,10 +237,11 @@ def build_evidence_report(collected_artifacts: dict, query: str,
         # 降级/截断/摘要化」）——4000 仅为安全阀防 token 失控（模板约束约 300-600 字）
         if len(_da) > 4000:
             _da = _da[:4000] + " …"
-        lines.append("## 原生回答参考（草稿预答，非检索证据）")
+        lines.append("## 原生回答参考（草稿预答）")
         lines.append(
-            "以下为模型对用户问题的原生预答草稿，仅作融合参考：可采纳其正确判断，"
-            "但最终回答必须以检索证据为准，缺失细节按既有仲裁规则处理。")
+            "以下为模型对用户问题的原生预答草稿（v8.17.4：默认可信；联网开启时含 "
+            "[Wn] 引用，直接作为回答主体与引用来源）。以它为回答骨架，用 [n] 填充/修正"
+            "本地已覆盖的数据（本地有则以本地为准，本地无则采信草稿数据）。")
         _quoted_da = "\n".join(f"> {ln}" for ln in _da.splitlines())
         lines.append(_quoted_da)
         lines.append("")
@@ -802,11 +803,28 @@ async def run_agent(
             draft_extra_count=draft_extra_count,
             draft_answer=draft_answer,
             ucr_first=_ucr_first)
-        if result_content:
+        # v8.17.4: 模型自述不再被确定性回执覆盖——自述保留为「检索员判定」段，
+        # 与确定性证据回执合并输出（用户要求：检索子代理对 [Wn] 联网数据的
+        # 综合裁决必须传到 supervisor，不能被本地库回执一刀切抹掉）。
+        # 两者职责分工：
+        #   ① 检索员判定 = retrieve-agent 模型的总结论（含"以联网草稿 [Wn] 为准/
+        #     证据已够"等仲裁表述，supervisor 直接可见）；
+        #   ② 确定性回执 = 代码组装的证据清单（[n]/[Wn]/UCR/原生回答参考段，
+        #     继续保证证据保真，INV-05 不回归）。
+        _judgement = (result_content or "").strip()
+        if _judgement:
             logger.info(
-                f"[AgentRunner] retrieve-agent 模型自述({len(result_content)} chars) "
-                f"被确定性回执替代({len(code_report)} chars)")
-        result_content = code_report
+                f"[AgentRunner] retrieve-agent 模型自述({len(_judgement)} chars) "
+                f"与确定性回执({len(code_report)} chars) 合并（v8.17.4 不再覆盖）")
+            # 判定段独立成节，明示其为模型裁决而非证据（防注入隔离同回执内层）
+            _jd = "\n".join(f"> {ln}" for ln in _judgement.splitlines())
+            result_content = (
+                "## 检索员判定（模型总结论）\n"
+                f"{_jd}\n\n"
+                + code_report
+            )
+        else:
+            result_content = code_report
 
     try:
         emit_encoded("agent_summary", {

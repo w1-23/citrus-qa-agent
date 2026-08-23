@@ -589,6 +589,16 @@ def test_ag29_citation_support():
     r4 = check_citation_support("无引用回答。", [], False)
     check("无引用 → 不告警", r4["citation_unsupported"] is False
           and r4["citation_supported"] is True, str(r4))
+    # v8.17.4: 双轨引用——[Wn]/[Hn] 计为引用且视为有支撑（联网/历史来源默认可信）
+    r5 = check_citation_support("2025 年加州田间检测数据显示 HLB 扩散 [W1]，历史基线见 [8]。",
+                                docs, False)
+    check("[Wn] 引用计为引用且有支撑（无本地检索不告警）",
+          r5["citation_unsupported"] is False and r5["citation_supported"] is True
+          and r5["web_citation_count"] == 1 and r5["citation_count"] == 2, str(r5))
+    r6 = check_citation_support("纯联网引用 [W1][W2][W5]。", [], False)
+    check("纯 [Wn] 引用 → supported 且不误报 mismatch",
+          r6["citation_supported"] is True and r6["citation_unsupported"] is False
+          and r6["citation_mismatch"] is False, str(r6))
     # done 事件附元数据（源码断言）
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             'src', 'api', 'main.py'), encoding='utf-8').read()
