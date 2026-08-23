@@ -151,7 +151,7 @@ def _to_web_items(calls: list[dict]) -> list[dict]:
     return items
 
 
-def _responses_web_search(input_prompt: str) -> tuple[str, list[dict]]:
+def _responses_web_search(input_prompt: str, context: str = "") -> tuple[str, list[dict]]:
     """v8.17: 原生联网回答（草稿路径）——Responses + 原生 web_search 工具。
 
     与 deepseek_web_search 同端点/同超时/同解析，但为「用户原始问题直答」形态：
@@ -161,12 +161,18 @@ def _responses_web_search(input_prompt: str) -> tuple[str, list[dict]]:
     要求模型输出 [ANSWER]/[MQ]/[SUMMARY] 三区块，草稿=[ANSWER]、检索素材=
     [MQ]+[SUMMARY]，不再需要二次提取调用。模板缺失时退回自由文本形态
     （fail-soft，草稿恒在，后续由 draft_worker 的解析器兜底）。
+    v8.17.10：context 参数携带最近会话历史（human 问题摘要），解决
+    "重新查找上一个问题/上述内容"等指代性追问——无上下文时模型无法解析指代，
+    会拒绝回答（243 字道歉）且不触发 web_search（web=0）。context 非空时
+    注入 input（位于格式化指令与用户问题之间），并提示模型结合背景理解指代。
     """
     from src.prompts.loader import assemble_structured_web_prompt
     _fmt = assemble_structured_web_prompt()
     _input = input_prompt
     if _fmt:
         _input = f"{_fmt}\n\n---\n\n用户问题：{input_prompt}"
+    if context:
+        _input = f"{_fmt}\n\n---\n\n对话背景（最近的用户问题，供你理解'上一个问题/上述内容'等指代；不超过 3 条）：\n{context}\n\n---\n\n用户问题：{input_prompt}"
     payload = {
         "model": get_deepseek_model(),
         "input": _input,
@@ -180,7 +186,8 @@ def _responses_web_search(input_prompt: str) -> tuple[str, list[dict]]:
     url = _responses_endpoint()
     _to = _web_http_timeout()
     logger.info(f"[draft-web] Responses 调用: {url} model={payload['model']} "
-                f"timeout={_to}s fmt={'yes' if _fmt else 'no'}")
+                f"timeout={_to}s fmt={'yes' if _fmt else 'no'} "
+                f"ctx={'yes' if context else 'no'}")
     resp = requests.post(url, headers=headers, json=payload, timeout=_to)
     if resp.status_code != 200:
         raise RuntimeError(
@@ -476,6 +483,52 @@ def _parse_web_three_block(raw_text: str) -> dict:
     if m_sum:
         result["summary"] = _strip_tag_items(m_sum.group(1))
     return result
+
+
+# v8.17.10: 指代性追问需会话历史——拒绝型草稿特征（模型"没有可用的历史/无法
+# 定位/请提供更多"等道歉式回复，特征：含拒绝词 且 草稿很短）
+_REFUSAL_PATTERNS = (
+    "抱歉", "无法定位", "没有可用的历史", "没有上下文", "无法直接", "请提供",
+    "请将", "请补充", "请您将", "我没有", "无法理解", "请您提供", "需要更多信息",
+)
+
+
+def _looks_like_refusal(text: str) -> bool:
+    """v8.17.10: 判定联网回答是否为"拒绝/请求澄清"型（指代解析失败的典型输出）。
+
+    条件：文本长度 < 300 字，且命中拒绝词表（道歉/无法定位/没有历史/请提供等）。
+    命中后 draft_worker 会带会话历史重试一次（宁可多耗 token 不失败）。
+    """
+    t = (text or "").strip()
+    if len(t) >= 300:
+        return False
+    return any(p in t for p in _REFUSAL_PATTERNS)
+
+
+def _recent_human_context_sync(session_id: str, max_items: int = 3) -> list[str]:
+    """v8.17.10: 同步读会话最近 human 问题（SQLite 读取，供 to_thread 调）。"""
+    if not session_id:
+        return []
+    try:
+        from src.session.manager import session_manager
+        rows = session_manager._get_messages_sync(session_id)
+        hum = []
+        for m in rows:
+            mt = getattr(m, "type", "")
+            c = (getattr(m, "content", "") or "").strip()
+            if mt == "human" and c and not c.startswith(("system:", "（")):
+                hum.append(c[:100])
+        return hum[-max_items:]
+    except Exception as e:
+        logger.warning(f"[draft] 会话历史读取失败（跳过注入）: {e}")
+        return []
+
+
+def _join_human_context(items: list[str]) -> str:
+    """v8.17.10: human 问题列表 → 单行上下文串（fail-soft：空表返回空串）。"""
+    if not items:
+        return ""
+    return "\n".join(str(x) for x in items)
 
 
 def _parse_structured_response(raw_text: str, require_answer: bool = True) -> dict:
@@ -806,8 +859,14 @@ async def draft_worker(query: str, session_id: str) -> None:
     if web_mode:
         # ── 联网路径：原生联网回答（草稿）→ 二级提取检索素材 ──
         # v8.17.1: 失败不跳过——回退到快速非联网调用（草稿恒在）
+        # v8.17.10: 注入最近会话历史（human 问题），解决"重新查找上一个问题"
+        # 类指代性追问；若首次回答为拒绝型（短 + 拒绝词）→ 带上下文重试一次。
+        _ctx = await asyncio.to_thread(
+            lambda: _join_human_context(
+                _recent_human_context_sync(session_id)))
         try:
-            summary, calls = await asyncio.to_thread(_responses_web_search, query)
+            summary, calls = await asyncio.to_thread(
+                _responses_web_search, query, _ctx)
         except Exception as e:
             logger.warning(f"[draft-web] 原生联网回答失败，回退快速调用: {e}")
             _draft_blog("draft_web_fallback",
@@ -833,7 +892,36 @@ async def draft_worker(query: str, session_id: str) -> None:
                 if _mq_n or _sm_n:
                     logger.info(
                         f"[draft] 联网三区块一次产出 | mq={_mq_n} sum={_sm_n} "
-                        f"(草稿 {len(draft_zh)} 字)")
+                        f"(草稿 {len(draft_zh)} 字)"
+                        + (f" ctx={'yes' if _ctx else 'no'}" if _ctx else ""))
+                elif _looks_like_refusal(draft_zh) and _ctx:
+                    # v8.17.10: 拒绝型回复（指代解析失败）→ 带上下文重试一次
+                    logger.warning(
+                        f"[draft-web] 首次回答疑似拒绝（{len(draft_zh)} 字），"
+                        f"带会话历史重试一次: raw_preview={raw_web[:100]!r}")
+                    try:
+                        summary2, calls2 = await asyncio.to_thread(
+                            _responses_web_search, query, _ctx)
+                        _raw2 = (summary2 or "").strip()
+                        _parsed2 = _parse_web_three_block(_raw2)
+                        _d2 = (_parsed2.get("draft_zh") or "").strip() or _raw2
+                        if _d2 and not _looks_like_refusal(_d2):
+                            parsed = _parsed2
+                            draft_zh = _d2
+                            web_items = _to_web_items(calls2)
+                            _draft_blog("draft_web_retry", zh_len=len(draft_zh),
+                                        reason="refusal_first")
+                            logger.info(
+                                f"[draft] 拒绝对话重试成功 | mq="
+                                f"{len(parsed.get('multi_query') or [])} sum="
+                                f"{len(parsed.get('summary') or [])} "
+                                f"(草稿 {len(draft_zh)} 字)")
+                        else:
+                            logger.warning(
+                                f"[draft-web] 带上下文重试仍拒绝/空（{len(_d2)} 字），"
+                                f"沿用首次草稿")
+                    except Exception as _e:
+                        logger.warning(f"[draft-web] 带上下文重试失败（沿用首次草稿）: {_e}")
                 else:
                     logger.warning(
                         f"[draft-web] 联网未产出 MQ/SUMMARY 区块（转关键词兜底），"
