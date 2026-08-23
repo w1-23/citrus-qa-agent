@@ -230,6 +230,66 @@ def test_v817_draft_worker_paths():
     draft_store.clear()
 
 
+# ── VF-43 v8.17.6 无包裹标记容错提取（提示词+解析器双容错）──────────
+def test_v8176_tolerant_extract():
+    print("[VF-43] 无包裹标记容错提取：模板改为标签行 + 解析器兜底 + worker 并入")
+    import asyncio
+    import src.tools.deepseek_web as dw
+    from src.core.progress_bus import (
+        set_request_queue, clear_request_queue)
+    from src.core.draft_store import draft_store
+    from src.core import tracing
+
+    ep = (ROOT / "src/prompts/structured_extract.md").read_text(encoding="utf-8")
+    check("提取模板改为独立标签行（不再要求 ===STRUCTURED===）",
+          "不依赖包裹标记" in ep and "MULTI_QUERY:" in ep and "SUMMARY:" in ep)
+    check("提取模板示例用标签行形态", "\nMULTI_QUERY: citrus HLB integrated control 2025" in ep)
+
+    # 无包裹标签行 → 容错解析（直接解析器级验证）
+    parsed = dw._parse_structured_response(
+        "素材：\nMULTI_QUERY: citrus HLB 2025|ACP monitoring trap|dsRNA biopesticide\n"
+        "SUMMARY: ACP trap decline|Cq 37.73 near threshold\n", require_answer=False)
+    check("解析器无包裹标签行 → MQ/SUMMARY 提取", len(parsed["multi_query"]) == 3
+          and len(parsed["summary"]) == 2, str(parsed))
+
+    # worker 级：web 路径提取返回无包裹标签行 → 检索素材仍并入（草稿证据 >0）
+    real_resp = dw._responses_web_search
+    real_extract = dw._call_extract_from_answer
+    real_search = dw._draft_search_multi
+    q = asyncio.Queue()
+    set_request_queue(q)
+    draft_store.clear()
+    try:
+        dw._responses_web_search = lambda inp: (
+            "原生联网回答：2025 年柑橘黄龙病防控从媒介监测与精准施药…",
+            [{"url": "https://w.example/hlb", "title": "HLB 2025"}])
+        dw._call_extract_from_answer = lambda qry, ans: (
+            "检索素材：\n"
+            "MULTI_QUERY: citrus HLB integrated management 2025|ACP monitoring Florida|dsRNA biopesticide trial\n"
+            "SUMMARY: ACP trap decline 9%|Cq 37.73 near threshold|dsRNA field validation\n")
+        dw._draft_search_multi = lambda queries: (
+            [{"title": "draft-tol-1", "doi": "10.t/1", "year": 2026, "text": "body"}]
+            if len(queries) > 1 else [])
+        tracing.set_web_search_enabled(True)
+        try:
+            asyncio.run(dw.draft_worker("HLB 2025 防控进展", "sess-tol"))
+        finally:
+            tracing.set_web_search_enabled(False)
+    finally:
+        dw._responses_web_search = real_resp
+        dw._call_extract_from_answer = real_extract
+        dw._draft_search_multi = real_search
+        items = []
+        while not q.empty():
+            items.append(q.get_nowait())
+        clear_request_queue()
+    payload = draft_store.pop("sess-tol", "-")
+    check("无包裹提取 → 草稿多路检索并入（queries>1）",
+          payload is not None and len(payload.get("results") or []) == 1
+          and payload.get("web_mode") is True, str(payload)[:200])
+    draft_store.clear()
+
+
 # ── VF-41 原生回答段 + 提示词标记 + snapshot ──────────────────────
 def test_v817_fusion_and_prompts():
     print("[VF-41] 原生回答融合段 + UCR 提示词 + snapshot")

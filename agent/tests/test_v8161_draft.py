@@ -136,6 +136,45 @@ def test_v8161_parse_structured():
     check("v8.17 ANSWER 字段归一为草稿（DRAFT_ZH 别名）",
           p8["draft_zh"] == "品种来源综述草稿。", str(p8))
 
+    # ── v8.17.6: 无包裹标记容错解析（日志实证 v4-flash 常省略 ===STRUCTURED===）──
+    raw_no_wrap = ("以下是从联网回答中提炼的检索素材：\n"
+                   "MULTI_QUERY: citrus HLB control 2025|ACP monitoring data|dsRNA biopesticide field\n"
+                   "SUMMARY: ACP trap decline 9%|Cq 37.73 near threshold|dsRNA field validation\n补充说明…")
+    p9 = dw._parse_structured_response(raw_no_wrap, require_answer=False)
+    check("v8.17.6 无包裹 → 容错解析 MQ/SUMMARY", len(p9["multi_query"]) == 3
+          and p9["multi_query"][0] == "citrus HLB control 2025"
+          and len(p9["summary"]) == 3, str(p9))
+    check("v8.17.6 容错路径 answer=标签行前正文", p9["answer"] == "以下是从联网回答中提炼的检索素材：",
+          repr(p9["answer"]))
+
+    # 加粗标签行（**MULTI_QUERY:** 形态）
+    raw_bold = ("**MULTI_QUERY:** a|b|c\n**SUMMARY:** x|y|z")
+    p10 = dw._parse_structured_response(raw_bold, require_answer=False)
+    check("v8.17.6 加粗标签行容错", p10["multi_query"] == ["a", "b", "c"]
+          and p10["summary"] == ["x", "y", "z"], str(p10))
+
+    # [MQ]/[SUM] 短标签兜底
+    raw_short = ("[MQ]\n- citrus HLB\n- ACP monitor\n[/MQ]\n"
+                 "[SUM]\n- trap decline\n- Cq value\n[/SUM]")
+    p11 = dw._parse_structured_response(raw_short, require_answer=False)
+    check("v8.17.6 [MQ]/[SUM] 短标签兜底", p11["multi_query"] == ["citrus HLB", "ACP monitor"]
+          and p11["summary"] == ["trap decline", "Cq value"], str(p11))
+
+    # require_answer=True（草稿路径）：无包裹但含 ANSWER 行 → 直接救回草稿（不再 300 字降级）
+    raw_draft_nowrap = ("下面直接回答。\n"
+                        "ANSWER: 柑橘黄龙病综合防控草稿，核心是无根治手段。\n"
+                        "MULTI_QUERY: a|b|c\nSUMMARY: x1|y1")
+    p12 = dw._parse_structured_response(raw_draft_nowrap)
+    check("v8.17.6 草稿路径无包裹 + ANSWER → 完整救回草稿（不 300 字降级）",
+          p12["draft_zh"] == "柑橘黄龙病综合防控草稿，核心是无根治手段。"
+          and p12["multi_query"] == ["a", "b", "c"], str(p12))
+    # 纯无标签文本 + require_answer=True → 仍抛（走既有降级路径）
+    try:
+        dw._parse_structured_response("模型没有按模板输出,这是纯文本回答。", require_answer=True)
+        check("v8.17.6 纯文本无标签 → require_answer=True 仍抛（降级路径不变）", False)
+    except dw.StructuredParseError:
+        check("v8.17.6 纯文本无标签 → require_answer=True 仍抛（降级路径不变）", True)
+
 
 # ── VF-20 草稿模板 + config 默认值 ────────────────────────────────
 def test_v8161_prompt_and_config():
@@ -158,6 +197,17 @@ def test_v8161_prompt_and_config():
     ep = assemble_structured_extract_prompt()
     check("v8.17 提取模板非空且含 MQ/SUMMARY",
           bool(ep) and "MULTI_QUERY:" in ep and "SUMMARY:" in ep)
+    # v8.17.6: 提取模板改为容错标签行格式（不强制包裹标记）
+    check("v8.17.6 提取模板容错：不要求包裹标记",
+          "不依赖包裹标记" in ep and "独立标签行" in ep
+          and "解析器只取标签行" in ep)
+    from pathlib import Path as _P
+    _ep_file = _P(__file__).resolve().parent.parent / "src" / "prompts" / "structured_output.md"
+    _ep_txt = _ep_file.read_text(encoding="utf-8")
+    check("v8.17.6 草稿模板含标签行容错提示（三行齐全即可救回）",
+          "容错提示（v8.17.6）" in _ep_txt and "三行标签" in _ep_txt
+          and "解析器按标签行兜底提取" in _ep_txt
+          and "===STRUCTURED_START===" in _ep_txt and "===STRUCTURED_END===" in _ep_txt)
 
     check("DRAFT_ENABLED 默认开", settings.DRAFT_ENABLED is True)
     check("DRAFT_LABEL 默认文案", settings.DRAFT_LABEL == "预检索草稿·验证中", settings.DRAFT_LABEL)

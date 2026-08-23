@@ -335,6 +335,14 @@ def _format_web_tool_result(tool_name, query, content, status="ok",
 _STRUCTURED_START = "===STRUCTURED_START==="
 _STRUCTURED_END = "===STRUCTURED_END==="
 
+# v8.17.6: 容错兜底——模型常省略包裹标记直接输出标签行 / [MQ][/MQ] 短标签
+_SHORT_TAG_RE_MQ = re.compile(r"\[MQ\]\s*(.*?)\s*\[/MQ\]", re.IGNORECASE | re.DOTALL)
+_SHORT_TAG_RE_SUM = re.compile(r"\[SUM\]\s*(.*?)\s*\[/SUM\]", re.IGNORECASE | re.DOTALL)
+_LABELED_LINE_RE = re.compile(
+    r"^(?:[-*•]\s*)?\*{0,2}(MULTI_QUERY|SUMMARY|ANSWER|DRAFT_ZH|DRAFT_EN)"
+    r"\*{0,2}\s*[:：]\s*(.*)$",
+    re.IGNORECASE)
+
 
 class StructuredParseError(ValueError):
     """分隔符结构化区块解析失败（字段缺失/格式不符）。"""
@@ -354,6 +362,61 @@ def _strip_code_fence(block: str) -> str:
     return s.strip()
 
 
+def _parse_tolerant_labels(raw_text: str) -> dict:
+    """v8.17.6: 无包裹标记时的容错标签行解析（提取/草稿共用兜底）。
+
+    不再要求 ===STRUCTURED_START=== 包裹：逐行扫描 `MULTI_QUERY:`/`SUMMARY:`/
+    `ANSWER:`/`DRAFT_ZH:`/`DRAFT_EN:` 标签行（行首或列表项内，容忍 **加粗** 与
+    前导 `-`/`•`），及 `[MQ]...[/MQ]`/`[SUM]...[/SUM]` 短标签。任一标签缺失
+    只影响该字段，不整体报废。
+    """
+    text = _strip_code_fence(raw_text or "")
+    result: dict = {}
+    answer_parts: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # 容错：剥掉 Markdown 加粗标记（**MULTI_QUERY:** 形态），避免污染标签值
+        line = line.replace("**", "")
+        m = _LABELED_LINE_RE.match(line)
+        if not m:
+            # 前缀正文（模型偶发"先写几句说明再给标签"）——收集，标签行之后停止
+            if not result:
+                answer_parts.append(line)
+            continue
+        key = m.group(1).upper()
+        value = m.group(2).strip()
+        if key == "ANSWER":
+            key = "DRAFT_ZH"
+        if key in ("MULTI_QUERY", "SUMMARY"):
+            if "|" in value:
+                items = [v.strip() for v in value.split("|") if v.strip()]
+            else:
+                # 无竖线 → 按顿号/分号/空格拆（容错）
+                items = [v.strip() for v in re.split(r"[、，,；;\s]+", value) if v.strip()]
+            if items:
+                if key in result:
+                    result[key].extend(items)
+                else:
+                    result[key] = items
+        elif value:
+            result[key] = value
+    # [MQ]/[SUM] 短标签兜底
+    for tag_re, key in ((_SHORT_TAG_RE_MQ, "MULTI_QUERY"), (_SHORT_TAG_RE_SUM, "SUMMARY")):
+        if key in result:
+            continue
+        m = tag_re.search(text)
+        if m:
+            items = [ln.strip().lstrip("-• ").strip()
+                     for ln in m.group(1).splitlines() if ln.strip()]
+            items = [i for i in items if i]
+            if items:
+                result[key] = items
+    result["_answer"] = "\n".join(answer_parts).strip()
+    return result
+
+
 def _parse_structured_response(raw_text: str, require_answer: bool = True) -> dict:
     """从 DeepSeek 响应中提取结构化字段（分隔符定位，不依赖 JSON 解析）。
 
@@ -367,6 +430,12 @@ def _parse_structured_response(raw_text: str, require_answer: bool = True) -> di
       - **ANSWER 字段 = DRAFT_ZH 别名**（v8.17 模板用 ANSWER，旧 DRAFT_ZH 兼容）；
       - **require_answer=False**：联网路径的二级提取块只有 MULTI_QUERY/SUMMARY
         （无 ANSWER），不强制草稿字段。
+    v8.17.6 修复（日志实证「检索素材提取格式异常：结构化区块未找到」——
+    v4-flash 无思维链下经常省略包裹标记直接输出标签行）：
+      - **容忍缺失 START 标记**——无包裹时走 _parse_tolerant_labels 逐行扫描
+        MULTI_QUERY:/SUMMARY:/ANSWER: 标签行与 [MQ]/[SUM] 短标签；
+      - require_answer=False 时解析失败不再抛错，返回可提取到的部分
+        （提取素材尽力而为，草稿展示不受影响）。
 
     Returns:
         {"answer": str, "draft_zh": str, "draft_en": str,
@@ -374,9 +443,28 @@ def _parse_structured_response(raw_text: str, require_answer: bool = True) -> di
     """
     if not raw_text or not raw_text.strip():
         raise StructuredParseError("结构化区块未找到（空响应）")
-    start_idx = raw_text.find(_STRUCTURED_START)
-    if start_idx == -1:
+    if _STRUCTURED_START not in raw_text:
+        # v8.17.6: 无包裹标记 → 容错标签行解析（提取素材尽力而为）
+        tolerant = _parse_tolerant_labels(raw_text)
+        if not require_answer:
+            return {
+                "answer": tolerant.get("_answer", ""),
+                "draft_zh": tolerant.get("DRAFT_ZH", ""),
+                "draft_en": tolerant.get("DRAFT_EN", ""),
+                "multi_query": tolerant.get("MULTI_QUERY", []),
+                "summary": tolerant.get("SUMMARY", []),
+            }
+        # require_answer=True（草稿调用）：仍需草稿字段，缺失则走既有降级路径
+        if tolerant.get("DRAFT_ZH"):
+            return {
+                "answer": tolerant.get("_answer", ""),
+                "draft_zh": tolerant["DRAFT_ZH"],
+                "draft_en": tolerant.get("DRAFT_EN", ""),
+                "multi_query": tolerant.get("MULTI_QUERY", []),
+                "summary": tolerant.get("SUMMARY", []),
+            }
         raise StructuredParseError("结构化区块未找到")
+    start_idx = raw_text.find(_STRUCTURED_START)
     end_idx = raw_text.find(_STRUCTURED_END)
     if end_idx != -1 and end_idx <= start_idx:
         raise StructuredParseError("结构化区块未找到")
@@ -614,17 +702,27 @@ async def draft_worker(query: str, session_id: str) -> None:
                 logger.info("[draft-web] 联网回答无正文，回退快速调用")
                 _draft_blog("draft_web_fallback", reason="call_empty")
                 web_fallback = True
-            else:
+            elif draft_zh:
+                raw_extract: str | None = None
                 try:
                     raw_extract = await asyncio.to_thread(
                         _call_extract_from_answer, query, draft_zh)
                     if raw_extract:
                         # v8.17: 提取块仅 MULTI_QUERY/SUMMARY（无 ANSWER），不强制草稿字段
+                        # v8.17.6: 无包裹标记也容错解析；仍为空则留痕（预览）便于诊断
                         parsed = _parse_structured_response(raw_extract, require_answer=False)
+                        if not (parsed.get("multi_query") or parsed.get("summary")):
+                            logger.warning(
+                                f"[draft-web] 检索素材提取结果为空（MQ/SUMMARY 未识别），"
+                                f"raw_preview={raw_extract[:120]!r}")
                 except StructuredParseError as e:
-                    logger.warning(f"[draft-web] 检索素材提取格式异常（跳过并入）: {e}")
+                    preview = (f" raw_preview={raw_extract[:120]!r}"
+                               if raw_extract else "")
+                    logger.warning(f"[draft-web] 检索素材提取格式异常（跳过并入）: {e}{preview}")
                 except Exception as e:
-                    logger.warning(f"[draft-web] 检索素材提取异常（跳过并入）: {e}")
+                    preview = (f" raw_preview={raw_extract[:120]!r}"
+                               if raw_extract else "")
+                    logger.warning(f"[draft-web] 检索素材提取异常（跳过并入）: {e}{preview}")
 
     if web_fallback or not web_mode:
         if web_fallback:
