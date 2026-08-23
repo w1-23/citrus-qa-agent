@@ -62,7 +62,8 @@ draft:
   enabled: true                     # 总开关（关=零草稿调用，链路完全回退 v8.15.3f 行为）
   label: "预检索草稿·验证中"         # 事件 label（前端 index.html 同文案兜底）
   max_chars: 800                    # v8.16.3: DRAFT_ZH 完整预览展示上限（模板约 300-600 字，此值为防超长兜底截断）
-  timeout_sec: 15                   # 草稿 fast 调用 HTTP 超时（秒）
+  thinking_off: true                # v8.16.4: 草稿生成关思维链（降级 200 字根因防线；参数不兼容时 fail-soft 退回默认重试）
+  timeout_sec: 25                   # v8.16.4: 15→25——草稿完整生成余量；有界防 API 挂死泄漏（不归零）
   # v8.16.3: 输出上限 1024→2048——fast 模型(depseek-v4-flash)思维链偶发吃光
   # max_tokens 致 content 为空（v8.15.3c HyDE 同款事故，日志实证 call_empty）
   max_tokens: 2048                  # 结构化区块实际 400-800 tokens，留足思维链余量

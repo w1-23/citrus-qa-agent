@@ -385,6 +385,8 @@ def _call_structured_draft(query: str) -> str | None:
     call_exception（带真实异常文本）。此前宽 except→None 把"真空输出"与"API 异常"
     混在同一个 call_empty 标签里，日志实证无法分辨真根因（用户报 call_empty，
     实为第 1/2 次调用返回为空 → 真根因=思维链吃预算 → max_tokens 1024→2048）。
+    v8.16.4: 草稿调用关思维链（DRAFT_THINKING_OFF，默认开）；厂商参数被拒时
+    第 1 次自动退回默认参数重试（fail-soft，防"无草稿"）。
     """
     from src.prompts.loader import assemble_structured_output_prompt
     prompt = assemble_structured_output_prompt()
@@ -399,17 +401,33 @@ def _call_structured_draft(query: str) -> str | None:
     )
     max_tokens = max(int(getattr(settings, "DRAFT_MAX_TOKENS", 2048) or 2048), 256)
     answer = ""
+    extra: dict = {}
+    if getattr(settings, "DRAFT_THINKING_OFF", True):
+        # v8.16.4: 草稿快调用关思维链（HyDE/hints 同款参数）——思维链挤占预算 →
+        # 区块尾部丢失 → 解析失败 → 降级 200 字，此开关是根治；厂商参数不兼容时
+        # fail-soft：第 1 次异常即放弃参数重试（防"参数被拒→无草稿"）
+        extra["extra_body"] = {"thinking": {"type": "disabled"}}
     for attempt in (1, 2):
-        resp = client.chat.completions.create(
-            model=settings.RESOLVED_FAST_MODEL,
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": f"用户问题：\n{query}"},
-            ],
-            temperature=0.2,
-            # v8.16.3: 1024→2048——结构化区块实际 400-800 tokens，留足思维链余量
-            max_tokens=max_tokens,
-        )
+        try:
+            resp = client.chat.completions.create(
+                model=settings.RESOLVED_FAST_MODEL,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": f"用户问题：\n{query}"},
+                ],
+                temperature=0.2,
+                # v8.16.3: 1024→2048——结构化区块实际 400-800 tokens；v8.16.4 关思维链后 2048 充裕
+                max_tokens=max_tokens,
+                **extra,
+            )
+        except Exception as e:
+            if extra and attempt == 1:
+                logger.warning(
+                    f"[draft] thinking:disabled 参数被拒（{type(e).__name__}: {e}），"
+                    f"退回默认参数重试一次")
+                extra = {}
+                continue
+            raise
         answer = (resp.choices[0].message.content or "").strip()
         if answer:
             break
