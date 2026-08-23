@@ -326,6 +326,82 @@ def test_v8176_tolerant_extract():
     draft_store.clear()
 
 
+# ── VF-44 v8.17.8 关键词降级兜底（提取空返回/无标签 → 仍并入多路检索）──
+def test_v8178_keyword_fallback():
+    print("[VF-44] 关键词降级兜底 + 静默空返回留痕 + MQ:/SUM: 缩写")
+    import asyncio
+    import src.tools.deepseek_web as dw
+    from src.prompts.loader import assemble_structured_extract_prompt
+    from src.core.progress_bus import (
+        set_request_queue, clear_request_queue)
+    from src.core.draft_store import draft_store
+    from src.core import tracing
+
+    # 1) 关键词降级纯函数
+    kw = dw._extract_keywords_from_text(
+        "柑橘黄龙病2025年防控进展综述。媒介昆虫柑橘木虱监测数据显示种群数量下降。"
+        "田间应用dsRNA生物农药与杀菌剂联用取得阶段性成果。", max_items=3)
+    check("关键词兜底：中文回答 → 提炼 3 个角度", len(kw) == 3
+          and all(len(s) >= 6 for s in kw), repr(kw))
+    kw2 = dw._extract_keywords_from_text(
+        "citrus HLB integrated control uses ACP monitoring; trunk injection "
+        "with oxytetracycline reduced Cq values near threshold; dsRNA "
+        "biopesticides entered field validation.", max_items=3)
+    check("关键词兜底：英文回答 → 提炼英文角度", len(kw2) == 3
+          and any("HLB" in s or "ACP" in s or "dsRNA" in s for s in kw2), repr(kw2))
+    check("关键词兜底：空输入 → 空列表", dw._extract_keywords_from_text("") == [])
+    check("关键词兜底：噪声文本 → 无可用角度", len(dw._extract_keywords_from_text(
+        "aaaa bbbb cccc dddd eeee ffff gggg 12345 67890")) <= 1)
+
+    # 2) MQ:/SUM: 缩写标签容错（用户方案修复 B 补充）
+    p_abbr = dw._parse_structured_response(
+        "MQ: citrus HLB 2025|ACP trap decline\ndsRNA field validation\n"
+        "SUM: vector control|Cq 37.73\n正文补充", require_answer=False)
+    check("MQ:/SUM: 缩写标签 → 归一 MULTI_QUERY/SUMMARY",
+          "citrus HLB 2025" in p_abbr["multi_query"]
+          and "vector control" in p_abbr["summary"], str(p_abbr))
+
+    # 3) worker 级：提取调用返回 None（fast 空 content）→ 不再静默 → 关键词兜底并入
+    real_resp = dw._responses_web_search
+    real_extract = dw._call_extract_from_answer
+    real_search = dw._draft_search_multi
+    q = asyncio.Queue()
+    set_request_queue(q)
+    draft_store.clear()
+    try:
+        dw._responses_web_search = lambda inp: (
+            "2025 年柑橘黄龙病综合防控进展：媒介木虱监测、精准施药与生物农药联用。",
+            [])
+        dw._call_extract_from_answer = lambda qry, ans: None  # 提取调用空返回
+        dw._draft_search_multi = lambda queries: (
+            [{"title": "kw-fb-1", "doi": "10.k/1", "year": 2026, "text": "body"}]
+            if len(queries) > 1 else [])
+        tracing.set_web_search_enabled(True)
+        try:
+            asyncio.run(dw.draft_worker("HLB 2025 防控", "sess-kw"))
+        finally:
+            tracing.set_web_search_enabled(False)
+    finally:
+        dw._responses_web_search = real_resp
+        dw._call_extract_from_answer = real_extract
+        dw._draft_search_multi = real_search
+        items = []
+        while not q.empty():
+            items.append(q.get_nowait())
+        clear_request_queue()
+    payload = draft_store.pop("sess-kw", "-")
+    check("提取空返回 → 关键词兜底并入（results=1）",
+          payload is not None and len(payload.get("results") or []) == 1
+          and payload.get("queries_n", 0) > 1, str(payload)[:200])
+    draft_store.clear()
+
+    # 4) 提示词仍为容错标签行格式（v8.17.6 既有，防回退）
+    ep = assemble_structured_extract_prompt()
+    check("提取模板保持无包裹容错格式", "不依赖包裹标记" in ep
+          and "MULTI_QUERY:" in ep and "SUMMARY:" in ep)
+    draft_store.clear()
+
+
 # ── VF-41 原生回答段 + 提示词标记 + snapshot ──────────────────────
 def test_v817_fusion_and_prompts():
     print("[VF-41] 原生回答融合段 + UCR 提示词 + snapshot")

@@ -339,7 +339,7 @@ _STRUCTURED_END = "===STRUCTURED_END==="
 _SHORT_TAG_RE_MQ = re.compile(r"\[MQ\]\s*(.*?)\s*\[/MQ\]", re.IGNORECASE | re.DOTALL)
 _SHORT_TAG_RE_SUM = re.compile(r"\[SUM\]\s*(.*?)\s*\[/SUM\]", re.IGNORECASE | re.DOTALL)
 _LABELED_LINE_RE = re.compile(
-    r"^(?:[-*•]\s*)?\*{0,2}(MULTI_QUERY|SUMMARY|ANSWER|DRAFT_ZH|DRAFT_EN)"
+    r"^(?:[-*•]\s*)?\*{0,2}(MULTI_QUERY|SUMMARY|MQ|SUM|ANSWER|DRAFT_ZH|DRAFT_EN)"
     r"\*{0,2}\s*[:：]\s*(.*)$",
     re.IGNORECASE)
 
@@ -389,6 +389,11 @@ def _parse_tolerant_labels(raw_text: str) -> dict:
         value = m.group(2).strip()
         if key == "ANSWER":
             key = "DRAFT_ZH"
+        # v8.17.8: 缩写标签 MQ:/SUM: → MULTI_QUERY/SUMMARY（用户方案修复 B）
+        if key == "MQ":
+            key = "MULTI_QUERY"
+        elif key == "SUM":
+            key = "SUMMARY"
         if key in ("MULTI_QUERY", "SUMMARY"):
             if "|" in value:
                 items = [v.strip() for v in value.split("|") if v.strip()]
@@ -648,6 +653,54 @@ def _draft_search_multi(queries: list) -> list:
     return rag.search_multi(queries)
 
 
+# v8.17.8: 提取完全失败/为空时的关键词降级兜底（用户方案修复 A）
+# multilingual-e5 检索能直接吃中文/英文短语，无需强语义关键词——按句切块、
+# 滤噪声即得可检索角度（纯规则、零模型调用、离线可测）
+_STOPWORDS = {
+    "的", "了", "是", "在", "和", "与", "及", "或", "对", "为", "以", "从",
+    "中", "等", "也", "都", "并", "而", "但", "就", "这", "那", "其", "它",
+    "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with",
+    "by", "as", "at", "from", "that", "this", "is", "are", "was", "were",
+}
+
+
+def _extract_keywords_from_text(text: str, max_items: int = 3) -> list:
+    """v8.17.8: 从原生回答提取检索角度关键词（提取调用失败时的兜底素材）。
+
+    思路：按句号/分号/换行切块 → 每块剥离引用标记/数字/标点 → 过滤过短与纯
+    数字块 → 保长度较高、噪声较小的前 max_items 块（避免 3 个"角度"高度雷同，
+    用去重保证差异化）。返回可作 MULTI_QUERY 的英文/中文短语列表。
+    """
+    if not text or not text.strip():
+        return []
+    # 1) 按句子边界切块（句号/分号/换行/竖线），保留短语粒度
+    parts = re.split(r"[。；;\n|]+", text)
+    out: list[str] = []
+    for p in parts:
+        s = p.strip()
+        if len(s) < 6:
+            continue
+        # 2) 剥离引用标记/网址/数字堆（如 [W1]、https://…、纯数字串）
+        s = re.sub(r"\[[WwHh]?\d+\]", "", s)
+        s = re.sub(r"https?://\S+", "", s)
+        s = re.sub(r"[\d\s]{4,}", " ", s)
+        s = re.sub(r"[^\w\u4e00-\u9fff\s%-]", " ", s)  # 保留字母/中文/数字/空格/-/%
+        s = re.sub(r"\s+", " ", s).strip(" -")
+        if len(s) < 6:
+            continue
+        words = [w for w in re.split(r"\s+", s) if w.strip().lower() not in _STOPWORDS]
+        if not words:
+            continue
+        # 3) 长度权重：中文按字符、英文按词数（略乘 1.5 防英文长句过度集中）
+        score = len(s) + (0.5 * len(words) if re.search(r"[a-zA-Z]", s) else 0)
+        # 4) 过度重复块丢弃（首 12 字相同的即视为同一角度）
+        if any(x[:12] == s[:12] for x, _ in out):
+            continue
+        out.append((s, score))
+    out.sort(key=lambda x: x[1], reverse=True)
+    return [s for s, _ in out[:max_items]]
+
+
 async def draft_worker(query: str, session_id: str) -> None:
     """v8.17 草稿先行后台任务（load 节点 create_task 启动，fire-and-forget）。
 
@@ -718,6 +771,16 @@ async def draft_worker(query: str, session_id: str) -> None:
                             logger.warning(
                                 f"[draft-web] 检索素材提取结果为空（MQ/SUMMARY 未识别），"
                                 f"raw_preview={raw_extract[:120]!r}")
+                        else:
+                            logger.info(
+                                f"[draft] 标签行解析成功 | mq="
+                                f"{len(parsed.get('multi_query') or [])} sum="
+                                f"{len(parsed.get('summary') or [])}")
+                    else:
+                        # v8.17.8: 提取调用空返回不再静默——留痕（fast 空 content/模板缺失）
+                        logger.warning(
+                            f"[draft-web] 检索素材提取调用返回空（原回答 {len(draft_zh)} 字），"
+                            f"转关键词降级兜底")
                 except StructuredParseError as e:
                     preview = (f" raw_preview={raw_extract[:120]!r}"
                                if raw_extract else "")
@@ -789,9 +852,26 @@ async def draft_worker(query: str, session_id: str) -> None:
     extra_retrieval = bool(getattr(settings, "DRAFT_EXTRA_RETRIEVAL", True))
     results: list = []
     queries_n = 0
-    if extra_retrieval and parsed:
+    # v8.17.8: 条件放宽——提取调用空返回/解析空时 parsed 为空 dict（falsy），
+    # 旧写法 `if extra_retrieval and parsed` 直接跳过 → 草稿证据并入恒 0 条
+    # （用户日志实证）。现改为：无论提取是否成功，只要开启 extra_retrieval
+    # 就尝试组装查询；MQ/SUMMARY 缺失时用关键词降级兜底。
+    if extra_retrieval:
         mq = [q for q in (parsed.get("multi_query") or [])[:3] if q and q.strip()]
         sm = [s for s in (parsed.get("summary") or [])[:3] if s and s.strip()]
+        # v8.17.8: 提取失败/为空（含提取调用空返回、无标签行）→ 关键词降级兜底：
+        # 用原生回答正文直接提炼检索角度喂 multi 检索，避免"草稿证据并入 0 条"。
+        if not mq and not sm and draft_zh:
+            kw = _extract_keywords_from_text(draft_zh, max_items=3)
+            if kw:
+                mq = kw
+                logger.info(
+                    f"[draft] 检索素材提取失败 → 关键词降级兜底 | "
+                    f"kw={kw!r}（原回答 {len(draft_zh)} 字）")
+            else:
+                logger.info(
+                    f"[draft] 关键词兜底也无可用角度（原回答 {len(draft_zh)} 字）→ "
+                    f"仅种子查询")
         queries = [query] + mq + sm
         queries_n = len(queries)
         if queries_n > 1:
