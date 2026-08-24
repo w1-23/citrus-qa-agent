@@ -318,6 +318,23 @@ def test_v91_deprecated_tool_guard():
           "call_retrieve_agent" not in get_supervisor_tool_names())
 
 
+# ── F-9.1-9 启动 schema 快照（v9.1.2 真机版本判定锚点）──────────
+def test_v91_lifespan_schema_snapshot():
+    print("[VF-79] lifespan 启动打印 supervisor schema 快照（版本判定锚点）")
+    import src.api.main as main_mod
+    src_ = _inspect.getsource(main_mod)
+    check("lifespan 含 schema 快照日志", "supervisor tools snapshot" in src_)
+    check("快照打印单源 get_supervisor_tool_names",
+          "get_supervisor_tool_names" in src_)
+    check("快照含 LEGACY 旧名标记（异常时显式提醒）",
+          "LEGACY call_retrieve_agent PRESENT" in src_)
+    # 进程内 schema 恒定：单源函数输出与 expert_graph 绑定的 _AGENT_TOOLS 同一对象
+    from src.tools.supervisor_tools import get_supervisor_tool_schemas
+    import src.graph.expert_graph as eg
+    check("expert_graph 绑定同一 schema 单例（import 时求值、进程内恒定）",
+          eg._AGENT_TOOLS is get_supervisor_tool_schemas())
+
+
 def test_v91_silent_summary():
     if failed:
         print(f"\n  ✗ v9.1 回归: {len(failed)} FAIL / {len(passed)} PASS")

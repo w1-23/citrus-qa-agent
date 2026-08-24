@@ -92,6 +92,20 @@ async def lifespan(app: FastAPI):
                     + ", ".join(f"{k}={len(v)}chars" for k, v in _prompts.items()))
     except Exception as e:
         logger.error(f"[Lifespan] fixed prompts build failed: {e}")
+    # v9.1.2（用户真机日志排查: Ruby 旧工具调用 vs 同 session 新路径矛盾）:
+    # 启动时打印 supervisor 工具 schema 快照——进程内 schema 单例在 import 时求值、
+    # 恒定不变（supervisor_tools → expert_graph._AGENT_TOOLS → bind_tools，无按会话
+    # 重建路径）。真机重启后第一眼即可从本行日志判定进程加载的代码版本：
+    #   含 call_search_both = 新代码；含 [LEGACY ... PRESENT] 标记 = 旧构建。
+    try:
+        from src.tools.supervisor_tools import get_supervisor_tool_names
+        _sup_names = get_supervisor_tool_names()
+        logger.info("[Lifespan] supervisor tools snapshot: "
+                    + ", ".join(_sup_names)
+                    + (" [LEGACY call_retrieve_agent PRESENT]" 
+                       if "call_retrieve_agent" in _sup_names else ""))
+    except Exception as e:
+        logger.warning(f"[Lifespan] supervisor tools snapshot failed: {e}")
     yield
     try:
         from src.retrieval.multi_retriever import MultiBatchRetriever
