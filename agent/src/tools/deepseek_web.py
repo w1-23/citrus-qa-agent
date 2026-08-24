@@ -148,7 +148,7 @@ def deepseek_web_search(query: str) -> Tuple[str, dict]:
     empty = {"main_results": [], "web_results": []}
     # v8.15: 前端开关即总开关（config web_search.enabled 仅部署默认值，不作门槛）。
     # 每次请求由 chat_v2 写入 web_search_enabled contextvar，工具执行层据此强制短路——
-    # 开关关闭时即使模型误调也不会产生任何网络请求。
+    # 开关关闭时即使模型误调也不会产生任何网络请求（且不消耗联网预算）。
     from src.core.tracing import web_search_enabled as _req_web_on
     if not _req_web_on():
         logger.info("[deepseek_web_search] 本次请求未开启联网搜索，请求被短路")
@@ -156,15 +156,22 @@ def deepseek_web_search(query: str) -> Tuple[str, dict]:
                 "建议: 需要实时/最新信息时，点击输入框左下的「联网」开关后重新提问；"
                 "本地文献类问题直接使用 citrus_rag_search。",
                 empty)
+    # v9.1: 联网预算——每个用户请求最多调用一次（用户决策；chat_v2 每请求重置）。
+    # 开关开启且预算用尽 → [WEB_BUDGET_EXHAUSTED] 立即短路（不再产生任何联网调用）。
+    from src.core.tracing import consume_web_budget
+    if not consume_web_budget():
+        logger.info("[deepseek_web_search] 本次请求联网预算已用尽，请求被短路")
+        return ("[WEB_BUDGET_EXHAUSTED] 本次请求的联网检索预算已用尽（每个请求仅允许"
+                "一次联网）。请基于本地证据收尾，或在下一轮提问时重新发起。",
+                empty)
     query = (query or "").strip()
     if not query:
         return "[ERR_PARSE] 查询词不能为空", empty
     if len(query) > 500:
         return f"[ERR_PARSE] 查询词过长 ({len(query)}字符)，请精简至 500 字符以内", empty
 
-    # v8.17.15: 输入构造——**工具参数 query 即 agent 本轮 goal**（retrieve-agent
-    # 每轮自定检索目标传入；草稿层已删除，不再有"用户原始问题优先"的 contextvar
-    # 直传——v8.15.3d 原始问题优先是为草稿层直答设计，草稿删除后 goal 即唯一语义）。
+    # v8.17.15: 输入构造——**工具参数 query 即 web-agent 收到的 web_goal**（v9.1：
+    # Supervisor 构造完整联网目标原样下发，web-agent 无 LLM 决策、不改写）。
     # 附带"带网址引用"指令——DeepSeek 该版本 web_search_call 只回搜索动作、
     # 不返回结构化来源，须让模型在回答里明确写出真实网址（[标题](URL)），
     # 才能被解析进「联网搜索」证据组并在侧栏点击。
@@ -172,6 +179,13 @@ def deepseek_web_search(query: str) -> Tuple[str, dict]:
                 "格式如：[来源标题](https://...)。只列你实际引用且真实存在的网页地址。")
     _input_prompt = f"{query}\n\n{_ref_cmd}"
     t0 = time.perf_counter()
+    # v9.1（真机实测）: Responses 端点关思维链——thinking:disabled 无效（reasoning 块
+    # 照出），有效字段为 reasoning effort none。字段形态走 config web_search.
+    # reasoning_off_body；HTTP 400/422（参数被拒）→ 去参重试一次（fail-soft）。
+    off_body: dict = {}
+    _cfg = getattr(settings, "WEB_REASONING_OFF_BODY", None) or {}
+    if isinstance(_cfg, dict) and _cfg:
+        off_body = dict(_cfg)
     try:
         payload = {
             "model": get_deepseek_model(),
@@ -179,14 +193,24 @@ def deepseek_web_search(query: str) -> Tuple[str, dict]:
             "tools": [{"type": "web_search"}],   # 服务端内置 web_search：模型自主决定是否联网
             "stream": False,
         }
+        if off_body:
+            payload.update(off_body)
         headers = {
             "Authorization": f"Bearer {settings.RESOLVED_MAIN_API_KEY or settings.MAIN_API_KEY}",
             "Content-Type": "application/json",
         }
         url = _responses_endpoint()
         _to = _web_http_timeout()
-        logger.info(f"[deepseek_web_search] Responses 调用: {url} model={payload['model']} timeout={_to}s")
+        logger.info(f"[deepseek_web_search] Responses 调用: {url} model={payload['model']} "
+                    f"timeout={_to}s thinking_off={'on' if off_body else 'off'}")
         resp = requests.post(url, headers=headers, json=payload, timeout=_to)
+        if resp.status_code not in (200,) and off_body and resp.status_code in (400, 422):
+            logger.warning(
+                f"[deepseek_web_search] thinking 关闭字段被网关拒绝 HTTP {resp.status_code}"
+                f"，去参重试: {resp.text[:200]}")
+            for _k in list(off_body.keys()):
+                payload.pop(_k, None)
+            resp = requests.post(url, headers=headers, json=payload, timeout=_to)
         if resp.status_code != 200:
             # v8.15.3: 失败详情落日志（HTTP 状态码 + 响应体前 600 字）——
             # "7 次 30s 盲重试"的根因是失败原因全被吞（只看到 err=True）；

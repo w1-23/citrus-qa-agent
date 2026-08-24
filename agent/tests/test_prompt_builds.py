@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""v9.0 固定 system prompt 架构回归测试。
+"""v9.0/v9.1 固定 system prompt 架构回归测试。
 
-验证 "source/ 20 份源文件 + 启动时固定拼接 + 进程级缓存" 的核心不变量：
+验证 "source/ 21 份源文件 + 启动时固定拼接 + 进程级缓存" 的核心不变量：
   1. 角色 → 源文件映射完整且章节顺序符合设计（Supervisor 14 份 / Retrieve 5 份 /
-     Write 6 份 / Lite 4 份 / Analyze 4 份）。
+     Write 6 份 / Lite 4 份 / Analyze 4 份 / Web 4 份）。
   2. 每次请求复用同一字符串：format_hint / query 不影响内容，进程内缓存稳定。
   3. builds/ 落盘文件与运行时 getter 输出一致（KV cache 前缀字节级复用前提）。
-  4. 全部 20 份源文件存在且非空。
+  4. 全部 21 份源文件存在且非空。
 
 全部离线，无模型、无网络。
 """
@@ -31,7 +31,7 @@ def check(name, cond, detail=""):
 
 
 def test_pb01_source_files_complete():
-    print("[PB-01] source/ 20 份源文件齐全且非空")
+    print("[PB-01] source/ 21 份源文件齐全且非空")
     from pathlib import Path
     source_dir = Path(loader.PROMPT_DIR) / "source"
     files = {p.name for p in source_dir.glob("*.md")}
@@ -45,8 +45,9 @@ def test_pb01_source_files_complete():
         "15_format_default.md", "16_tool_usage_file_rules.md",
         "17_data_source_boundaries.md", "18_evidence_arbitration_citation.md",
         "19_lite_mode.md", "20_terminology_domain.md",
+        "21_web_agent_search.md",
     }
-    check("20 份源文件齐全", files == expected, f"missing={sorted(expected - files)}")
+    check("21 份源文件齐全", files == expected, f"missing={sorted(expected - files)}")
     for name in sorted(expected):
         check(f"源文件非空: {name}", (source_dir / name).stat().st_size > 50)
 

@@ -381,15 +381,15 @@ def test_ag22_output_routing():
     prom = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                              'src', 'prompts', 'source', '04_retrieve_agent_search.md'), encoding='utf-8').read()
     check("retrieve 无需报告（v8.17.4 收尾一句结论）",
-          "不撰写报告" in prom and "系统代码确定性组装" in prom
+          "不写报告" in prom and "撰写检索报告" in prom
           and "核心结论与证据点" not in prom
           and "一句话总结论" in prom and "停止检索，输出" in prom)
     # v8.4.3 指令A: 收敛由模型自然判断（不再按文献数代码强制），保留多轮与轮次上限
-    # v8.17.17: 第 1 轮更名为"强制并行本地 + 联网"
-    check("retrieve 多轮工作流", "第 1 轮：强制并行本地 + 联网" in prom
-          and "第 2 轮起：仅本地定向补检" in prom
+    # v9.1: 第 1 轮=多角度并行检索（本地唯一拆解层）；第 2 轮起=定向补检
+    check("retrieve 多轮工作流", "第 1 轮：多角度并行检索" in prom
+          and "第 2 轮起：定向补检" in prom
           and "收尾（第 3 轮后或判断已充分）" in prom
-          and "最多 3 轮" in prom)
+          and "最多 3 轮" in prom and "唯一允许的拆解层" in prom)
     guide = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                               'src', 'prompts', 'source', '03_supervisor_routing_fusion.md'), encoding='utf-8').read()
     check("决策指南深度规则", "要点先行" in guide and "证据说明" in guide)

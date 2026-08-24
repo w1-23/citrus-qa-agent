@@ -105,9 +105,9 @@ def test_v81718_placeholder_wiring_kept():
           'thinking_off=(agent_name in ("retrieve-agent",)' in ar_src)
     check("收尾段 budget/dedup 统计仍引用 placeholder_results",
           "for m in placeholder_results.values()" in ar_src)
-    check("[WEB_BUDGET_EXHAUSTED] 占位写入仍在",
+    check("[DEDUP]/[SEARCH_BUDGET] 占位写入仍在（v9.1 本地检索去重/预算）",
           "placeholder_results[idx] = ToolMessage(" in ar_src
-          and "[WEB_BUDGET_EXHAUSTED]" in ar_src)
+          and ("[DEDUP]" in ar_src and "[SEARCH_BUDGET]" in ar_src))
 
 
 def test_v81718_silent_summary():

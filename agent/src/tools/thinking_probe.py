@@ -21,7 +21,7 @@ import urllib.request
 
 def load_env():
     d = {}
-    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env")
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".env")
     with io.open(p, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -127,6 +127,40 @@ def main():
         print("[tools+thinking disabled] HTTP %s  %s" % (e.code, e.read().decode("utf-8", "ignore")[:200]))
     except Exception as e:
         print("[tools+thinking disabled] ERROR %s" % (e,))
+    # 4) Responses 端点（deepseek_web_search 内部调用形态）：纯对话（不带 web_search 工具）
+    #    验证 thinking 关闭字段是否被接受 + reasoning 是否消失。
+    try:
+        base2 = base
+        resp_path = (getattr(__import__("src.config", fromlist=["settings"]).settings,
+                             "WEB_SEARCH_RESPONSES_PATH", "/v1/responses") or "/v1/responses")
+        for rname, rbody_extra in (
+            ("responses baseline", None),
+            ("responses thinking disabled", {"thinking": {"type": "disabled"}}),
+        ):
+            body = {
+                "model": model,
+                "input": "1+1等于几？请直接给出答案。",
+                "stream": False,
+            }
+            if rbody_extra:
+                body.update(rbody_extra)
+            t0 = time.time()
+            req = urllib.request.Request(
+                base2 + resp_path,
+                data=json.dumps(body).encode("utf-8"),
+                headers={"Authorization": "Bearer " + key,
+                         "Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=90) as r:
+                data = json.loads(r.read().decode("utf-8"))
+            raw = json.dumps(data, ensure_ascii=False)
+            has_reasoning = ("reasoning" in raw.lower() or "reasoning_content" in raw.lower())
+            dt = time.time() - t0
+            print("[%s] HTTP 200  %.1fs  reasoning_field=%s" % (
+                rname, dt, "YES" if has_reasoning else "no"))
+    except urllib.error.HTTPError as e:
+        print("[responses] HTTP %s  %s" % (e.code, e.read().decode("utf-8", "ignore")[:200]))
+    except Exception as e:
+        print("[responses] ERROR %s" % (e,))
     return 0
 
 

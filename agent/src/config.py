@@ -125,6 +125,12 @@ class Settings(BaseSettings):
     # 有效——判断标准：响应无 reasoning_content 且耗时明显下降）。
     MODEL_REASONING_OFF_BODY: dict = Field(default_factory=lambda: _yaml_val(
         "model", "reasoning_off_body", default={"thinking": {"type": "disabled"}}))
+    # v9.1（真机实测 2026-08-24）: Responses 端点（/v1/responses——deepseek_web_search
+    # 内部联网调用）不接受 thinking:disabled（HTTP 200 但 reasoning 照出）；实测
+    # 有效字段为 {"reasoning": {"effort": "none"}}（输出无 reasoning 块）。
+    # 与 chat/completions 端点字段（MODEL_REASONING_OFF_BODY）不同，须分开配置。
+    WEB_REASONING_OFF_BODY: dict = Field(default_factory=lambda: _yaml_val(
+        "web_search", "reasoning_off_body", default={"reasoning": {"effort": "none"}}))
     # v8.4 清理: RECENT_CONTENT_MAX_CHARS / COMPACT_MAX_TOKENS / FALLBACK_CONTENT_MAX_CHARS
     # 死配置已删（对应旧 graph.py check_history/compact_history 节点，代码已无引用；
     # 压缩统一走 context_budget 段的 ContextBudgetConfig）

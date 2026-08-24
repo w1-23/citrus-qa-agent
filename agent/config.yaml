@@ -51,6 +51,13 @@ web_search:
   # 曾设 30s 导致"本会成功的慢响应被自掐"→ 伪失败 → 熔断 → 7 次全败白等 210s。
   # 90s 覆盖实测区间并留余量；执行层对应预算见 agent.tool_timeouts。
   timeout_sec: 90
+  # v9.1（真机实测 2026-08-24）: Responses 端点不接受 thinking:disabled（HTTP 200
+  # 但 reasoning 块照出）；实测有效关闭字段为 reasoning effort none（输出无
+  # reasoning 块）。与 chat/completions 端点字段（model.reasoning_off_body）不同，
+  # 联网搜索内部调用走本配置。
+  reasoning_off_body:
+    reasoning:
+      effort: none
 
 model:
   main: "deepseek-v4-flash"   # v8.3.1: 全部切换 Flash 正式版（V4 Pro 已移除）
@@ -70,6 +77,12 @@ model:
   # 官方 DeepSeek 推荐 thinking；网关不支持时替换为备选并真机验证
   # （判断标准：响应无 reasoning_content 且耗时明显下降）：
   #   reasoning: {enabled: false}  |  reasoning_effort: none  |  enable_thinking: false
+  # v8.17.19: thinking_off 关思维链的请求体字段（extra_body 原样透传网关，
+  # 不走顶层参数——v8.17.18 曾顶层下发致 TypeError 全挂）。
+  # 官方 DeepSeek 推荐 thinking；网关不支持时替换为备选并真机验证
+  # （判断标准：响应无 reasoning_content 且耗时明显下降）：
+  #   reasoning: {enabled: false}  |  reasoning_effort: none  |  enable_thinking: false
+  # 2026-08-24 真机实测（chat/completions 端点）：thinking:disabled 有效（默认值保持）。
   reasoning_off_body:
     thinking:
       type: disabled

@@ -221,8 +221,22 @@ async def _execute_tool_call(tc: dict, tc_id: str = "", material_pack: list | No
     name = tc.get("name", "")
     args = tc.get("args", {})
 
+    # v9.1（用户决策）: 统一检索入口——本地 + 联网并行，互不阻塞；
+    # Retrieve-Agent 只做本地（无联网工具）；Web-Agent 无 LLM 决策单次联网。
+    if name == "call_search_both":
+        try:
+            from src.core.search_both import call_search_both
+            return await call_search_both(
+                args.get("local_goal", ""), args.get("web_goal", ""),
+                session_id=session_id, seen_queries=seen_queries)
+        except Exception as e:
+            logger.error(f"[ExpertGraph] call_search_both failed: {e}")
+            return {"agent": "call_search_both",
+                    "result": f"[Error: {e}]",
+                    "artifacts": {"main_results": [], "web_results": [], "web_summaries": []},
+                    "tools_called": 0, "status": "error"}
+
     agent_map = {
-        "call_retrieve_agent": "retrieve-agent",
         "call_write_agent": "write-agent",
         "call_analyze_agent": "analyze-agent",
     }
@@ -483,7 +497,7 @@ def _build_status_content(
     todo: list[str] = []
     if tool_call_count > 0:
         todo.append("[✓] 评估需求")
-        has_retrieve = "call_retrieve_agent" in tool_names_called
+        has_retrieve = "call_search_both" in tool_names_called
         todo.append("[✓] 检索文献" if has_retrieve else "[ ] 检索文献（如需）")
         if any(n in tool_names_called for n in ("call_write_agent", "write_local_file")):
             todo.append("[✓] 撰写/保存内容")
@@ -671,11 +685,11 @@ async def _execute_supervisor_tools(*, turn, response, messages,
     pending_calls = pending_calls[:max_tools_per_turn]
     extra_retrieves = []
     if sum(1 for tc in pending_calls
-           if _make_tool_call(tc)["name"] == "call_retrieve_agent") > 1:
+           if _make_tool_call(tc)["name"] == "call_search_both") > 1:
         seen_retrieve = False
         kept = []
         for tc in pending_calls:
-            if _make_tool_call(tc)["name"] == "call_retrieve_agent":
+            if _make_tool_call(tc)["name"] == "call_search_both":
                 if not seen_retrieve:
                     seen_retrieve = True
                     kept.append(tc)
@@ -730,9 +744,9 @@ async def _execute_supervisor_tools(*, turn, response, messages,
         try:
             emit_tool_call_start(tc_dict["name"], tc_dict.get("args", {}), tc_id)
             emit_tool_executing(f"正在执行 {tc_dict['name']}...", tc_dict["name"], tc_id)
-            if tc_dict["name"] in ("call_retrieve_agent", "call_write_agent", "call_analyze_agent"):
+            if tc_dict["name"] in ("call_search_both", "call_write_agent", "call_analyze_agent"):
                 agent_map_short = {
-                    "call_retrieve_agent": "retrieve-agent",
+                    "call_search_both": "search-both",
                     "call_write_agent": "write-agent",
                     "call_analyze_agent": "analyze-agent",
                 }
@@ -878,8 +892,8 @@ async def _execute_supervisor_tools(*, turn, response, messages,
             except Exception:
                 pass
         # v8.3.5 状态栏: 已用检索关键词（模型可见，防重复检索）
-        if tc_dict["name"] == "call_retrieve_agent":
-            q = str((tc_dict.get("args") or {}).get("query", ""))
+        if tc_dict["name"] == "call_search_both":
+            q = str((tc_dict.get("args") or {}).get("local_goal", ""))
             if q:
                 used_queries.append(q[:80])
         # v8.3.5 轻量熔断: 连续工具失败 ≥3 → 强制收尾
@@ -1026,7 +1040,7 @@ def _assemble_supervisor_answer(*, answer, all_main_results, all_web_results,
         pass
     citation_info = check_citation_support(
         answer, all_main_results,
-        "call_retrieve_agent" in tool_names_called,
+        "call_search_both" in tool_names_called,
         evidence_count=_evidence_count,
         ltm_chars=_ltm_chars)
 
@@ -1277,7 +1291,7 @@ async def expert_save_node(state: AgentState) -> dict:
         # v8.3.9: 合并全部检索报告（多轮检索不丢） + evidence 保留 chunk_id 可回查原文
         report_parts = []
         for m in trace:
-            if isinstance(m, ToolMessage) and getattr(m, "name", "") == "call_retrieve_agent":
+            if isinstance(m, ToolMessage) and getattr(m, "name", "") == "call_search_both":
                 report_parts.append(str(m.content))
         report_text = "\n\n---\n\n".join(report_parts)
         main_results = state.get("main_results") or []

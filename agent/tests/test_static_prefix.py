@@ -118,8 +118,9 @@ def test_supervisor_tool_schemas_single_source():
     check("schema 顺序固定", get_supervisor_tool_schemas() == schemas)
     names = get_supervisor_tool_names()
     check("6 个 supervisor 工具", len(names) == 6, f"got {names}")
-    check("含三个 call_*_agent", all(n in names for n in
-                                     ("call_retrieve_agent", "call_write_agent", "call_analyze_agent")))
+    check("含 call_search_both + 另两个 call_*_agent", all(n in names for n in
+                                     ("call_search_both", "call_write_agent", "call_analyze_agent")))
+    check("call_retrieve_agent 已移除", "call_retrieve_agent" not in names)
 
 
 def test_supervisor_tool_schemas_single_source():
@@ -132,8 +133,9 @@ def test_supervisor_tool_schemas_single_source():
     check("schema 顺序固定", get_supervisor_tool_schemas() == schemas)
     names = get_supervisor_tool_names()
     check("6 个 supervisor 工具", len(names) == 6, f"got {names}")
-    check("含三个 call_*_agent", all(n in names for n in
-                                     ("call_retrieve_agent", "call_write_agent", "call_analyze_agent")))
+    check("含 call_search_both + 另两个 call_*_agent", all(n in names for n in
+                                     ("call_search_both", "call_write_agent", "call_analyze_agent")))
+    check("call_retrieve_agent 已移除", "call_retrieve_agent" not in names)
 
 
 print()

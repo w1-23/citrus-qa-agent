@@ -13,25 +13,33 @@ _SUPERVISOR_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "call_retrieve_agent",
-            "description": "Search academic literature for citrus research. "
-                           "Use for factual queries, mechanisms, comparisons, reviews. "
-                           "Query must be English keywords (5-15 words), NOT a full sentence. "
-                           "If first search is insufficient, call again with synonyms or "
-                           "narrower terms (up to 3 different angles).",
+            "name": "call_search_both",
+            "description": "Unified search entry (v9.1): runs LOCAL academic/library retrieval "
+                           "and WEB search IN PARALLEL, never blocks each other. Use for ANY "
+                           "question needing factual, mechanism, comparison, review, or timely "
+                           "information. ALWAYS provide BOTH goals — do NOT skip or prejudge "
+                           "either direction (local even for timely topics, web even for "
+                           "academic topics); empty goals are auto-filled but weaken quality. "
+                           "local_goal = complete local intent (do NOT split into subtasks); "
+                           "web_goal = complete natural-language web query with all key "
+                           "details (year, event, entity).",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {
+                    "local_goal": {
                         "type": "string",
-                        "description": "English search keywords (5-15 words)",
+                        "description": "Complete local retrieval intent covering ALL parts of "
+                                       "the user question (Chinese or English; NOT split; "
+                                       "retrieve-agent generates 2-4 focused angles internally)",
                     },
-                    "goal": {
+                    "web_goal": {
                         "type": "string",
-                        "description": "What to retrieve and why",
+                        "description": "Complete natural-language web search query covering ALL "
+                                       "parts of the question, incl. year/event/entity; "
+                                       "passed verbatim to web-agent (no rewriting)",
                     },
                 },
-                "required": ["query", "goal"],
+                "required": ["local_goal", "web_goal"],
             },
         },
     },

@@ -429,7 +429,7 @@ async def save_context_node(state: AgentState) -> dict:
         # v8.3.8: 证据账本（v8.3.9: 合并全部报告 + chunk_id 可回查）
         report_parts = []
         for m in trace:
-            if isinstance(m, ToolMessage) and getattr(m, "name", "") == "call_retrieve_agent":
+            if isinstance(m, ToolMessage) and getattr(m, "name", "") == "call_search_both":
                 report_parts.append(str(m.content))
         report_text = "\n\n---\n\n".join(report_parts)
         main_results = state.get("main_results") or []

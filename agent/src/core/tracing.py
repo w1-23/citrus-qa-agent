@@ -23,6 +23,13 @@ _session_id: contextvars.ContextVar = contextvars.ContextVar(
 _web_search_enabled: contextvars.ContextVar = contextvars.ContextVar(
     "web_search_enabled", default=False)
 
+# v9.1（用户决策：每个用户请求最多调用一次 deepseek_web_search）: 联网调用
+# 请求级预算。v8.17.17 的 _web_used 在 agent_runner 实例内（每次 run_agent 重置），
+# v9.1 联网移出 retrieve-agent 到独立 web-agent（无 LLM、直接调工具）后，预算必须
+# 上移到请求级 contextvar——chat_v2 每请求 reset，deepseek_web_search 入口消费。
+_web_budget_left: contextvars.ContextVar = contextvars.ContextVar(
+    "web_budget_left", default=1)
+
 # v8.15.3d: 本次请求的用户原始问题——联网工具把原始问题直传 DeepSeek 原生联网，
 # 让 output_text 围绕原始问题作答（模型给的检索词仅作"搜索参考关键词"）。
 _original_query: contextvars.ContextVar = contextvars.ContextVar(
@@ -35,6 +42,20 @@ def set_web_search_enabled(enabled: bool) -> None:
 
 def web_search_enabled() -> bool:
     return _web_search_enabled.get()
+
+
+def reset_web_budget(quota: int = 1) -> None:
+    """v9.1: 每请求开始重置联网预算（chat_v2 入口调用，与 set_web_search_enabled 同处）。"""
+    _web_budget_left.set(max(int(quota), 0))
+
+
+def consume_web_budget() -> bool:
+    """消费一次联网预算。返回 False = 本次请求联网预算已用尽（上层应短路）。"""
+    v = _web_budget_left.get()
+    if v <= 0:
+        return False
+    _web_budget_left.set(v - 1)
+    return True
 
 
 def set_original_query(query: str) -> None:

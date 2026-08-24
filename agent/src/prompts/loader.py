@@ -62,6 +62,14 @@ ROLE_SOURCE_FILES: dict[str, list[str]] = {
         "07_review_chapter_writer.md",
         "20_terminology_domain.md",
     ],
+    # Web-Agent（v9.1 联网检索执行器：无 LLM 决策、单次调用；映射保留以兼容
+    # 快照/测试，实际执行不消费 system prompt——run_web_agent 直接调工具）
+    "web": [
+        "01_global_role_domain.md",
+        "02_global_data_fidelity_citation.md",
+        "21_web_agent_search.md",
+        "20_terminology_domain.md",
+    ],
     # 轻量模式（01 + 02 + 19 + 20，固定）
     "lite": [
         "01_global_role_domain.md",
@@ -85,6 +93,7 @@ BUILD_FILE_NAMES: dict[str, str] = {
     "write": "write_agent_system.md",
     "lite": "lite_system.md",
     "analyze": "analyze_agent_system.md",
+    "web": "web_agent_system.md",
 }
 
 # 子 Agent 名 → 角色（assemble_agent_prompt 兼容层）
@@ -92,6 +101,7 @@ AGENT_ROLE_MAP: dict[str, str] = {
     "retrieve-agent": "retrieve",
     "write-agent": "write",
     "analyze-agent": "analyze",
+    "web-agent": "web",
 }
 
 # 兼容常量（供 snapshot/测试消费，含义同旧版）

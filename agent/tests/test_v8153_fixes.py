@@ -101,9 +101,10 @@ def test_v8153_reasoning_mode():
 def test_v8153_web_failure_details():
     print("[VF-12] deepseek_web_search 失败详情")
     import src.tools.deepseek_web as dw
-    from src.core.tracing import set_web_search_enabled
+    from src.core.tracing import set_web_search_enabled, reset_web_budget
 
     set_web_search_enabled(True)
+    reset_web_budget(1)
 
     class _FakeResp:
         status_code = 503
@@ -129,6 +130,7 @@ def test_v8153_web_failure_details():
               c.startswith("[ERR_NETWORK]") and "HTTP 503" in c, c[:80])
         check("HTTP 失败 artifact 双键空", a == {"main_results": [], "web_results": []}, str(a))
         dw.requests = _FakeRequestsTimeout()
+        reset_web_budget(1)
         c2, _a2 = dw.deepseek_web_search.func("最新柑橘行情")
         check("超时 → 单独分支含超时提示", c2.startswith("[ERR_NETWORK]") and "超时" in c2, c2[:80])
     finally:
@@ -164,12 +166,14 @@ def test_v8153_prompt_mechanisms():
           "政府工作报告" in ra and "最新新闻" in ra)
     check("retrieve-agent 早停阈值规则(通过≤2/过滤≥50%)",
           "通过 ≤2 条" in ra and "过滤占比 ≥50%" in ra)
-    # v8.17.17: 联网仅第 1 轮 1 次（用户决策）——提示词同步
-    check("retrieve-agent 允许联网（v8.17.17，仅第 1 轮 1 次）",
-          "deepseek_web_search" in ra and "全程仅第 1 轮允许调用 1 次" in ra)
-    check("retrieve-agent 无「禁止调用」", "禁止调用" not in ra)
-    check("retrieve-agent 联网=goal 驱动",
-          "query=goal" in ra and "[WEB_BUDGET_EXHAUSTED]" in ra)
+    # v9.1: 联网移出 retrieve-agent（架构变更）；本地拆解唯一层语义
+    check("retrieve-agent 无联网工具（v9.1 架构）",
+          "deepseek_web_search" not in ra and "citrus_rag_search" in ra)
+    check("retrieve-agent 唯一拆解层（2~4 角度防膨胀）",
+          "唯一允许的拆解层" in ra and "2~4 个" in ra)
+    check("supervisor 统一入口 call_search_both（不预判不跳过）",
+          "call_search_both" in dg and "不预先跳过任何一方" in dg
+          and "禁止传空字符串" in dg)
     check("supervisor 含覆盖表+自审", "数据源覆盖边界与检索前自审" in dg)
     check("supervisor 含检索后自审(引用对齐)", "检索后自审" in dg and "引用对齐" in dg)
     check("supervisor 含证据来源仲裁规则", "证据来源仲裁与引用规则" in dg)
@@ -204,7 +208,7 @@ def test_v8153_tool_timeout_override():
 def test_v8153d_original_query_direct():
     print("[VF-16] 联网工具 goal 驱动（input=工具参数 query）")
     import src.tools.deepseek_web as dw
-    from src.core.tracing import set_web_search_enabled
+    from src.core.tracing import set_web_search_enabled, reset_web_budget
 
     captured: dict = {}
 
@@ -224,6 +228,7 @@ def test_v8153d_original_query_direct():
 
     old = dw.requests
     set_web_search_enabled(True)
+    reset_web_budget(1)
     try:
         dw.requests = _FakeRequests()
         c, a = dw.deepseek_web_search.func("2025年以来HLB田间种群感染密度")

@@ -111,32 +111,31 @@ def test_v81715_draft_removed():
           not _os.path.exists(ROOT / "src/core/draft_store.py"))
 
 
-# ── VF-48 联网回归 retrieve-agent ───────────────────────────────────
+# ── VF-48 v9.1 联网移出 retrieve-agent（独立 web-agent 并行）─────────
 def test_v81715_web_back_in_agent():
-    print("[VF-48] 联网回归 retrieve-agent（白名单 + 每轮≤1 预算 + 熔断）")
+    print("[VF-48] v9.1 联网移出 retrieve-agent（白名单仅本地 + 预算在工具层）")
     from src.core import agent_runner as ar
     from src.config import settings
 
     names = ar._resolve_tool_names("retrieve-agent")
-    check("retrieve-agent 白名单含 deepseek_web_search",
-          "deepseek_web_search" in names, str(names))
+    check("retrieve-agent 白名单无联网工具（根除只联网不本地）",
+          "deepseek_web_search" not in names, str(names))
     check("白名单含本地检索", "citrus_rag_search" in names)
     _aca = settings.ACADEMIC_ENABLED
     check("学术源随门控（默认关）", ("academic_search" not in names) == (not _aca))
 
     ar_src = _inspect.getsource(ar)
-    check("联网预算 = 全程仅 1 次（_web_used 请求级计数）",
-          "_web_used = 0" in ar_src and "turn > 0 or _web_used >= 1" in ar_src)
-    check("拦截信号 [WEB_BUDGET_EXHAUSTED]（不污染证据）",
-          "WEB_BUDGET_EXHAUSTED" in ar_src
-          and '"web_results": []' in ar_src)
-    check("连续失败熔断保留（≥2 拦截）",
-          "联网搜索已连续失败" in ar_src and "_web_fail_streak" in ar_src)
-    check("web_summary 进 artifact（回执网络综述素材）",
+    check("agent_runner 不再持有联网预算/熔断（v9.1 迁移至工具层）",
+          "_web_used = 0" not in ar_src and "_web_fail_streak = 0" not in ar_src
+          and "WEB_BUDGET_EXHAUSTED" not in ar_src, "残留旧联网逻辑")
+    check("web_summary 收集保留（防御/兼容，artifacts 通路）",
           "web_summaries" in ar_src)
-    check("turn0 仅联网 → 自动补发本地检索（并发兜底）",
-          "仅联网 → 自动补发本地检索" in ar_src
-          and "rag-auto" in ar_src)
+
+    # v9.1 新架构：supervisor 统一入口 call_search_both 并行（本地+联网）
+    from src.graph import expert_graph as eg
+    eg_src = _inspect.getsource(eg)
+    check("supervisor 执行分支 call_search_both（并行检索）",
+          "if name == \"call_search_both\":" in eg_src)
 
 
 # ── VF-49 deepseek_web_search goal 驱动 + 短路 + URL ────────────────
@@ -211,32 +210,30 @@ def test_v81715_frontend_cleaned():
     check("无深度思考草稿引用", "预检索草稿" not in idx)
 
 
-# ── VF-52 提示词快照新语义 ────────────────────────────────────────
+# ── VF-52 提示词快照新语义（v9.1：独立 web-agent 架构）──────────────
 def test_v81715_prompt_snapshots():
-    print("[VF-52] 提示词/快照新语义（联网回归 agent）")
-    # v9.0: 提示词为"启动时固定拼接"——直接断言最终装配出的固定提示词内容与快照
+    print("[VF-52] 提示词/快照新语义（v9.1 本地+联网并行架构）")
     from src.prompts.loader import assemble_agent_prompt, assemble_system_prompt
     ra = assemble_agent_prompt("retrieve-agent")
     dg = assemble_system_prompt(mode="expert", format_hint=None, query=None)
     snap_ra = _src("src/prompts/snapshots/agent_retrieve-agent.txt")
     snap_dg = _src("src/prompts/snapshots/system_expert.txt")
 
-    check("retrieve-agent 允许 deepseek_web_search（全程仅第 1 轮 1 次）",
-          "deepseek_web_search" in ra and "全程仅第 1 轮允许调用 1 次" in ra)
-    check("retrieve-agent 无「禁止调用」", "禁止调用" not in ra)
-    check("retrieve-agent goal 驱动表述", "query=goal" in ra)
-    check("retrieve-agent 含 [WEB_BUDGET_EXHAUSTED] 说明", "[WEB_BUDGET_EXHAUSTED]" in ra)
-    check("supervisor 无草稿活性语义（草稿层执行/原生回答参考段）",
-      "草稿层唯一" not in dg and "原生回答参考（草稿预答）" not in dg
-      and "已由草稿层" not in dg)
-    check("supervisor 含联网证据仲裁规则（替代原生回答参考）", "联网证据默认可信" in dg)
-    check("supervisor goal 不写「仅联网」（v8.17.17 并发约束）",
-          "不要写「仅联网检索/只联网」" in dg or "仅联网" in dg)
-    check("快照 agent_retrieve-agent.txt 同步新语义",
-          "全程仅第 1 轮允许调用 1 次" in snap_ra and "query=goal" in snap_ra)
-    check("快照 system_expert.txt 无「原生回答参考（草稿预答）」段渲染",
-      "原生回答参考（草稿预答）" not in snap_dg
-      and "原生回答参考段的使用规则" not in snap_dg)
+    check("retrieve-agent 无联网工具（本地唯一拆解层）",
+          "deepseek_web_search" not in ra and "citrus_rag_search" in ra)
+    check("retrieve-agent 唯一拆解层语义（2~4 个聚焦角度）",
+          "唯一允许的拆解层" in ra and "2~4 个" in ra)
+    check("retrieve-agent 不超过 4 个角度（防膨胀）", "不要超过 4 个" in ra)
+    check("supervisor 含 call_search_both 统一入口", "call_search_both" in dg)
+    check("supervisor 不预判不跳过 + 禁止空字符串", "不预先跳过任何一方" in dg
+          and "禁止传空字符串" in dg)
+    check("supervisor 含联网证据仲裁规则（时效优先 [Wn]）", "时效信息优先联网" in dg
+          and "联网证据默认可信" in dg)
+    check("supervisor 无 call_retrieve_agent 残留", "call_retrieve_agent" not in dg)
+    check("快照 agent_retrieve-agent.txt 同步（无联网工具）",
+          "deepseek_web_search" not in snap_ra and "唯一允许的拆解层" in snap_ra)
+    check("快照 system_expert.txt 同步 call_search_both",
+          "call_search_both" in snap_dg)
 
 
 # ── VF-53 引用保存 web 条目（evidence 0 items 修复）+ historical 恢复 ──
