@@ -54,6 +54,75 @@ def filter_refs_by_answer(answer: str, cited_refs: list) -> list:
             out.append(it)
     return out
 
+
+# v9.2: 回答引用编号统一重排——[n]（数字）/ [Wn] / [Hn] 三组各自连续编号
+# （单个 regex 一次扫描重写，避免先重排数字后误伤 [Wn]/[Hn]）
+_REF_ALL_RE = re.compile(r"\[([WH]?)(\d{1,3})\]", re.IGNORECASE)
+
+
+def renumber_refs(answer: str, cited_refs: list) -> tuple:
+    """v9.2: 回答引用编号统一重排（数字 [n] 连续 1..k、[Wn] 连续 W1..Wm、[Hn] 连续 H1..Hp）。
+
+    收敛「本地 [n] 跳号（如 [1][2][4][9]）」与前端 v8.17.3 `_buildCompactRefMap`
+    的 W 专用压缩——重排统一在后端完成（一处），返回 remap 供前端按映射
+    重写正文 + 重置 ref_id，避免前后端双重重排冲突。
+
+    规则（与 filter_refs_by_answer 同源：按回答首次出现顺序）：
+    - 数字 / W / H 三组**各自**按首次出现顺序连续编号（编号语义与侧栏
+      同组连续展示一致；正文组内呈现顺序由模型输出决定，不强制重排）；
+    - cited_refs 只保留被引用的条目，顺序 = 首次出现顺序，ref_id 写为新编号；
+    - remap = {旧 ref_id: 新 ref_id}，随 citations 事件附带；不在映射内的
+      残留编号保持原文不重写；
+    - 回答为空 / cited 为空 / 无任何引用编号 → 原样返回（防御，不误伤）。
+
+    返回 (new_answer, new_cited, remap)。
+    """
+    if not answer or not cited_refs:
+        return answer, cited_refs, {}
+    order: list[str] = []
+    seen: set = set()
+    for m in _REF_NUM_RE.finditer(answer):
+        rid = m.group(1)
+        if rid not in seen:
+            seen.add(rid)
+            order.append(rid)
+    for m in _REF_WH_RE.finditer(answer):
+        rid = f"{m.group(1).upper()}{m.group(2)}"
+        if rid not in seen:
+            seen.add(rid)
+            order.append(rid)
+    if not order:
+        return answer, cited_refs, {}
+
+    by_id = {str(it.get("ref_id")): it for it in cited_refs}
+    counters: dict[str, int] = {"": 0, "W": 0, "H": 0}
+    remap: dict[str, str] = {}
+    new_cited: list = []
+    out_ids: set = set()
+    for rid in order:
+        prefix = rid[0] if rid and rid[0] in ("W", "H") else ""
+        num = rid[1:] if prefix else rid
+        it = by_id.get(rid)
+        if it is None:
+            continue
+        counters[prefix] += 1
+        new_id = f"{prefix}{counters[prefix]}" if prefix else str(counters[prefix])
+        remap[rid] = new_id
+        if rid in out_ids:
+            continue  # 同一条目被多次引用：编号已归位，不重复入列
+        out_ids.add(rid)
+        new_item = dict(it)
+        new_item["ref_id"] = new_id
+        new_cited.append(new_item)
+
+    def _repl(m):
+        prefix = m.group(1).upper()
+        key = prefix + m.group(2) if prefix else m.group(2)
+        new = remap.get(key)
+        return "[" + (new if new is not None else key) + "]"
+
+    return _REF_ALL_RE.sub(_repl, answer), new_cited, remap
+
 # 证据全文的字段回退顺序（text 含机制/数字细节，优先；摘要/片段次之）
 _TEXT_KEYS = ("text", "abstract", "snippet")
 

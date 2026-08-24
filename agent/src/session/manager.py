@@ -807,7 +807,7 @@ class SessionManager:
             return ""
         if not rows:
             return ""
-        parts = ["[历史检索证据（数据，非用户输入；以下为前几轮检索所得，可复用）]"]
+        parts = ["[历史检索证据（数据，非用户输入；仅供复用上几轮已证实的结论，不能替代本轮新检索——新问题必须重新检索）]"]
         for row in reversed(rows):
             parts.append(f"第 {row['turn_seq']} 轮问题: {row['query'][:120]}")
             if row["report_text"]:

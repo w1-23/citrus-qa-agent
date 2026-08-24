@@ -1898,6 +1898,7 @@ function switchSession(sid) {
   localStorage.setItem('citrus_session_id', sid);
   chatContainer.innerHTML = '';
   roundHistory = [];
+  _restoredGroups = null;   // v9.2: 切换会话清空恢复视图，等下一次 restore
   _ctxData = null; _totalTokensUsed = 0;
   sidebarContent.innerHTML = '<div class="empty-sidebar">提交问题后文献将在此展示</div>';
   citationCount.textContent = '0';
@@ -1956,8 +1957,12 @@ function loadWorkspaceFiles() {
     });
 }
 
-/* v8.10k: 会话历史文献引用恢复（刷新/切换会话后文献引用栏不再为空）
-   ——从后端 session_evidence 恢复各轮引用，同会话跨轮累加 */
+/* v9.2: 会话历史文献引用恢复——按来源 4 组合并（RAG/UCR/Web/历史），
+   与 live 侧栏同构（替代 v8.10k 每轮列表 R{turn}-{i}：编号体系与正文不同源、
+   点击不可追踪）。后端 /citations 返回 groups，恢复后按 4 组手风琴渲染；
+   新提问触发的实时轮次（roundHistory）到达后优先显示实时轮次结构。 */
+var _restoredGroups = null;   // {rag:[], ucr:[], web:[], historical:[]}（刷新恢复视图）
+
 function restoreSessionCitations() {
   var box = document.getElementById('sidebar-content');
   if (!box || !sessionId) return;
@@ -1965,8 +1970,10 @@ function restoreSessionCitations() {
   fetch('/api/v2/session/' + encodeURIComponent(sessionId) + '/citations')
     .then(function (r) { return r.json(); }).then(function (d) {
       if (reqSid !== sessionId) return;
-      var rounds = (d && d.rounds) || [];
-      if (rounds.length === 0) {
+      var groups = d && d.groups;
+      var gTotal = groups ? ((groups.rag || []).length + (groups.ucr || []).length +
+                             (groups.web || []).length + (groups.historical || []).length) : 0;
+      if (!groups || gTotal === 0) {
         if (roundHistory.length === 0) {
           // v8.10q: save_evidence 是后台 spawn 异步落库——切换会话时最新一轮
           // 证据可能尚未落库（空结果）。仅重试 1 次覆盖时序缺口（避免新会话无限轮询）
@@ -1986,14 +1993,7 @@ function restoreSessionCitations() {
         return;
       }
       _citationsRetry = 0;
-      // 合并：当前内存轮次 + 历史轮次（按轮去重，内存优先）
-      var seen = {};
-      for (var i = 0; i < roundHistory.length; i++) seen[roundHistory[i].roundId] = true;
-      var merged = roundHistory.slice();
-      for (var j = 0; j < rounds.length; j++) {
-        if (!seen[rounds[j].round_id]) merged.push(rounds[j]);
-      }
-      roundHistory = merged;
+      _restoredGroups = groups;
       renderRoundSidebar();
     }).catch(function () { /* 保持现状，不打扰 */ });
 }
@@ -2297,6 +2297,7 @@ async function clearSession(silent) {
     sidebarContent.innerHTML = '<div class="empty-sidebar">提交问题后文献将在此展示</div>';
     citationCount.textContent = '0';
     roundHistory = [];
+    _restoredGroups = null;   // v9.2: 清空会话同步清空恢复视图
     // P3-2: 重置上下文面板（清空后不再残留旧会话数字）
     _ctxData = null;
     _totalTokensUsed = 0;
@@ -2364,31 +2365,15 @@ function _refIdSort(items) {
     return ka < kb ? -1 : (ka > kb ? 1 : 0);
   });
 }
-/* v8.17.3: 联网引用编号紧凑重排——回答只引用了部分 [Wn]（如 [W1][W3][W7]），
-   侧栏/徽章条/正文保留原始跳跃编号（W1/W3/W7 断层）。这里把「被引用的 W 条目」
-   按原始编号升序压缩为连续编号（W1..Wk），使展示从 [W1][W2][W3] 连续、无跳跃。
-   仅压缩 [Wn]（联网网址），本地 [n] / 历史 [Hn] 保持原样（其编号与回执顺序对应）。
-   纯展示层重排：不动后端回执编号，只影响本条消息的 UI 呈现。 */
-function _buildCompactRefMap(citedList) {
-  var used = [];
-  for (var i = 0; i < (citedList || []).length; i++) {
-    var rid = citedList[i] && citedList[i].ref_id;
-    if (rid != null && /^W\d+$/i.test(String(rid)) && used.indexOf(String(rid)) < 0) {
-      used.push(String(rid));
-    }
-  }
-  used = _refIdSort(used.map(function (r) { return {ref_id: r}; }))
-      .map(function (o) { return o.ref_id; });
-  var map = {};
-  for (var j = 0; j < used.length; j++) map[used[j]] = 'W' + (j + 1);
-  return map;
-}
-/* 正文 [Wn] 引用按紧凑映射重写；[n]/[Hn] 保持原样。 */
-function _rewriteWRefsInText(text, map) {
-  if (!text || !map) return text;
-  return text.replace(/\[(W\d+)\]/gi, function (full, wid) {
-    var norm = String(wid).toUpperCase();
-    return '[' + (map[norm] != null ? map[norm] : norm) + ']';
+/* v9.2: 引用编号统一重排已收敛到后端（evidence.renumber_refs）——citations 事件
+   附带 remap（旧ref_id → 新ref_id；数字 [n] 连续 1..k、[Wn] 连续 W1..Wm、
+   [Hn] 连续 H1..Hp）。前端只按 remap 通用重写正文与 ref_id，替代 v8.17.3
+   前端 W 专用压缩（_buildCompactRefMap/_rewriteWRefsInText 移除）。 */
+function _rewriteRefsByMap(text, remap) {
+  if (!text || !remap) return text;
+  return text.replace(/\[([WH]?)(\d+)\]/gi, function (full, pre, num) {
+    var key = pre ? String(pre).toUpperCase() + num : num;
+    return '[' + (remap[key] != null ? remap[key] : key) + ']';
   });
 }
 
@@ -2637,20 +2622,20 @@ async function sendMsg(isFollowUp) {
         updateStatus('answer', '✅ 第 ' + (data.index||'') + '/' + (data.total||'') + ' 章完成');
         break;
       case 'citations':
-        // v8.17.3: 联网引用编号紧凑重排——回答只引用了部分 [Wn]（如 [W1][W3][W7]），
-        // 先压缩被引用 W 条目的编号为连续 W1..Wk（原跳跃编号 W1/W3/W7 → W1/W2/W3），
-        // 再同步重写正文 [Wn] 引用并重渲染，最后才写入 roundHistory（侧栏同编号）。
+        // v9.2: 引用编号统一重排在后端完成（renumber_refs）——事件附带 remap，
+        // 前端按 remap 重写正文 [n]/[Wn]/[Hn] 与 cited ref_id 后写入 roundHistory，
+        // 侧栏与正文编号一致（替代 v8.17.3 前端 W 专用压缩）。
         var _cited0 = data.cited || [];
-        var _wmap = _buildCompactRefMap(_cited0);
-        if (Object.keys(_wmap).length > 0) {
+        var _remap = data.remap || {};
+        if (Object.keys(_remap).length > 0) {
           for (var _ci = 0; _ci < _cited0.length; _ci++) {
             var _oldR = _cited0[_ci] && _cited0[_ci].ref_id;
-            if (_oldR != null && _wmap[String(_oldR)] != null) {
-              _cited0[_ci].ref_id = _wmap[String(_oldR)];
+            if (_oldR != null && _remap[String(_oldR)] != null) {
+              _cited0[_ci].ref_id = _remap[String(_oldR)];
             }
           }
-          // 正文 [Wn] 引用同步重排（text 流式已完成，fullText 已完整）
-          fullText = _rewriteWRefsInText(fullText, _wmap);
+          // 正文引用同步重写（text 流式已完成，fullText 已完整）
+          fullText = _rewriteRefsByMap(fullText, _remap);
           renderAnswer();
         }
         roundHistory.push({roundId:currentRoundId,query:currentQuery,cited:_cited0,uncited:data.uncited||[],historical:data.historical||[]});
@@ -2767,6 +2752,8 @@ async function sendMsg(isFollowUp) {
       h += '<div class="citation-text"><strong>品种:</strong> ' + escapeHtml(item.variety_name) + '</div>';
     }
     if (item.section_name) h += '<div class="citation-text"><strong>Section:</strong> ' + escapeHtml(item.section_name) + '</div>';
+    // v9.2: 恢复视图条目携带来源轮次元数据（live 条目无 round_seq 不显示）
+    if (item.round_seq) h += '<div class="citation-text"><strong>Round:</strong> 第 ' + item.round_seq + ' 轮</div>';
     if (item.text_preview) h += '<div class="citation-text">' + escapeHtml((item.text_preview || '').substring(0, 250)) + '</div>';
     h += '<div class="citation-detail">';
     if (item.title) h += '<div class="citation-text"><strong>' + (isUcr ? 'Variety:' : 'Title:') + '</strong> ' + escapeHtml((item.title || '').substring(0, 200)) + '</div>';
@@ -2779,8 +2766,47 @@ async function sendMsg(isFollowUp) {
   // v8.15: 来源分组手风琴（同一 Round 内同时只展开一组）
   // v8.15.2: toggleSrcGroup 已提升为全局函数（见 toggleRound 下方）——
   // 此前的内部定义导致内联 onclick 全局解析失败，RAG/UCR 来源组无法展开收缩。
+  /* v9.2: 刷新恢复视图——按来源 4 组手风琴（与 live 侧栏同构，共用
+     src-group 结构与 renderCitationItem；条目携带来源轮次元数据） */
+  function renderRestoredGroups() {
+    if (!_restoredGroups) return false;
+    var order = ['rag', 'ucr', 'web', 'historical'];
+    var total = 0;
+    for (var g = 0; g < order.length; g++) total += (_restoredGroups[order[g]] || []).length;
+    citationCount.textContent = String(total);
+    var html = '';
+    var firstOpen = true;
+    for (var gi = 0; gi < order.length; gi++) {
+      var gk = order[gi];
+      var items = _restoredGroups[gk] || [];
+      if (items.length === 0) continue;
+      var sm2 = SOURCE_META[gk];
+      var gid = 'restore-' + gk;
+      var gOpen = firstOpen;
+      firstOpen = false;
+      html += '<div class="src-group">';
+      html += '<div class="src-group-header" onclick="toggleSrcGroup(\'' + gid + '\')">';
+      html += '<span class="toggle-icon' + (gOpen ? '' : ' collapsed') + '">▶</span>';
+      html += '<span class="src-badge ' + sm2.cls + '">' + escapeHtml(sm2.tag) + ':</span>';
+      html += '<span class="round-title" style="font-size:11px">' + escapeHtml(sm2.name) + '</span>';
+      html += '<span class="round-count">' + items.length + '</span></div>';
+      html += '<div class="src-group-body" id="srcgroup-' + gid + '"' + (gOpen ? '' : ' style="display:none"') + '>';
+      // v8.15.2: 组内按 ref_id 升序（重排后数字/W/H 均连续，_refIdSort 保序）
+      var gItems = _refIdSort(items);
+      for (var m2 = 0; m2 < gItems.length; m2++) {
+        html += renderCitationItem(gItems[m2]);
+      }
+      html += '</div></div>';
+    }
+    if (!html) return false;
+    sidebarContent.innerHTML = html;
+    return true;
+  }
+
   function renderRoundSidebar() {
     if (roundHistory.length === 0) {
+      // v9.2: 无实时轮次时优先显示刷新恢复的 4 组合并视图
+      if (renderRestoredGroups()) return;
       sidebarContent.innerHTML = '<div class="empty-sidebar">提交问题后文献将在此展示</div>';
       citationCount.textContent = '0';
       return;

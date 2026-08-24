@@ -7,13 +7,13 @@ import asyncio
 import logging
 import time
 
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END
 
 from src.graph.state import AgentState
 from src.config import settings, get_deepseek_model
 from src.core.evidence import (render_evidence, EVIDENCE_SNIPPET_MAX_CHARS,
-                               src_of, filter_refs_by_answer)
+                               src_of, filter_refs_by_answer, renumber_refs)
 from src.core.agent_loop import (
     dedup_by_doi, emit_llm_usage, FINAL_ANSWER_PROMPT,
     invoke_llm_with_retry, force_final_answer,
@@ -371,13 +371,29 @@ async def light_supervisor_node(state: AgentState) -> dict:
             "score": 0,
         })
 
-    # v8.15: 侧栏引用只显示回答真实引用的证据（严格过滤 + 按回答首次出现顺序重排）
+    # v9.2: 引用编号统一重排（后端一处收敛）——[n]→连续 1..k、[Wn]→W1..Wm；
+    # 内化原 v8.15 过滤+首次出现排序，remap 随 references_data 下发前端重写正文
+    ref_remap: dict = {}
+    _orig_answer = answer
     try:
-        cited_refs = filter_refs_by_answer(answer, cited_refs)
+        answer, cited_refs, ref_remap = renumber_refs(answer, cited_refs)
     except Exception as e:
-        logger.debug(f"[LightGraph] filter_refs_by_answer skipped: {e}")
+        logger.debug(f"[LightGraph] renumber_refs skipped: {e}")
+    if answer != _orig_answer:
+        # v9.2: 轨迹内承载原始回答的 AIMessage 同步为重排后文本（save 节点
+        # 按 trace[-1].content == state.answer 判重，防编号差异追加重复消息）
+        try:
+            for _m in messages:
+                if (isinstance(_m, AIMessage)
+                        and not getattr(_m, "tool_calls", None)
+                        and getattr(_m, "content", None) == _orig_answer):
+                    _m.content = answer
+                    break
+        except Exception:
+            pass
 
-    references_data = {"cited": cited_refs, "uncited": [], "total": len(cited_refs)}
+    references_data = {"cited": cited_refs, "uncited": [],
+                       "remap": ref_remap, "total": len(cited_refs)}
 
     # v8.15.2: 不再注入历史证据引用（H1..Hn）——侧栏只显示本轮回答真实引用的证据，
     # 防止侧栏膨胀。（原 v8.4.6 F2 行为已移除）

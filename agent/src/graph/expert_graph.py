@@ -18,7 +18,7 @@ from langgraph.graph import StateGraph, END
 from src.graph.state import AgentState
 from src.config import settings, get_deepseek_model, PROJECT_ROOT
 from src.core.evidence import (render_evidence, EVIDENCE_SNIPPET_MAX_CHARS,
-                               src_of, filter_refs_by_answer)
+                               src_of, filter_refs_by_answer, renumber_refs)
 from src.core.agent_loop import (
     tc_id as extract_tc_id, count_unique_docs, dedup_by_doi, emit_llm_usage,
     FINAL_ANSWER_PROMPT, invoke_llm_with_retry, force_final_answer,
@@ -980,12 +980,29 @@ def _assemble_supervisor_answer(*, answer, all_main_results, all_web_results,
             "score": 0,
         })
 
-    # v8.15: 侧栏引用只显示回答真实引用的证据（严格过滤 + 按回答首次出现顺序重排；
-    # 未引用的检索文献舍弃，不再全部展示在 RAG/UCR/Web 组）
+    # v9.2: 引用编号统一重排（重排收敛后端一处）——数字 [n] 连续 1..k、
+    # [Wn] 连续 W1..Wm、[Hn] 连续 H1..Hp；内化原 v8.15 filter_refs_by_answer
+    # 的「只保留真实引用 + 首次出现排序」，返回 remap 随 references_data 下发，
+    # 前端只按 remap 重写正文与 ref_id（取代 v8.17.3 前端 W 专用压缩）。
+    ref_remap: dict = {}
+    _orig_answer = answer
     try:
-        cited_refs = filter_refs_by_answer(answer, cited_refs)
+        answer, cited_refs, ref_remap = renumber_refs(answer, cited_refs)
     except Exception as e:
-        logger.debug(f"[ExpertGraph] filter_refs_by_answer skipped: {e}")
+        logger.debug(f"[ExpertGraph] renumber_refs skipped: {e}")
+    if answer != _orig_answer:
+        # v9.2: 轨迹内承载原始回答的 AIMessage 同步为重排后文本——否则
+        # save 节点按 trace[-1].content == state.answer 判重会因编号差异
+        # 判不等而追加一条重复消息入历史
+        try:
+            for _m in messages:
+                if (isinstance(_m, AIMessage)
+                        and not getattr(_m, "tool_calls", None)
+                        and getattr(_m, "content", None) == _orig_answer):
+                    _m.content = answer
+                    break
+        except Exception:
+            pass
 
     # v8.17.17（用户决策）：恢复历史引用进侧栏——与 web/rag/ucr 同级手风琴展示。
     # v8.15.2 曾移除（防侧栏膨胀）；用户实测：历史引用被"踢出"侧栏，跨轮信息只能
@@ -1013,6 +1030,7 @@ def _assemble_supervisor_answer(*, answer, all_main_results, all_web_results,
         "cited": cited_refs,
         "uncited": [],
         "historical": historical_refs,
+        "remap": ref_remap,
         "total": len(cited_refs),
     }
 
