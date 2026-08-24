@@ -69,23 +69,26 @@ def test_v8153_evidence_report_web_unavailable():
     check("熔断提示下证据完整", "[1]" in broke and "[RAG]" in broke, broke)
 
 
-# ── F-15.3-3 推理控制（v8.17.17: reasoning_mode=off；v8.17.18: 不再下发 thinking 参数）──
+# ── F-15.3-3 推理控制（v8.17.17: reasoning_mode=off；v8.17.19: extra_body 下发关闭字段）──
 def test_v8153_reasoning_mode():
-    print("[VF-11] model.reasoning_mode 接线（v8.17.18 = off，不发送任何参数）")
+    print("[VF-11] model.reasoning_mode 接线（v8.17.19 = off，extra_body 通道）")
     check("默认值 = off（用户决策：检索决策关思维链）",
           getattr(settings, "MODEL_REASONING_MODE", "default") == "off")
     from src.core.llm_pool import get_llm
+    off_body = dict(getattr(settings, "MODEL_REASONING_OFF_BODY", None) or {})
 
     llm_off = get_llm("t-model", "k-1", "https://x", max_tokens=64, thinking_off=True)
-    check("thinking_off → 不发送任何 thinking 参数（v8.17.18 修复）",
-          getattr(llm_off, "model_kwargs", None) == {},
-          str(getattr(llm_off, "model_kwargs", None)))
+    check("thinking_off → extra_body 下发关闭字段（v8.17.19 通道）",
+          getattr(llm_off, "extra_body", None) == off_body,
+          str(getattr(llm_off, "extra_body", None)))
     llm_on = get_llm("t-model", "k-1", "https://x", max_tokens=64, thinking_off=False)
-    check("默认 → 不发送 thinking 参数", llm_on.model_kwargs == {}, str(llm_on.model_kwargs))
+    check("默认 → 不发送任何参数（思维链保持开启）",
+          llm_on.model_kwargs == {}, str(llm_on.model_kwargs))
     check("缓存键区分 thinking_off", llm_off is not llm_on)
-    # 同参数复用同一实例（进程级复用不回退）
+    # 同参数复用：wrapper 每次新建，但底层 primary 客户端进程级复用
     llm_off2 = get_llm("t-model", "k-1", "https://x", max_tokens=64, thinking_off=True)
-    check("同参数复用实例", llm_off2 is llm_off)
+    check("primary 客户端复用（进程级缓存不回退）",
+          getattr(llm_off, "primary", None) is getattr(llm_off2, "primary", None))
     # v8.15.3: retrieve-agent 接线（agent_runner thinking_off=...=="off"）
     from src.core import agent_runner as ar
     ar_src = _inspect.getsource(ar)

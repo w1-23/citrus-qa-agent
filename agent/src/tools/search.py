@@ -27,6 +27,8 @@ import requests
 from langchain_core.tools import tool
 
 from src.config import settings, PROJECT_ROOT
+# v8.17.19: 复用 llm_pool 的参数拒绝判定（HyDE extra_body 关闭字段 fail-soft）
+from src.core.llm_pool import is_thinking_rejected as _is_thinking_rejected_impl
 from src.core.evidence import (
     render_evidence, EVIDENCE_TOOL_MAX_CHARS,
     src_of, SOURCE_TAG, SOURCE_LABEL,
@@ -581,11 +583,18 @@ def _generate_hyde_structured(query: str) -> str | None:
             timeout=15,  # v8.3.1: 3s 太短导致 flash 生成假想答案频繁超时降级（每次检索白等+丢 hyde_dense 一路）
         )
         answer = ""
-        # v8.17.18（bugfix）: 不再发送 thinking 参数——api.deepseek.com 不接受该
-        # 字段（真机日志 TypeError 实证）；V3.2 deepseek-chat 思维链默认关闭，
-        # 不发送即等效关闭（HYDE_THINKING_OFF 语义保持）。
+        # v8.17.19: HyDE 关思维链经 extra_body 原样透传网关（字段形态由
+        # config model.reasoning_off_body 控制，默认官方推荐 thinking 关闭；
+        # 网关不支持时改配置）；字段被网关拒绝（400/422）→ 去参重试一次
+        # （fail-soft，最差=现状行为）。v8.16.3c 真空输出（思维链吃光预算
+        # 致 content 空）防线。
+        off_body: dict = {}
+        if getattr(settings, "HYDE_THINKING_OFF", True):
+            _cfg = getattr(settings, "MODEL_REASONING_OFF_BODY", None) or {}
+            if isinstance(_cfg, dict) and _cfg:
+                off_body = dict(_cfg)
         for attempt in (1, 2):
-            resp = client.chat.completions.create(
+            kw: dict = dict(
                 model=settings.RESOLVED_FAST_MODEL,
                 messages=[
                     {"role": "system", "content": _HYDE_PROMPT},
@@ -594,6 +603,19 @@ def _generate_hyde_structured(query: str) -> str | None:
                 temperature=0.2,
                 max_tokens=settings.HYDE_MAX_TOKENS,
             )
+            if off_body:
+                kw["extra_body"] = off_body
+            try:
+                resp = client.chat.completions.create(**kw)
+            except Exception as e:
+                if off_body and _is_thinking_rejected_impl(e):
+                    logger.warning(
+                        f"[HyDE] thinking 关闭字段被网关拒绝，去参重试: {e}")
+                    off_body = {}
+                    kw.pop("extra_body", None)
+                    resp = client.chat.completions.create(**kw)
+                else:
+                    raise
             answer = (resp.choices[0].message.content or "").strip()
             if answer:
                 break

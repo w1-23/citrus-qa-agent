@@ -57,16 +57,22 @@ model:
   fast: "deepseek-v4-flash"
   embedding: "intfloat/multilingual-e5-large"
   reranker: "BAAI/bge-reranker-v2-m3"
-  # v8.15.3: 检索决策子代理思维链控制。default / off 当前行为一致：均不发送
-  # 任何参数（V3.2 类模型思维链默认关闭）——v8.17.18 删除了 thinking:disabled
-  # 下发：api.deepseek.com 不接受该参数（真机日志 TypeError 实证），曾导致
-  # retrieve-agent 的 LLM 调用全部失败、检索完全没执行。两档保留为配置占位，
-  # 将来换用支持 reasoning 参数的端点时再做差异化。
+  # v8.15.3: 检索决策子代理思维链控制。v8.17.19 起：default/off 均保持——
+  # off = retrieve-agent（及 hints/压缩/HyDE）经 extra_body 下发关闭字段
+  # （supervisor 不传，思维链保持开启做融合判断）。字段见下方 reasoning_off_body。
   # v8.17.17（用户决策）：改 off——检索决策轮只要"判断预算/角度/收尾"，无需
   # 自由推理；用户日志实测推理显著拖慢 retrieve-agent 每轮 LLM（2.4~24.5s）。
-  # retrieve-agent 接线保留（agent_runner thinking_off=...=="off"，现为无操作）；
+  # retrieve-agent 接线保留（agent_runner thinking_off=...=="off"）；
   # supervisor/expert 合成轮不接 thinking_off，保持默认（不发送，不影响）。
   reasoning_mode: "off"     # default | off
+  # v8.17.19: thinking_off 关思维链的请求体字段（extra_body 原样透传网关，
+  # 不走顶层参数——v8.17.18 曾顶层下发致 TypeError 全挂）。
+  # 官方 DeepSeek 推荐 thinking；网关不支持时替换为备选并真机验证
+  # （判断标准：响应无 reasoning_content 且耗时明显下降）：
+  #   reasoning: {enabled: false}  |  reasoning_effort: none  |  enable_thinking: false
+  reasoning_off_body:
+    thinking:
+      type: disabled
 
 embedder:
   force_cpu: false          # 强制 CPU（调试用）

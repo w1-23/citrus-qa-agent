@@ -82,9 +82,9 @@ class ContextManager:
             budget.set_compact_fn(_compact)
 
     def _get_fast_llm(self, thinking_off: bool = False):
-        # v8.16.3: hints 属高频低价值 fast 调用——关闭思维链（v8.15.3 同款
-        # model_kwargs={"thinking":{"type":"disabled"}})；实测日志 hints_ms 38s
-        # 即 v4-flash 思维链吃掉整个 load 段。失败向下游 except 兜底（fail-soft）。
+        # v8.17.19: hints 属高频低价值 fast 调用——关思维链经 llm_pool extra_body
+        # 通道（fail-soft 自动去参回退）；旧实测日志 hints_ms 38s 即 v4-flash
+        # 思维链吃掉整个 load 段。失败向下游 except 兜底（fail-soft）。
         if thinking_off:
             if self._fast_llm_nothink is None:
                 from src.core.llm_pool import get_llm as _pool_get_llm
@@ -110,7 +110,9 @@ class ContextManager:
 
     def _get_compact_llm(self):
         """压缩用 fast 模型 (v8.4): 压缩是高频低价值操作，摘要质量由保留优先级提示保证，
-        无需 main 模型；触发频率低时 main 模型成本过高。"""
+        无需 main 模型；触发频率低时 main 模型成本过高。
+        v8.17.19: 同步关思维链（extra_body 通道，fail-soft 自动去参回退）——
+        v4-flash 思维链会吃掉 compact_max_tokens=800 预算压缩截断。"""
         if self._compact_llm is None:
             from src.core.llm_pool import get_llm as _pool_get_llm
             self._compact_llm = _pool_get_llm(
@@ -119,6 +121,7 @@ class ContextManager:
                 base_url=settings.RESOLVED_FAST_BASE_URL,
                 temperature=0,
                 timeout=30,
+                thinking_off=True,
             )
         return self._compact_llm
 

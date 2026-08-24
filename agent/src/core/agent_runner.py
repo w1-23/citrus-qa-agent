@@ -402,9 +402,9 @@ async def run_agent(
         temperature=settings.TEMPERATURE_MAIN,
         max_tokens=max_t,
         timeout=timeout_sec,
-        # v8.15.3: 决策类子代理思维链控制（config model.reasoning_mode="off" 时
-        # 发送 thinking:disabled——决策慢的根因之一是 v4-flash 默认推理；
-        # 默认 "default" 不发送任何参数，等配置项被确认兼容后再开启）
+        # v8.17.19: 决策类子代理思维链控制（config model.reasoning_mode="off" 时
+        # retrieve-agent 经 llm_pool extra_body 下发关闭字段（fail-soft：网关拒绝
+        # 自动去参回退重试，点位不挂）；supervisor 不传 → 思维链保持开启做融合判断）
         thinking_off=(agent_name in ("retrieve-agent",)
                       and getattr(settings, "MODEL_REASONING_MODE", "default") == "off"),
     )

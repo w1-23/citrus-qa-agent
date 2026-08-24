@@ -114,9 +114,17 @@ class Settings(BaseSettings):
     TEMPERATURE_FAST: float = Field(default_factory=lambda: _yaml_val("chat", "temperature_fast", default=0.0))
     MAX_TOKENS: int = Field(default_factory=lambda: _yaml_val("chat", "max_tokens", default=4096))
     # v8.15.3: 检索决策子代理思维链控制（"default"=不发送任何参数；"off"= 给
-    # retrieve-agent 下发 thinking:disabled 关闭推理——需先在真机确认 API 兼容后再
-    # 开启，默认不发送以避免未实测的 400/参数忽略风险）
+    # retrieve-agent 下发 thinking:disabled 关闭推理——v8.17.19 起经 extra_body
+    # 通道透传（SDK 合法参数、进请求体由网关裁决；v8.17.18 曾顶层下发致 TypeError
+    # 全挂）。fail-soft：网关拒绝（400/422）→ 自动去参重试一次，点位不挂。
     MODEL_REASONING_MODE: str = Field(default_factory=lambda: _yaml_val("model", "reasoning_mode", default="default"))
+    # v8.17.19: thinking_off 关闭思维链的请求体字段（extra_body 原样透传网关）。
+    # 官方 DeepSeek 推荐 {"thinking": {"type": "disabled"}}；第三方网关不支持时
+    # 替换为 {"reasoning": {"enabled": false}} / {"reasoning_effort": "none"} /
+    # {"enable_thinking": false}（config.yaml model.reasoning_off_body，真机验证哪个
+    # 有效——判断标准：响应无 reasoning_content 且耗时明显下降）。
+    MODEL_REASONING_OFF_BODY: dict = Field(default_factory=lambda: _yaml_val(
+        "model", "reasoning_off_body", default={"thinking": {"type": "disabled"}}))
     # v8.4 清理: RECENT_CONTENT_MAX_CHARS / COMPACT_MAX_TOKENS / FALLBACK_CONTENT_MAX_CHARS
     # 死配置已删（对应旧 graph.py check_history/compact_history 节点，代码已无引用；
     # 压缩统一走 context_budget 段的 ContextBudgetConfig）

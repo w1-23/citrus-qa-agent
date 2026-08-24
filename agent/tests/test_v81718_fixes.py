@@ -27,6 +27,8 @@ import inspect as _inspect
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from src.config import settings
+
 passed, failed = [], []
 
 
@@ -40,34 +42,42 @@ def check(name, cond, detail=""):
     print(f"  {'PASS' if cond else 'FAIL'}  {name}  {detail}")
 
 
-# ── F-17.18-1 thinking 参数移除（bug 1）────────────────────────────
+# ── F-17.18-1 thinking 参数移除（bug 1；v8.17.19 改走 extra_body 通道）──
 def test_v81718_thinking_param_removed():
-    print("[VF-55] llm_pool 不再发送 thinking 参数")
+    print("[VF-55] llm_pool: thinking 仅经 extra_body 通道（无顶层参数）")
     from src.core.llm_pool import get_llm
     import src.core.llm_pool as lp
     lp_src = _inspect.getsource(lp)
 
-    check("源码无 kw['thinking'] 发送",
-          'kw["thinking"]' not in lp_src and "type\": \"disabled" not in lp_src,
-          "仍然残留 thinking 发送代码")
-    check("源码无 model_kwargs 传参（docstring 说明文字除外）",
-          "model_kwargs=" not in lp_src, lp_src[:200])
-    # 实例级：thinking_off=True 与 False 均不携带任何模型参数
+    check("源码无顶层 kw['thinking'] 发送（v8.17.18 根因不回归）",
+          'kw["thinking"]' not in lp_src, "顶层 thinking 发送残留")
+    check("源码关闭字段经 extra_body 构造参数透传",
+          'kw["extra_body"] = dict(extra_body)' in lp_src, "extra_body 通道缺失")
+    # 实例级：thinking_off=True → wrapper + extra_body；False → 无任何参数
+    off_body = dict(getattr(settings, "MODEL_REASONING_OFF_BODY", None) or {})
     for off in (True, False):
         llm = get_llm("t-model", "k-1", "https://x", max_tokens=64, thinking_off=off)
-        check(f"thinking_off={off} → model_kwargs 为空",
-              getattr(llm, "model_kwargs", None) == {},
-              str(getattr(llm, "model_kwargs", None)))
+        if off:
+            check("thinking_off=True → extra_body 携带配置字段",
+                  getattr(llm, "extra_body", None) == off_body,
+                  str(getattr(llm, "extra_body", None)))
+        else:
+            check("thinking_off=False → model_kwargs 为空（思维链保持开启）",
+                  getattr(llm, "model_kwargs", None) == {},
+                  str(getattr(llm, "model_kwargs", None)))
 
 
 def test_v81718_hyde_thinking_removed():
-    print("[VF-56] search.py HyDE 不再发送 thinking（extra_body 移除）")
+    print("[VF-56] search.py HyDE：extra_body 关思维链 + fail-soft 去参重试")
     import src.tools.search as search_mod
     s_src = _inspect.getsource(search_mod)
 
-    check("HyDE 无 thinking disabled 残留",
-          '"thinking": {"type": "disabled"}' not in s_src, "extra_body thinking 仍残留")
-    check("HyDE 无 extra_body 组装残留", "extra[\"extra_body\"]" not in s_src, "extra_body 仍残留")
+    check("HyDE 关闭字段经 extra_body 组装（v8.17.19）",
+          "off_body" in s_src and "extra_body" in s_src, "extra_body 通道缺失")
+    check("HyDE 字段被拒 → 去参重试（fail-soft）",
+          "thinking 关闭字段被网关拒绝，去参重试" in s_src, "fail-soft 缺失")
+    check("search 不硬编码字段（读 config reasoning_off_body）",
+          '"thinking": {"type": "disabled"}' not in s_src, "字段硬编码残留")
 
 
 # ── F-17.18-2 placeholder_results 初始化提前（bug 2）───────────────
