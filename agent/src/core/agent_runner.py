@@ -437,6 +437,12 @@ async def run_agent(
     # 用户日志实测：retrieve-agent 3 轮全调 web（207s/219s，成本高且无新增益），
     # turn≥1 的联网大多重复角度、只增耗时与费用 → 代码级硬限制。
     _web_used = 0
+    # v8.17.18（bugfix）: placeholder_results 必须在 turn 循环外初始化——
+    # 此前在循环体内定义，LLM 全失败（response is None → break 提前出循环）后，
+    # 收尾段 build_evidence_report 的 budget/dedup 统计仍引用它 → UnboundLocalError
+    # （日志实证：cannot access local variable 'placeholder_results'）。挪到这里后
+    # 无论走哪条路径（0 轮/提前 break/正常收尾）都有定义。
+    placeholder_results: dict = {}
 
     for turn in range(max_turns):
         # v8.4.3 指令A: 移除"≥6 篇强制收敛"——动态阈值已过滤 chunk，检索到的
@@ -511,7 +517,6 @@ async def run_agent(
         _MAX_WEB_PER_TURN = 1
         _MAX_RAG_PER_REQUEST = 6
         exec_calls: list = []
-        placeholder_results: dict = {}
         for idx, tc in enumerate(response.tool_calls):
             tc_dict = _make_tool_call_dict(tc)
             _tname = tc_dict.get("name", "")

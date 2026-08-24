@@ -19,7 +19,7 @@ retrieval:
   # 吃光、返回空 content（8-21 19:45 连续两轮"生成结果为空"即此），1024 留余量
   # v8.16.3c: 实测真机 22:02 连空两次 → 关思维链(下) + 预算抬到 2048 双保险
   hyde_max_tokens: 2048          # v8.16.3: 结构化 HyDE（假想段落 200-500 词 + 3 多路查询 + 3-5 要点）输出上限
-  hyde_thinking_off: true        # v8.16.3c: HyDE 生成走 thinking:disabled（与 hints 同款；真空输出根因防线）
+  hyde_thinking_off: true        # v8.17.18: 不发送 thinking 参数（api.deepseek.com 不接受，真机 TypeError 实证）；V3.2 类模型思维链默认关闭，不发送即等效关闭
   # v8.15 查询级结果缓存：相同/高度相似问题直接复用上次检索结果（毫秒级返回）。
   # 键 = 规范化 query + HyDE 开关 + 语料指纹(批次数+总块数)，语料增删/重启自动失效。
   rag_cache_enabled: true        # 总开关（默认开；不影响 HyDE/embed 内部缓存）
@@ -57,11 +57,14 @@ model:
   fast: "deepseek-v4-flash"
   embedding: "intfloat/multilingual-e5-large"
   reranker: "BAAI/bge-reranker-v2-m3"
-  # v8.15.3: 检索决策子代理思维链控制。default = 不发送任何参数；off = 对
-  # retrieve-agent 下发 thinking:{"type":"disabled"} 关闭推理（决策提速）。
+  # v8.15.3: 检索决策子代理思维链控制。default / off 当前行为一致：均不发送
+  # 任何参数（V3.2 类模型思维链默认关闭）——v8.17.18 删除了 thinking:disabled
+  # 下发：api.deepseek.com 不接受该参数（真机日志 TypeError 实证），曾导致
+  # retrieve-agent 的 LLM 调用全部失败、检索完全没执行。两档保留为配置占位，
+  # 将来换用支持 reasoning 参数的端点时再做差异化。
   # v8.17.17（用户决策）：改 off——检索决策轮只要"判断预算/角度/收尾"，无需
   # 自由推理；用户日志实测推理显著拖慢 retrieve-agent 每轮 LLM（2.4~24.5s）。
-  # retrieve-agent 接线已存在（agent_runner thinking_off=...=="off"）；
+  # retrieve-agent 接线保留（agent_runner thinking_off=...=="off"，现为无操作）；
   # supervisor/expert 合成轮不接 thinking_off，保持默认（不发送，不影响）。
   reasoning_mode: "off"     # default | off
 

@@ -69,17 +69,17 @@ def test_v8153_evidence_report_web_unavailable():
     check("熔断提示下证据完整", "[1]" in broke and "[RAG]" in broke, broke)
 
 
-# ── F-15.3-3 推理控制（v8.17.17: reasoning_mode=off，retrieve-agent 关思维链）──
+# ── F-15.3-3 推理控制（v8.17.17: reasoning_mode=off；v8.17.18: 不再下发 thinking 参数）──
 def test_v8153_reasoning_mode():
-    print("[VF-11] model.reasoning_mode 接线（v8.17.17 = off）")
+    print("[VF-11] model.reasoning_mode 接线（v8.17.18 = off，不发送任何参数）")
     check("默认值 = off（用户决策：检索决策关思维链）",
           getattr(settings, "MODEL_REASONING_MODE", "default") == "off")
     from src.core.llm_pool import get_llm
 
     llm_off = get_llm("t-model", "k-1", "https://x", max_tokens=64, thinking_off=True)
-    check("thinking_off → model_kwargs.thinking.type=disabled",
-          llm_off.model_kwargs.get("thinking", {}).get("type") == "disabled",
-          str(llm_off.model_kwargs))
+    check("thinking_off → 不发送任何 thinking 参数（v8.17.18 修复）",
+          getattr(llm_off, "model_kwargs", None) == {},
+          str(getattr(llm_off, "model_kwargs", None)))
     llm_on = get_llm("t-model", "k-1", "https://x", max_tokens=64, thinking_off=False)
     check("默认 → 不发送 thinking 参数", llm_on.model_kwargs == {}, str(llm_on.model_kwargs))
     check("缓存键区分 thinking_off", llm_off is not llm_on)

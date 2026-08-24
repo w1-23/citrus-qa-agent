@@ -581,13 +581,9 @@ def _generate_hyde_structured(query: str) -> str | None:
             timeout=15,  # v8.3.1: 3s 太短导致 flash 生成假想答案频繁超时降级（每次检索白等+丢 hyde_dense 一路）
         )
         answer = ""
-        extra: dict = {}
-        if getattr(settings, "HYDE_THINKING_OFF", True):
-            # v8.16.3c: 实测 22:02:33/44 连续两次真空输出（成功调用但 content 为空，
-            # "第 N 次返回为空"日志实证）——v4-flash 思维链吃光预算（draft call
-            # 1024→2048 同款事故）。DeepSeek chat 端点关闭思维链参数；不兼容时抛
-            # 异常 → 走下方 except fail-soft 回退基础检索（最差=现状 1 路查询）
-            extra["extra_body"] = {"thinking": {"type": "disabled"}}
+        # v8.17.18（bugfix）: 不再发送 thinking 参数——api.deepseek.com 不接受该
+        # 字段（真机日志 TypeError 实证）；V3.2 deepseek-chat 思维链默认关闭，
+        # 不发送即等效关闭（HYDE_THINKING_OFF 语义保持）。
         for attempt in (1, 2):
             resp = client.chat.completions.create(
                 model=settings.RESOLVED_FAST_MODEL,
@@ -597,7 +593,6 @@ def _generate_hyde_structured(query: str) -> str | None:
                 ],
                 temperature=0.2,
                 max_tokens=settings.HYDE_MAX_TOKENS,
-                **extra,
             )
             answer = (resp.choices[0].message.content or "").strip()
             if answer:

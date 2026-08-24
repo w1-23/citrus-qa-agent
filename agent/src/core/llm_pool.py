@@ -78,17 +78,20 @@ def get_llm(
     max_tokens: int | None = None,
     thinking_off: bool = False,
 ) -> ChatOpenAI:
-    """进程级客户端复用；v8.15.3: thinking_off=True 时经 model_kwargs 下传
-    {"thinking": {"type": "disabled"}}（DeepSeek chat 端点关闭思维链的厂商参数；
-    默认不发送任何参数——由 config model.reasoning_mode 控制，避免未实测前的 400 风险）。
+    """进程级客户端复用；v8.17.18: thinking_off 不再发送任何参数。
+
+    DeepSeek api.deepseek.com 不接受 thinking 请求参数（真机日志实证：
+    AsyncCompletions.create() got an unexpected keyword argument 'thinking'——
+    langchain 把 model_kwargs 展开为 create() 关键字参数后 API 直接拒绝，
+    retrieve-agent 因此彻底失效）；V3.2 deepseek-chat 思维链默认关闭，
+    不发送任何参数即等于关闭推理，reasoning_mode="off" 语义保持。
+    thinking_off 形参保留（调用方与缓存键不变），行为=默认态；仅当将来
+    换用支持该参数的厂商端点时再恢复发送（extra_body 通道，勿用顶层参数）。
     """
     key = (model, api_key, base_url, temperature, timeout, max_tokens, thinking_off)
     with _lock:
         inst = _cache.get(key)
         if inst is None:
-            kw: dict = {}
-            if thinking_off:
-                kw["thinking"] = {"type": "disabled"}
             inst = ChatOpenAI(
                 model=model,
                 api_key=api_key,
@@ -96,7 +99,6 @@ def get_llm(
                 temperature=temperature,
                 timeout=timeout,
                 max_tokens=max_tokens,
-                model_kwargs=kw,
             )
             _cache[key] = inst
         return inst
