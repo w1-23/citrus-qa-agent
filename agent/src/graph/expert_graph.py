@@ -221,6 +221,18 @@ async def _execute_tool_call(tc: dict, tc_id: str = "", material_pack: list | No
     name = tc.get("name", "")
     args = tc.get("args", {})
 
+    # v9.1.1（用户真机日志）: 旧工具名防御——若模型（旧进程 schema 缓存/异常路径）仍发出
+    # call_retrieve_agent，返回明确废弃引导（不再返回空 result 让 supervisor 无感知）。
+    if name == "call_retrieve_agent":
+        logger.warning("[ExpertGraph] supervisor 尝试调用已废弃工具 call_retrieve_agent"
+                       "（v9.1 架构统一检索入口为 call_search_both）")
+        return {"agent": "call_retrieve_agent",
+                "result": ("[ERR_DEPRECATED] call_retrieve_agent 已废弃（v9.1 架构）。"
+                           "统一检索请使用 call_search_both(local_goal, web_goal)"
+                           "——本地与联网并行执行。请勿再调用本工具。"),
+                "artifacts": {"main_results": [], "web_results": [], "web_summaries": []},
+                "tools_called": 0, "status": "error"}
+
     # v9.1（用户决策）: 统一检索入口——本地 + 联网并行，互不阻塞；
     # Retrieve-Agent 只做本地（无联网工具）；Web-Agent 无 LLM 决策单次联网。
     if name == "call_search_both":

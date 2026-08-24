@@ -666,11 +666,11 @@ def test_ag33_noise_trim():
     turns = [[
         HumanMessage(content="问"),
         AIMessage(content="", tool_calls=[
-            {"id": "c1", "name": "call_retrieve_agent", "args": {}},
+            {"id": "c1", "name": "call_search_both", "args": {}},
             {"id": "c2", "name": "budget_skip", "args": {}},
         ]),
         ToolMessage(content="[retrieve-agent result] 证据报告", tool_call_id="c1",
-                    name="call_retrieve_agent"),
+                    name="call_search_both"),
         ToolMessage(content="[budget] 未执行", tool_call_id="c2", name="budget_skip"),
         AIMessage(content="答"),
     ]]
@@ -726,10 +726,10 @@ def test_ag36_compression_pairing():
     for i in range(6):
         msgs.append(HumanMessage(content="q%d" % i + "长" * 200))
         msgs.append(AIMessage(content="", tool_calls=[
-            {"id": "c%d" % i, "name": "call_retrieve_agent", "args": {}}]))
+            {"id": "c%d" % i, "name": "call_search_both", "args": {}}]))
         msgs.append(ToolMessage(
             content="[retrieve-agent result] report %d " % i + "证据" * 300,
-            tool_call_id="c%d" % i, name="call_retrieve_agent"))
+            tool_call_id="c%d" % i, name="call_search_both"))
         msgs.append(AIMessage(content="answer %d" % i + "回" * 200))
 
     def check_pairing(r, label):

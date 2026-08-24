@@ -58,6 +58,16 @@ class _FakeWebTool:
         return self.content, self.artifact
 
 
+def _old_name_only_in_guard(eg_src: str) -> bool:
+    """v9.1.1: expert_graph 中旧工具名只允许出现在废弃防御分支内（无执行逻辑）。"""
+    gpos = eg_src.find("# v9.1.1（用户真机日志）: 旧工具名防御")
+    gend = eg_src.find("# v9.1（用户决策）: 统一检索入口", gpos)
+    if gpos == -1 or gend == -1:
+        return False
+    outside = eg_src[:gpos] + eg_src[gend:]
+    return "call_retrieve_agent" not in outside
+
+
 # ── F-9.1-1 白名单与工具注册 ───────────────────────────────────
 def test_v91_whitelist():
     print("[VF-70] retrieve-agent 白名单无联网工具")
@@ -88,8 +98,8 @@ def test_v91_schema():
     eg_src = _inspect.getsource(eg)
     check("expert_graph 含 call_search_both 执行分支",
           "if name == \"call_search_both\":" in eg_src)
-    check("expert_graph 不再引用 call_retrieve_agent",
-          "call_retrieve_agent" not in eg_src, "残留引用")
+    check("expert_graph 的旧名仅存在于废弃防御分支（v9.1.1）",
+          _old_name_only_in_guard(eg_src), "残留执行逻辑？")
 
 
 # ── F-9.1-2 Web-Agent 极简执行器 ────────────────────────────────
@@ -281,6 +291,31 @@ def test_v91_main_reset():
     check("与开关设置同处（set_web_search_enabled 相邻）",
           src_.find("set_web_search_enabled(") < src_.find("reset_web_budget(")
           and src_.find("reset_web_budget(") < src_.find("reset_web_budget(") + 200)
+
+
+# ── F-9.1-8 旧工具名防御（v9.1.1 用户真机日志：旧路径须显式引导）──
+def test_v91_deprecated_tool_guard():
+    print("[VF-78] call_retrieve_agent 废弃引导防御")
+    from src.graph import expert_graph as eg
+
+    async def _hit(name):
+        return await eg._execute_tool_call({"name": name, "args": {}})
+
+    r = asyncio.run(_hit("call_retrieve_agent"))
+    check("返回显式废弃错误（不再静默未知工具）",
+          "[ERR_DEPRECATED]" in r.get("result", ""), r.get("result", "")[:100])
+    check("错误信息引导改用 call_search_both",
+          "call_search_both" in r.get("result", ""))
+    check("废弃路径 status=error（supervisor 可感知失败）", r["status"] == "error")
+    check("废弃路径无证据 artifacts",
+          r["artifacts"] == {"main_results": [], "web_results": [], "web_summaries": []},
+          str(r.get("artifacts")))
+    check("无 tools_called 虚增", r["tools_called"] == 0)
+
+    # supervisor 工具 schema 中确认彻底无旧名（最后一次防回归）
+    from src.tools.supervisor_tools import get_supervisor_tool_names
+    check("schema 无 call_retrieve_agent（防回归）",
+          "call_retrieve_agent" not in get_supervisor_tool_names())
 
 
 def test_v91_silent_summary():
