@@ -82,9 +82,10 @@ def test_v8162_cap_and_wiring():
     with open(os.path.join(src, "src", "tools", "deepseek_web.py"),
               encoding="utf-8") as f:
         dw = f.read()
-    check("draft_worker 有 draft_done/draft_skipped 业务日志",
-          'blog("draft_done"' in dw and 'blog("draft_skipped"' in dw)
-    check("_draft_blog fail-soft 封装存在", "def _draft_blog" in dw)
+    check("草稿业务日志已删（v8.17.15 草稿全链删除）",
+          'blog("draft_done"' not in dw and 'blog("draft_skipped"' not in dw
+          and "def _draft_blog" not in dw)
+    check("联网工具保留（deepseek_web_search）", "def deepseek_web_search" in dw)
 
     with open(os.path.join(src, "src", "core", "context_manager.py"),
               encoding="utf-8") as f:

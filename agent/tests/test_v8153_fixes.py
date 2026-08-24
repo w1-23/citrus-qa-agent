@@ -152,11 +152,12 @@ def test_v8153_prompt_mechanisms():
           "政府工作报告" in ra and "最新新闻" in ra)
     check("retrieve-agent 早停阈值规则(通过≤2/过滤≥50%)",
           "通过 ≤2 条" in ra and "过滤占比 ≥50%" in ra)
-    # v8.17.1: retrieve-agent 不再联网——「联网检索限制」替代旧"失败禁再调/直传"说明
-    check("retrieve-agent 禁止联网调用（v8.17.1）",
-          "禁止调用 `deepseek_web_search`" in ra and "联网检索限制（v8.17.1，强制）" in ra)
-    check("retrieve-agent 联网由草稿层唯一执行",
-          "唯一一次原生联网" in ra and "草稿层" in ra)
+    # v8.17.15: 草稿层删除——retrieve-agent 重新可调 deepseek_web_search（每轮 ≤1 次）
+    check("retrieve-agent 允许联网调用（v8.17.15，每轮≤1 次）",
+          "deepseek_web_search" in ra and "至多调用 1 次" in ra
+          and "禁止调用" not in ra)
+    check("retrieve-agent 联网=goal 驱动",
+          "query=goal" in ra and "每轮" in ra)
     check("decision_guide 含覆盖表+自审", "数据源覆盖边界与检索前自审" in dg)
     check("decision_guide 含回答前自审(引用对齐)", "回答前自审" in dg and "引用对齐" in dg)
     check("decision_guide 含证据来源仲裁规则", "证据来源仲裁规则" in dg)
@@ -187,16 +188,11 @@ def test_v8153_tool_timeout_override():
         settings.TOOL_TIMEOUTS = old
 
 
-# ── F-15.3-8 原始问题直传联网工具（input 以原始问题开头，检索词作参考）──
+# ── F-15.3-8 联网工具 goal 驱动（v8.17.15：input 以工具参数 query 开头）──
 def test_v8153d_original_query_direct():
-    print("[VF-16] 原始问题直传联网工具")
+    print("[VF-16] 联网工具 goal 驱动（input=工具参数 query）")
     import src.tools.deepseek_web as dw
-    from src.core.tracing import set_original_query, original_query
     from src.core.tracing import set_web_search_enabled
-
-    set_original_query("2026年柑橘产业政府工作报告有哪些政策？")
-    check("contextvar 写入/读取",
-          original_query() == "2026年柑橘产业政府工作报告有哪些政策？")
 
     captured: dict = {}
 
@@ -218,17 +214,15 @@ def test_v8153d_original_query_direct():
     set_web_search_enabled(True)
     try:
         dw.requests = _FakeRequests()
-        c, a = dw.deepseek_web_search.func("citrus policy report 2026")
+        c, a = dw.deepseek_web_search.func("2025年以来HLB田间种群感染密度")
     finally:
         dw.requests = old
-        set_original_query("")
         set_web_search_enabled(False)
 
     inp = str(captured.get("payload", {}).get("input", ""))
-    check("input 以原始问题开头",
-          inp.startswith("2026年柑橘产业政府工作报告有哪些政策？"), inp[:80])
-    check("检索词作为搜索参考关键词",
-          "搜索参考关键词" in inp and "citrus policy report 2026" in inp, inp)
+    check("input 以工具参数 query（goal）开头",
+          inp.startswith("2025年以来HLB田间种群感染密度"), inp[:80])
+    check("不再引用用户原始问题 contextvar", "原始问题直传" not in inp)
     check("仍要求标注真实网址", "真实网址" in inp)
     check("返回内容含 [W1] 引用", "[W1]" in c, c[:120])
     ok_url = (a.get("web_results") or [{}])[0].get("url") == "https://gov.example.com/report"

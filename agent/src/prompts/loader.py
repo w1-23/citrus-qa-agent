@@ -42,14 +42,8 @@ AGENT_FILES = {
     "analyze-agent": "agents/analyze-agent.md",
 }
 
-# v8.16.1: 草稿先行——分隔符结构化输出模板（独立于系统提示词装配，
-# 仅供草稿 fast 调用使用；不进入 assemble_system_prompt，不动静态前缀）
-STRUCTURED_OUTPUT_FILE = "structured_output.md"
-# v8.17: 联网模式专用——从原生回答中提炼检索素材（MULTI_QUERY/SUMMARY）
-STRUCTURED_EXTRACT_FILE = "structured_extract.md"
-# v8.17.9: 联网模式专用——单独联网调用一次产出 [ANSWER]/[MQ]/[SUMMARY] 三区块
-# （用户方案：提取前移，联网调用直接结构化输出，不再二次提取）
-STRUCTURED_WEB_FILE = "structured_web.md"
+# v8.17.15: 草稿全链删除——structured_output/extract/web 模板与其函数、快照
+# 一并移除（草稿和「原生回答参考」段不再存在；联网回归 retrieve-agent 工具链）。
 
 VALID_FORMATS = set(FORMAT_FILES.keys())
 VALID_AGENTS = set(AGENT_FILES.keys())
@@ -160,37 +154,6 @@ def build_dynamic_blocks(
         if cards:
             blocks.append(f"<output_guide>\n{cards}\n</output_guide>")
     return "\n\n".join(blocks)
-
-
-def assemble_structured_output_prompt() -> str:
-    """v8.16.1: 草稿先行结构化输出模板（===STRUCTURED_START=== 分隔符格式，非 JSON）。
-
-    仅草稿 fast 调用使用（deepseek_web.draft_worker）；模板缺失时返回空串，
-    调用方据此跳过草稿特性（fail-soft，不阻塞主链路）。
-    v8.17: 模板升级为原生回答草稿（ANSWER）+ 检索素材（MULTI_QUERY/SUMMARY）一体。
-    """
-    return _read_prompt_cached(STRUCTURED_OUTPUT_FILE)
-
-
-def assemble_structured_extract_prompt() -> str:
-    """v8.17: 联网模式专用——从原生联网回答中提炼检索素材模板。
-
-    v8.17.9 起不再被 draft_worker 调用（联网路径改为三区块一次产出，
-    structured_web.md），保留此函数与模板文件仅作备用/历史兼容。
-    模板缺失时返回空串。
-    """
-    return _read_prompt_cached(STRUCTURED_EXTRACT_FILE)
-
-
-def assemble_structured_web_prompt() -> str:
-    """v8.17.9: 联网模式专用——单独联网调用（Responses+web_search）的
-    instructions 模板：[ANSWER]/[MQ]/[SUMMARY] 三区块一次产出。
-
-    用户方案"提取前移"：联网调用直接结构化输出，草稿=[ANSWER]，
-    检索素材=[MQ]+[SUMMARY]，不再二次提取。模板缺失时返回空串
-    （此时 _responses_web_search 退回自由文本形态，草稿恒在）。
-    """
-    return _read_prompt_cached(STRUCTURED_WEB_FILE)
 
 
 def assemble_agent_prompt(

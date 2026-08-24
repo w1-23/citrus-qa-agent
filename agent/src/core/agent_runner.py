@@ -155,8 +155,6 @@ def build_evidence_report(collected_artifacts: dict, query: str,
                           budget_blocked: int = 0,
                           dedup_blocked: int = 0,
                           web_unavailable: bool = False,
-                          draft_extra_count: int = 0,
-                          draft_answer: str = "",
                           ucr_first: bool = False) -> str:
     """确定性证据回执（v8.4.6，纯函数可单测）。
 
@@ -172,13 +170,13 @@ def build_evidence_report(collected_artifacts: dict, query: str,
         从文尾切掉的正是 [W1..W8] URL 清单与引用提示 → supervisor 无法挂 [Wn]
         → 回答概括化（v8.16.2 实证）。重排后截断只会损失主文献尾部,
         必读的 [Wn] 清单与编号导引恒在截断线之前；cap 同步 40000→60000。
-      - v8.17: draft_answer 非空时渲染「原生回答参考（草稿预答）」段——用户要求
-        "最后融合原生回答进行生成"：原生回答作为草稿级预答素材注入 supervisor，
-        与检索证据共同融合生成最终回答（标注来源，非检索证据）。
       - v8.17 修订: ucr_first=True 时主文献按来源**聚拢置前**——UCR 品种库条目
         （[UCR] 前缀）稳定分区到回执 [n] 清单前部（组内保序，非按分重排），
         supervisor 更易优先引用；**仅展示层排序，不改检索融合**（混合库无物理
         分区，两阶段检索路由在架构上不可行，见修正1）。
+      - v8.17.15（用户决策）: 草稿全链删除——draft_answer「原生回答参考」段与
+        draft_extra_count 多路检索补充已移除；原生联网回归 retrieve-agent 工具链，
+        其正文经 web_summaries（网络综述段）+ [Wn] 条目随回执注入，天然融合。
     """
     main = _dedup_evidence_items(list(collected_artifacts.get("main_results") or []))
     if ucr_first:
@@ -192,14 +190,6 @@ def build_evidence_report(collected_artifacts: dict, query: str,
         f"- 检索目标: {str(query)[:200]}",
         "",
     ]
-    # v8.16.1: 草稿先行多路检索补充（v8.17: 原始问题 + 自原生回答提取的
-    # MULTI_QUERY + SUMMARY 并行产出并入，supervisor 可见该路证据来源与量级）
-    if draft_extra_count:
-        lines.append(
-            f"- 草稿多路检索补充: {draft_extra_count} 条证据"
-            "（原始问题 + MULTI_QUERY + SUMMARY 自原生回答提取，已并入 [n] 清单）"
-        )
-        lines.append("")
     if budget_blocked or dedup_blocked:
         lines.append(
             f"- [SEARCH_BUDGET] 预算拦截: {budget_blocked} 次检索未执行 "
@@ -228,23 +218,6 @@ def build_evidence_report(collected_artifacts: dict, query: str,
         "联网事实必须挂 [Wn]。追问可直接引用证据回执内容，无需重复检索已覆盖的角度。"
     )
     lines.append("")
-    # v8.17: 原生回答参考（草稿预答）——用户要求"最后融合原生回答进行生成"：
-    # 草稿=DeepSeek 原生回答，作为草稿级预答素材注入 supervisor（非检索证据），
-    # 与 [n]/[Wn] 证据共同融合生成最终回答；位置紧跟引用导引（截断线前恒可见）。
-    if draft_answer and draft_answer.strip():
-        _da = draft_answer.strip()
-        # v8.17 修订: 成功解析的草稿不截断（修正2「草稿=API 原生返回，不经
-        # 降级/截断/摘要化」）——4000 仅为安全阀防 token 失控（模板约束约 300-600 字）
-        if len(_da) > 4000:
-            _da = _da[:4000] + " …"
-        lines.append("## 原生回答参考（草稿预答）")
-        lines.append(
-            "以下为模型对用户问题的原生预答草稿（v8.17.4：默认可信；联网开启时含 "
-            "[Wn] 引用，直接作为回答主体与引用来源）。以它为回答骨架，用 [n] 填充/修正"
-            "本地已覆盖的数据（本地有则以本地为准，本地无则采信草稿数据）。")
-        _quoted_da = "\n".join(f"> {ln}" for ln in _da.splitlines())
-        lines.append(_quoted_da)
-        lines.append("")
     # v8.15.3f: 联网综述正文单独成段（此前 summary 只进工具 content、不进回执，
     # supervisor 只看到 URL 无正文 → cited=0 短回答）。综述是 DeepSeek 原生联网
     # 读完全网后生成的回答正文，是联网证据的核心正文，必须在回执里可见。
@@ -358,19 +331,20 @@ async def run_agent(
     tools = [_TOOL_REGISTRY_BY_NAME[n] for n in tool_names if n in _TOOL_REGISTRY_BY_NAME]
 
     # v8.15: 联网搜索状态提示——向检索子代理明示本次请求是否开启联网（前端「联网」开关）。
-    # v8.17.1: retrieve-agent 不再调用联网工具（白名单已剔除）——唯一的原生联网在
-    # 草稿层（用户原始问题传入时）完成，其回答与 [Wn] 引用汇入最终回执；此处仅
-    # 告知子代理"联网是否已由草稿层执行"，不授予任何联网能力。
+    # v8.17.15（用户决策）：草稿层已删除，原生联网回归 retrieve-agent 工具链——
+    # deepseek_web_search 重新进入白名单，每轮 goal 为检索词、每 turn ≤1 次；
+    # 此处仅告知"本次请求是否允许联网"，不拦截工具本身（拦截由 per-turn 预算执行）。
     try:
         if agent_name == "retrieve-agent":
             from src.core.tracing import web_search_enabled as _req_web_on
-            _web_hint = ("<web_search_status>\n本次联网搜索已由草稿层执行（前端「联网」开关开启）："
-                         "原生联网回答与 [Wn] 引用已汇入最终回执，你无需也**不能**调用联网工具，"
-                         "仅做本地检索（citrus_rag_search）。\n</web_search_status>\n"
+            _web_hint = ("<web_search_status>\n本次请求已开启联网搜索（前端「联网」开关）→ "
+                         "deepseek_web_search 可用：每轮工具序列中至多调用 1 次，"
+                         "检索词用你本轮自定的检索目标（goal）；"
+                         "本地文献库覆盖不足或需实时/最新信息时优先使用它。\n</web_search_status>\n"
                          if _req_web_on() else
-                         "<web_search_status>\n本次联网搜索未开启（前端「联网」开关关闭）："
-                         "草稿层已用快速非联网调用作答；你仅做本地检索（citrus_rag_search），"
-                         "本地不足时如实声明缺口。\n</web_search_status>\n")
+                         "<web_search_status>\n本次联网搜索未开启（前端「联网」开关关闭）→ "
+                         "deepseek_web_search 已被短路（返回 [DISABLED]），你不应依赖联网结果，"
+                         "仅做本地检索（citrus_rag_search），本地不足时如实声明缺口。\n</web_search_status>\n")
             _extra_block = (_web_hint + _extra_block) if _extra_block else _web_hint
     except Exception:
         pass
@@ -755,34 +729,10 @@ async def run_agent(
     # v8.4.6: retrieve-agent 回执由代码确定性组装——summary + 文献细节 + chunk 全文
     # 直接进上下文（ToolMessage → 历史可见，追问无需重检索）——不再依赖模型转述
     # （"管道而非漏斗"，历史模型报告 34~176 字极短回执由此根治）。
+    # v8.17.15（用户决策）：草稿全链删除——不再 pop draft_store；原生联网已在
+    # ReAct 循环内经 deepseek_web_search 返回（正文→web_summaries、引用→web_results
+    # [Wn]），随 collected_artifacts 正常并入下文回执，天然参与融合。
     if agent_name == "retrieve-agent":
-        # v8.17: 草稿证据并入恢复——草稿=DeepSeek 原生回答（草稿纯展示 → 原生回答
-        # 参考 + 检索并入）：pop draft_store（键=session|request）后
-        #   ① 原生回答 → draft_answer（回执「原生回答参考」段，最终回答融合）
-        #   ② 草稿多路检索结果 → main_results（[n] 清单）
-        #   ③ 联网路径引用 → web_results（[Wn] 清单）
-        # best-effort：任何失败零阻塞（fail-soft）。
-        draft_answer = ""
-        try:
-            from src.core.draft_store import draft_store
-            from src.core.tracing import get_request_id as _req_id
-            _draft = draft_store.pop(session_id, _req_id())
-        except Exception:
-            _draft = None
-        if _draft:
-            try:
-                _draft_results = _draft.get("results") or []
-                collected_artifacts["main_results"].extend(_draft_results)
-                for _w in (_draft.get("web_items") or []):
-                    if isinstance(_w, dict):
-                        collected_artifacts["web_results"].append(_w)
-                draft_answer = str(_draft.get("answer_text") or "")
-                logger.info(f"[AgentRunner] 草稿证据并入: {len(_draft_results)} 条 / "
-                            f"web {len(_draft.get('web_items') or [])} 条 / "
-                            f"原生回答 {len(draft_answer)} 字")
-            except Exception as e:
-                logger.warning(f"[AgentRunner] 草稿并入失败（跳过）: {e}")
-        draft_extra_count = len(_draft.get("results") or []) if _draft else 0
         # v8.17 修订: UCR 优先改为「提示词引导 + 回执聚拢置前」——品种意图命中时
         # 回执 [UCR] 条目前置（展示层排序，键=关键词匹配；不做检索层路由/加权）
         try:
@@ -800,16 +750,14 @@ async def run_agent(
             collected_artifacts, query, rag_search_count,
             budget_blocked=budget_blocked, dedup_blocked=dedup_blocked,
             web_unavailable=(_web_fail_streak >= 2),
-            draft_extra_count=draft_extra_count,
-            draft_answer=draft_answer,
             ucr_first=_ucr_first)
         # v8.17.4: 模型自述不再被确定性回执覆盖——自述保留为「检索员判定」段，
         # 与确定性证据回执合并输出（用户要求：检索子代理对 [Wn] 联网数据的
         # 综合裁决必须传到 supervisor，不能被本地库回执一刀切抹掉）。
         # 两者职责分工：
-        #   ① 检索员判定 = retrieve-agent 模型的总结论（含"以联网草稿 [Wn] 为准/
+        #   ① 检索员判定 = retrieve-agent 模型的总结论（含"以联网 [Wn] 为准/
         #     证据已够"等仲裁表述，supervisor 直接可见）；
-        #   ② 确定性回执 = 代码组装的证据清单（[n]/[Wn]/UCR/原生回答参考段，
+        #   ② 确定性回执 = 代码组装的证据清单（[n]/[Wn]/UCR/网络综述段，
         #     继续保证证据保真，INV-05 不回归）。
         _judgement = (result_content or "").strip()
         if _judgement:
@@ -900,11 +848,13 @@ def _make_tool_call_dict(tc) -> dict:
 
 def _resolve_tool_names(agent_name: str) -> list[str]:
     mapping = {
-        # v8.17.1: retrieve-agent 不再可调用 deepseek_web_search——
-        # 唯一一次原生联网在草稿层（用户原始问题传入时）完成，ReAct 循环
-        # 只做本地检索，无需联网停止条件（代码级兜底；prompt 层另有禁止指令）。
+        # v8.17.15（用户决策）：草稿层删除，原生联网回归 retrieve-agent 工具链——
+        # deepseek_web_search 重新进入白名单；检索词=agent 每轮自定 goal（工具参数
+        # query），per-turn 预算每轮 ≤1（_MAX_WEB_PER_TURN=1）+ 连续失败熔断（
+        # _web_fail_streak≥2 拦截）。前端「联网」开关关闭时工具内短路口令 [DISABLED]。
         "retrieve-agent": [
-            "citrus_rag_search", "academic_search", "fetch_fulltext",
+            "citrus_rag_search", "deepseek_web_search",
+            "academic_search", "fetch_fulltext",
         ],
         "write-agent": ["write_local_file"],
         "analyze-agent": [
@@ -913,8 +863,7 @@ def _resolve_tool_names(agent_name: str) -> list[str]:
     }
     names = mapping.get(agent_name, [])
     # v8.15: 学术联网门控——academic_search/fetch_fulltext 随 ACADEMIC_ENABLED
-    # （默认关，代码保留不删）。deepseek_web_search 仍全局注册（供草稿层及
-    # 其他场景直接调用函数），但不再进入 retrieve-agent 白名单。
+    # （默认关，代码保留不删）。
     if not getattr(settings, "ACADEMIC_ENABLED", False):
         names = [n for n in names if n not in ("academic_search", "fetch_fulltext")]
     return names

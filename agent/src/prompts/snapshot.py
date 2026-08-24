@@ -22,9 +22,6 @@ def render_all(include_strategy_cards: bool = True) -> dict[str, str]:
         assemble_agent_prompt,
         build_dynamic_blocks,
         build_agent_extra_block,
-        assemble_structured_output_prompt,  # v8.16.1: 草稿先行结构化模板
-        assemble_structured_extract_prompt,  # v8.17: 联网模式检索素材提取模板
-        assemble_structured_web_prompt,  # v8.17.9: 联网调用三区块一次产出模板
         VALID_AGENTS,
         VALID_FORMATS,
     )
@@ -44,12 +41,6 @@ def render_all(include_strategy_cards: bool = True) -> dict[str, str]:
             include_strategy_cards=include_strategy_cards)
     out["agent_extra_block.txt"] = build_agent_extra_block(
         system_prompt_extra="（示例：系统附加指令块）")
-    # v8.16.1: 草稿先行结构化输出模板（独立装配，仍在快照内可 diff 审查）
-    out["structured_output.txt"] = assemble_structured_output_prompt()
-    # v8.17: 联网模式检索素材提取模板
-    out["structured_extract.txt"] = assemble_structured_extract_prompt()
-    # v8.17.9: 联网调用三区块一次产出模板
-    out["structured_web.txt"] = assemble_structured_web_prompt()
     return out
 
 

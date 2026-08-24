@@ -109,29 +109,6 @@ class Settings(BaseSettings):
     # 旧 30s 把本会成功的慢响应自掐成"伪失败"（7×30s 白等根因）
     WEB_SEARCH_TIMEOUT: int = Field(default_factory=lambda: _yaml_val("web_search", "timeout_sec", default=90))
 
-    # v8.16.1: 草稿先行——load 后后台 fast 调用一次性产出
-    # DRAFT_ZH（中文展示）/ DRAFT_EN（HyDE 复用）/ MULTI_QUERY / SUMMARY，
-    # 前端 3-5s 见「预检索草稿·验证中」；草稿衍生查询并入多路检索。
-    DRAFT_ENABLED: bool = Field(default_factory=lambda: _yaml_val("draft", "enabled", default=True))
-    DRAFT_LABEL: str = Field(default_factory=lambda: _yaml_val("draft", "label", default="预检索草稿·验证中"))
-    DRAFT_MAX_CHARS: int = Field(default_factory=lambda: _yaml_val("draft", "max_chars", default=800))
-    # v8.16.4: 草稿快调用关思维链开关（HyDE/hints 同款参数）——思维链吃预算→区块尾部
-    # 截断→解析失败→降级 200 字的防线上限；厂商参数不兼容时 fail-soft 退回默认重试。
-    # v8.17.14: 默认改为 True（关闭思维链）——用户决策：草稿仅作预检索参考/素材，
-    # 不产出最终答案，推理不增值只拖慢首 token；v8.17.11 回退自由文本后不再依赖
-    # 三区块标签格式（v8.17.7 开思维链是为标签稳定，其前提已消失）。
-    DRAFT_THINKING_OFF: bool = Field(default_factory=lambda: _yaml_val("draft", "thinking_off", default=True))
-    # 草稿 HTTP 超时（秒）——非联网调用 2-5s，留足余量防慢响应被自掐
-    DRAFT_TIMEOUT_SEC: int = Field(default_factory=lambda: _yaml_val("draft", "timeout_sec", default=15))
-    # v8.16.3: 草稿调用输出上限——真空输出根因（v4-flash 思维链吃光 max_tokens，
-    # v8.15.3c HyDE 同款事故）：1024→2048 给思维链留足余量（结构化区块实际 400-800 tokens）
-    DRAFT_MAX_TOKENS: int = Field(default_factory=lambda: _yaml_val("draft", "max_tokens", default=2048))
-    DRAFT_MAX_ANGLES: int = Field(default_factory=lambda: _yaml_val("draft", "max_angles", default=3))
-    # 已确认：SUMMARY 上限 3 条（不做 5-8），与草稿提示词「恰好 3 条」一致
-    DRAFT_SUMMARY_POINTS: int = Field(default_factory=lambda: _yaml_val("draft", "summary_points", default=3))
-    # 草稿衍生查询（DRAFT_EN + MULTI_QUERY + SUMMARY）是否并入 search_multi 多路检索
-    DRAFT_EXTRA_RETRIEVAL: bool = Field(default_factory=lambda: _yaml_val("draft", "extra_retrieval", default=True))
-
     # 4. Chat Parameters (centralized)
     TEMPERATURE_MAIN: float = Field(default_factory=lambda: _yaml_val("chat", "temperature_main", default=0.2))
     TEMPERATURE_FAST: float = Field(default_factory=lambda: _yaml_val("chat", "temperature_fast", default=0.0))

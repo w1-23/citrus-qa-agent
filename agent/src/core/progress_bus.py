@@ -213,50 +213,6 @@ def emit_text(content: str) -> None:
     emit_encoded("text", {"content": content})
 
 
-def emit_draft(content: str, label: str = "预检索草稿·验证中",
-               source: str = "local") -> None:
-    """v8.16.1: Emit a DRAFT event（草稿先行·预检索草稿）。
-
-    草稿 worker 产出 DRAFT_ZH 后立即推送；前端以灰底面板展示，
-    收到首个 text 事件时清空替换为正式回答。
-
-    v8.17 修订: source 标识草稿来源——"local"=非联网 fast 调用（3-5s）、
-    "web"=原生联网调用（Responses+web_search，30-115s）；前端据此展示
-    来源徽标（修正4 前端 draft.source 标识）。
-    """
-    emit_encoded("draft", {"content": str(content or ""), "label": label,
-                           "source": source or "local"})
-
-
-# ── v8.17.13: 草稿任务注册表（SSE 延迟关闭用）────────────────────────
-# draft_worker 是 fire-and-forget 任务（expert/light load 节点 create_task），
-# 联网路径 30-115s，可能晚于主回答（实测 52s vs 21.7s）。main.py 在放 SSE
-# sentinel 前查询本会话草稿任务并等待其完成，保证晚到的 draft 事件有消费者。
-_DRAFT_TASKS: dict = {}
-_DRAFT_TASKS_LOCK: object = None  # GIL + 单事件循环足够；保留字段避免重复锁
-
-
-def set_draft_task(session_id: str, task) -> None:
-    """注册当前会话的草稿任务（重复注册用新任务覆盖，旧任务不回收——由自身结束）。"""
-    if not session_id:
-        return
-    _DRAFT_TASKS[session_id] = task
-
-
-def get_draft_task(session_id: str):
-    """返回会话当前草稿任务（无则 None）。"""
-    if not session_id:
-        return None
-    return _DRAFT_TASKS.get(session_id)
-
-
-def clear_draft_task(session_id: str) -> None:
-    """会话草稿任务结束/请求完成时清理注册（不 cancel 任务，任务自身 fail-soft）。"""
-    if not session_id:
-        return
-    _DRAFT_TASKS.pop(session_id, None)
-
-
 def emit_status(stage: str, **kwargs) -> None:
     """Emit a generic status event (backward compat)."""
     payload = {"stage": stage}

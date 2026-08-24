@@ -226,7 +226,6 @@ async def chat_v2(req: ChatRequest):
             set_request_queue, clear_request_queue,
             _encode_event, log_sse_frame,
             get_running_tools, get_tool_elapsed, clear_tool_timers,
-            get_draft_task,
         )
 
         # v8.3.3: 每个请求独立队列（contextvars 绑定），并发会话互不串扰
@@ -382,26 +381,8 @@ async def chat_v2(req: ChatRequest):
             finally:
                 # v8.4.11: 注销运行任务（正常/取消/异常路径统一清理）
                 _running_graph_tasks.pop(job_id, None)
-                # v8.17.13: SSE 延迟关闭——草稿先行任务（联网 30-115s）可能晚于
-                # 主回答完成（实测 21:30 req=aaa7451a：主答 21.7s、草稿 52s）。
-                # 若此处立即放 sentinel，晚到的 draft 事件写入无消费者队列，前端
-                # 永远收不到草稿面板（"草稿已推送前端"仅证明入队）。故在关闭前
-                # 等待本会话草稿任务完成（上限 DRAFT_SSE_WAIT_SEC≈115s，任务自身
-                # fail-soft 必结束）；未启动/已结束则立即放行。
-                _draft_task = get_draft_task(sid)
-                if _draft_task is not None and not _draft_task.done():
-                    logger.info(f"[SSE v2] 等待草稿任务完成再关闭连接 "
-                                f"(session={sid[:8]}) …")
-                    try:
-                        await asyncio.wait_for(
-                            asyncio.shield(_draft_task),
-                            timeout=getattr(settings, "DRAFT_SSE_WAIT_SEC", 115))
-                    except asyncio.TimeoutError:
-                        logger.warning(
-                            f"[SSE v2] 等待草稿任务超时，仍关闭连接 "
-                            f"(session={sid[:8]})")
-                    except Exception as _e:
-                        logger.warning(f"[SSE v2] 等待草稿任务异常: {_e}")
+                # v8.17.15: 草稿任务注册表已删除（草稿全链移除，联网回归
+                # retrieve-agent 工具链），此处不再等待草稿——直接关闭连接。
                 # Drain pending bridge events before sending sentinel
                 for _ in range(10):
                     if request_queue.empty():

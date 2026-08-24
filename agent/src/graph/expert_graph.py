@@ -411,20 +411,8 @@ async def expert_load_node(state: AgentState) -> dict:
         except Exception:
             pass
 
-        # v8.16.3: 草稿先行启动提前到 load 开头（草稿不依赖 load 结果）——
-        # 此前在 load 结束后 create_task，load 被 hints 卡住（实测 38.6s）时草稿
-        # 等 46s 才上屏；提前后与 load 并行，草稿延迟 = max(自身调用, load)。
-        # create_task 继承当前请求上下文（进度队列 contextvar），fail-soft 零阻塞。
-        # v8.17.13: 注册草稿任务 → main.py SSE 延迟关闭逻辑等待其完成（防止
-        # 联网草稿晚于主回答导致 draft 事件无消费者丢失）。
-        try:
-            from src.tools.deepseek_web import draft_worker
-            from src.core.progress_bus import set_draft_task
-            _dtask = asyncio.create_task(draft_worker(query, session_id))
-            set_draft_task(session_id, _dtask)
-        except Exception as _e:
-            logger.warning(f"[ExpertGraph:load] 草稿先行启动失败（跳过）: {_e}")
-
+        # v8.17.15: 草稿全链删除（用户决策）——原生联网回归 retrieve-agent
+        # 工具链（每轮 goal 驱动、每 turn ≤1 次），此处不再启动 draft_worker。
         ctx = await ctx_mgr.load(session_id, query, mode)
         # v8.4: 收尾装配收敛至 context_manager.finalize_load_result
         # （与 light 图共用，消除双实现漂移）
