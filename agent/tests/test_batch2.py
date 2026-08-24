@@ -262,7 +262,7 @@ def test_ag5_ltm():
     # v8.4: LTM 提取转后台 spawn（不阻塞响应），原 to_thread 内联断言更新
     check("save 节点 LTM 提取后台化", "_extract_and_save_ltm" in g1
           and "spawn(asyncio.to_thread(" in g1)
-    c = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'prompts', 'system', 'constraints.md'),
+    c = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'prompts', 'source', '20_terminology_domain.md'),
              encoding='utf-8').read()
     check("constraints 含冲突规则", "跨会话记忆规则" in c)
 
@@ -379,17 +379,24 @@ def test_ag21_timer_pairing():
 def test_ag22_output_routing():
     print("[AG-22] 输出路由与证据保真（INV-05）")
     prom = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                             'src', 'prompts', 'agents', 'retrieve-agent.md'), encoding='utf-8').read()
-    check("retrieve 无需报告（v8.10m 消除矛盾；v8.17.4 收尾一句结论）",
-          "无需撰写报告" in prom and "系统代码确定性组装" in prom
+                             'src', 'prompts', 'source', '04_retrieve_agent_search.md'), encoding='utf-8').read()
+    check("retrieve 无需报告（v8.17.4 收尾一句结论）",
+          "不撰写报告" in prom and "系统代码确定性组装" in prom
           and "核心结论与证据点" not in prom
-          and "一句话总结论" in prom and "收尾时输出" in prom)
-    # v8.4.3 指令A: 收敛由模型自然判断（不再按文献数代码强制），保留三阶段与轮次上限
-    check("retrieve 三阶段工作流", "阶段 1" in prom and "阶段 3" in prom
-          and "轮次上限 3 轮" in prom)
+          and "一句话总结论" in prom and "停止检索，输出" in prom)
+    # v8.4.3 指令A: 收敛由模型自然判断（不再按文献数代码强制），保留多轮与轮次上限
+    check("retrieve 多轮工作流", "第 1 轮：多角度并行检索" in prom
+          and "收尾（第 3 轮后或判断已充分）" in prom
+          and "最多 3 轮" in prom)
     guide = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                              'src', 'prompts', 'system', 'decision_guide.md'), encoding='utf-8').read()
-    check("决策指南深度规则", "逐证据引用" in guide and "深度问题生成策略" in guide)
+                              'src', 'prompts', 'source', '03_supervisor_routing_fusion.md'), encoding='utf-8').read()
+    check("决策指南深度规则", "要点先行" in guide and "证据说明" in guide)
+    import yaml
+    cfg = yaml.safe_load(open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                           'config.yaml'), encoding='utf-8'))
+    # v8.16.2: 40000→60000（rich 场景回执 47.6K 旧 cap 截掉文末 [Wn] 清单，实证根因）
+    check("retrieve-agent cap=60000",
+          cfg['agent']['tool_result_caps']['retrieve-agent'] == 60000)
     import yaml
     cfg = yaml.safe_load(open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                            'config.yaml'), encoding='utf-8'))

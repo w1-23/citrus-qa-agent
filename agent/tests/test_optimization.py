@@ -67,8 +67,8 @@ def test_reason_feedback():
     check("academic 网络失败回传", "[ERR_NETWORK] 学术源请求失败" in search and "source_errors" in search)
     check("academic 空结果附建议", "换更特异的英文关键词" in search)
     check("_classify_error 补建议策略", "建议: " in reg and "pip install" in reg)
-    check("write-agent 归因要求", "结果归因要求" in open(os.path.join(BASE, 'src', 'prompts', 'agents', 'write-agent.md'), encoding='utf-8').read())
-    check("analyze-agent 归因要求", "结果归因" in open(os.path.join(BASE, 'src', 'prompts', 'agents', 'analyze-agent.md'), encoding='utf-8').read())
+    check("write-agent 归因要求", "结果归因" in open(os.path.join(BASE, 'src', 'prompts', 'source', '05_academic_writing_common.md'), encoding='utf-8').read())
+    check("analyze-agent 归因要求", "结果归因" in open(os.path.join(BASE, 'src', 'prompts', 'source', '08_data_analysis_experiment.md'), encoding='utf-8').read())
 
     # 行为模拟: 归因文本生成
     import sys as _s
@@ -84,17 +84,17 @@ def test_reason_feedback():
 def test_write_token():
     print("[③] write-agent 截断")
     runner = open(os.path.join(BASE, 'src', 'core', 'agent_runner.py'), encoding='utf-8').read()
-    prom = open(os.path.join(BASE, 'src', 'prompts', 'agents', 'write-agent.md'), encoding='utf-8').read()
+    prom = open(os.path.join(BASE, 'src', 'prompts', 'source', '05_academic_writing_common.md'), encoding='utf-8').read()
     check("max_tokens 12000", "max_t = 12000" in runner)
     check("旧值 32768 已移除", "32768 if" not in runner)
     check("prompt 分块指令", "每轮只写 1-2 个章节" in prom)
-    check("prompt 禁止单轮全文", "禁止尝试在单轮内生成全文" in prom)
+    check("prompt 禁止单轮全文", "禁止单轮生成全文" in prom)
 
 
 def test_write_preview():
     print("[④] 写入回显 + 假引用")
     fops = open(os.path.join(BASE, 'src', 'tools', 'file_ops.py'), encoding='utf-8').read()
-    prom = open(os.path.join(BASE, 'src', 'prompts', 'agents', 'write-agent.md'), encoding='utf-8').read()
+    prom = open(os.path.join(BASE, 'src', 'prompts', 'source', '05_academic_writing_common.md'), encoding='utf-8').read()
     check("write 返回含内容预览", "内容预览" in fops)
     check("预览截断 200 字符", "preview_src[:200]" in fops or "content[:200]" in fops)
     check("append 预览显示新增块", "new_content if actual_mode" in fops)

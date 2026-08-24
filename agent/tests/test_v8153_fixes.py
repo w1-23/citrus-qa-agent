@@ -142,10 +142,12 @@ def test_v8153_web_streak_state_machine():
 # ── F-15.3-6 提示词机制回归（防未来清理误删 v8.15.3 机制标记）──────
 def test_v8153_prompt_mechanisms():
     print("[VF-14] 提示词机制标记存在性")
-    from pathlib import Path
-    root = Path(__file__).resolve().parents[1]  # agent/
-    ra = (root / "src/prompts/agents/retrieve-agent.md").read_text(encoding="utf-8")
-    dg = (root / "src/prompts/system/decision_guide.md").read_text(encoding="utf-8")
+    import sys as _sys
+    _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    # v9.0: 提示词改为"启动时固定拼接"——直接断言最终装配出的固定提示词内容
+    from src.prompts.loader import assemble_agent_prompt, assemble_system_prompt
+    ra = assemble_agent_prompt("retrieve-agent")
+    dg = assemble_system_prompt(mode="expert", format_hint=None, query=None)
 
     check("retrieve-agent 含数据源覆盖边界", "数据源覆盖边界" in ra)
     check("retrieve-agent 覆盖表(政策/新闻=本地不覆盖)",
@@ -154,15 +156,15 @@ def test_v8153_prompt_mechanisms():
           "通过 ≤2 条" in ra and "过滤占比 ≥50%" in ra)
     # v8.17.15: 草稿层删除——retrieve-agent 重新可调 deepseek_web_search（每轮 ≤1 次）
     check("retrieve-agent 允许联网调用（v8.17.15，每轮≤1 次）",
-          "deepseek_web_search" in ra and "至多调用 1 次" in ra
+          "deepseek_web_search" in ra and "最多调用 1 次" in ra
           and "禁止调用" not in ra)
     check("retrieve-agent 联网=goal 驱动",
           "query=goal" in ra and "每轮" in ra)
-    check("decision_guide 含覆盖表+自审", "数据源覆盖边界与检索前自审" in dg)
-    check("decision_guide 含回答前自审(引用对齐)", "回答前自审" in dg and "引用对齐" in dg)
-    check("decision_guide 含证据来源仲裁规则", "证据来源仲裁规则" in dg)
-    check("decision_guide 仲裁: 时效优先联网", "时效信息优先联网" in dg)
-    check("decision_guide 仲裁: 冲突并列禁止折中",
+    check("supervisor 含覆盖表+自审", "数据源覆盖边界与检索前自审" in dg)
+    check("supervisor 含检索后自审(引用对齐)", "检索后自审" in dg and "引用对齐" in dg)
+    check("supervisor 含证据来源仲裁规则", "证据来源仲裁与引用规则" in dg)
+    check("supervisor 仲裁: 时效优先联网", "时效信息优先联网" in dg)
+    check("supervisor 仲裁: 冲突并列禁止折中",
           "并列展示" in dg and "禁止捏造折中值" in dg)
 
 

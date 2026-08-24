@@ -1,7 +1,9 @@
-"""Prompt 版本化快照（书 §6.10.4 提示词敏感性评估，O5 落地）。
+"""Prompt 版本化快照（书 §6.10.4 提示词敏感性评估，O5 落地；v9.0 适配固定构建）。
 
-把当前全部提示词装配结果渲染为确定性 .txt 快照，提示词文件变更后
-可 diff 快照审查（配合评估集做回归）。快照不参与运行时逻辑，仅审查工具。
+v9.0 起提示词为"启动时固定拼接"架构：快照渲染各角色固定 system prompt
+（Supervisor / Lite / Retrieve / Write / Analyze）与全部 source/ 源文件为
+确定性 .txt，源文件或映射变更后可 diff 快照审查。快照不参与运行时逻辑，
+仅审查工具。
 
 用法:
     python -m src.prompts.snapshot                # 渲染到 src/prompts/snapshots/
@@ -16,31 +18,38 @@ SAMPLE_QUERY = "示例问题：柑橘黄龙病的综合防治措施"
 
 
 def render_all(include_strategy_cards: bool = True) -> dict[str, str]:
-    """渲染全部提示词装配结果为 {文件名: 内容}。"""
+    """渲染全部固定提示词装配结果为 {文件名: 内容}。"""
     from src.prompts.loader import (
-        assemble_system_prompt,
         assemble_agent_prompt,
-        build_dynamic_blocks,
+        assemble_system_prompt,
         build_agent_extra_block,
+        ROLE_SOURCE_FILES,
+        PROMPT_DIR,
         VALID_AGENTS,
-        VALID_FORMATS,
     )
 
     out: dict[str, str] = {}
+    # 各角色固定 system prompt
     out["system_expert.txt"] = assemble_system_prompt(
-        mode="expert", format_hint="fallback", query=SAMPLE_QUERY,
+        mode="expert", format_hint=None, query=None,
         include_strategy_cards=include_strategy_cards)
     out["system_light.txt"] = assemble_system_prompt(
-        mode="light", format_hint="fallback", query=SAMPLE_QUERY,
+        mode="light", format_hint=None, query=None,
         include_strategy_cards=include_strategy_cards)
     for agent in sorted(VALID_AGENTS):
         out[f"agent_{agent}.txt"] = assemble_agent_prompt(agent)
-    for fmt in sorted(VALID_FORMATS):
-        out[f"dynamic_{fmt}.txt"] = build_dynamic_blocks(
-            format_hint=fmt, query=SAMPLE_QUERY,
-            include_strategy_cards=include_strategy_cards)
+    # v9.0: 无动态格式块（全部模板固定于 Supervisor 提示词中）
     out["agent_extra_block.txt"] = build_agent_extra_block(
         system_prompt_extra="（示例：系统附加指令块）")
+    # source/ 源文件镜像（按映射顺序去重渲染）
+    seen: set[str] = set()
+    for role, filenames in ROLE_SOURCE_FILES.items():
+        for filename in filenames:
+            if filename in seen:
+                continue
+            seen.add(filename)
+            content = (PROMPT_DIR / "source" / filename).read_text(encoding="utf-8")
+            out[f"source_{filename.removesuffix('.md')}.txt"] = content
     return out
 
 

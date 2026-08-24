@@ -27,7 +27,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from src.config import settings, PROJECT_ROOT
 from src.core.evidence import render_evidence, EVIDENCE_RENDER_MAX_CHARS
-from src.prompts.loader import _read_prompt
+from src.prompts.loader import get_pipeline_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +150,7 @@ def classify_write_task(goal: str, context: str, file_exists: bool,
 
 def _build_plan_prompt(material_pack: list[dict], target_chars: int, retry_info: str = "",
                        skill_catalog: str = "") -> str:
-    prompt_file = _read_prompt("write-plan.md")
+    prompt_file = get_pipeline_prompt("plan")
     material_text = _format_material_pack(material_pack, max_entries=25)
     if target_chars and target_chars > 0:
         size_line = f"目标字数: {target_chars} 字"
@@ -311,7 +311,7 @@ async def _react_fallback_write(llm, goal: str, plan_text: str, material_pack: l
         return {"result": f"[plan_failed] 大纲生成失败，已回退常规写作。\n{plan_text[:500]}",
                 "mode": "react_fallback", "chapters": 0, "total_chars": 0,
                 "missing_sections": [], "truncated_sections": [], "material_gap": gap}
-    prompt_file = _read_prompt("write-section.md")
+    prompt_file = get_pipeline_prompt("section")
     prompt = (f"{prompt_file}\n\n---\n任务: 撰写完整文档 — {goal[:300]}\n"
               f"参考大纲（用于结构参考）:\n{plan_text[:2000]}\n\n"
               f"检索材料:\n{_format_material_pack(material_pack, max_entries=25)}\n"
@@ -843,7 +843,7 @@ def _build_selected_skill_prompt(skill_map: dict, skills_used: list[str]) -> str
 
 def _build_section_prompt(plan: dict, idx: int, section: dict, running_context: str,
                           material_pack: list[dict], skill_prompt: str = "") -> str:
-    prompt_file = _read_prompt("write-section.md")
+    prompt_file = get_pipeline_prompt("section")
     outline_summary = {
         "title": plan.get("title", ""),
         "total_sections": len(plan.get("sections", [])),
@@ -1121,7 +1121,7 @@ async def modify_document(llm, output_path: str, target_section: str, user_goal:
 
     # 追加新章节（目标不存在且用户要求"补充/加一节"）
     if idx < 0 and re.search(r"加[一节章]|补充|新增", user_goal):
-        prompt_file = _read_prompt("write-section.md")
+        prompt_file = get_pipeline_prompt("section")
         prompt = (f"{prompt_file}\n\n---\n全文已有章节: {[s['heading'] for s in sections]}\n"
                   f"任务: 新增章节 — {user_goal}\n材料: {_format_material_pack(material_pack, 8)}")
         resp = await asyncio.wait_for(_call_llm(llm, prompt),
@@ -1142,7 +1142,7 @@ async def modify_document(llm, output_path: str, target_section: str, user_goal:
 
     # 章节重写: 原章节 + 新材料 → 单章生成 → 替换
     old_body = sections[idx]["body"]
-    prompt_file = _read_prompt("write-section.md")
+    prompt_file = get_pipeline_prompt("section")
     prompt = (f"{prompt_file}\n\n---\n任务: 重写以下章节（保持 `## {sections[idx]['heading']}` 标题）\n"
               f"用户要求: {user_goal}\n"
               f"原章节内容:\n{old_body[:2000]}\n\n"

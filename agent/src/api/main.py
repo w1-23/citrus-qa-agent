@@ -83,6 +83,15 @@ async def lifespan(app: FastAPI):
         logger.info("[Lifespan] RAG engine warmed up")
     except Exception as e:
         logger.error(f"[Lifespan] RAG warm-up failed: {e}")
+    # v9.0: 启动时一次性拼接固定 system prompt（Supervisor/Retrieve/Write/Lite/…）
+    # 之后每次请求复用同一字符串，不再拼接、不再动态选择格式模板（KV cache 最大化复用）
+    try:
+        from src.prompts.loader import ensure_fixed_prompts
+        _prompts = ensure_fixed_prompts()
+        logger.info("[Lifespan] fixed prompts warmed: "
+                    + ", ".join(f"{k}={len(v)}chars" for k, v in _prompts.items()))
+    except Exception as e:
+        logger.error(f"[Lifespan] fixed prompts build failed: {e}")
     yield
     try:
         from src.retrieval.multi_retriever import MultiBatchRetriever

@@ -210,21 +210,23 @@ def test_v81715_frontend_cleaned():
 # ── VF-52 提示词快照新语义 ────────────────────────────────────────
 def test_v81715_prompt_snapshots():
     print("[VF-52] 提示词/快照新语义（联网回归 agent）")
-    ra = _src("src/prompts/agents/retrieve-agent.md")
-    dg = _src("src/prompts/system/decision_guide.md")
+    # v9.0: 提示词为"启动时固定拼接"——直接断言最终装配出的固定提示词内容与快照
+    from src.prompts.loader import assemble_agent_prompt, assemble_system_prompt
+    ra = assemble_agent_prompt("retrieve-agent")
+    dg = assemble_system_prompt(mode="expert", format_hint=None, query=None)
     snap_ra = _src("src/prompts/snapshots/agent_retrieve-agent.txt")
     snap_dg = _src("src/prompts/snapshots/system_expert.txt")
 
     check("retrieve-agent 允许 deepseek_web_search",
-          "deepseek_web_search" in ra and "至多调用 1 次" in ra)
+          "deepseek_web_search" in ra and "最多调用 1 次" in ra)
     check("retrieve-agent 无「禁止调用」", "禁止调用" not in ra)
     check("retrieve-agent goal 驱动表述", "query=goal" in ra)
-    check("decision_guide 无草稿活性语义（草稿层执行/原生回答参考段）",
+    check("supervisor 无草稿活性语义（草稿层执行/原生回答参考段）",
       "草稿层唯一" not in dg and "原生回答参考（草稿预答）" not in dg
       and "已由草稿层" not in dg)
-    check("decision_guide 网络综述规则（替代原生回答参考）", "网络综述" in dg)
+    check("supervisor 含联网证据仲裁规则（替代原生回答参考）", "联网证据默认可信" in dg)
     check("快照 agent_retrieve-agent.txt 同步新语义",
-          "至多调用 1 次" in snap_ra and "query=goal" in snap_ra)
+          "最多调用 1 次" in snap_ra and "query=goal" in snap_ra)
     check("快照 system_expert.txt 无「原生回答参考（草稿预答）」段渲染",
       "原生回答参考（草稿预答）" not in snap_dg
       and "原生回答参考段的使用规则" not in snap_dg)
