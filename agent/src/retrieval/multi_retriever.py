@@ -41,6 +41,25 @@ def _bm25_fingerprint(texts: List[str], k1: float, b: float, delta: float) -> st
     return h.hexdigest()
 
 
+def _bm25_search_parallel(bm25: BM25Plus, queries: List[str], k: int = 20) -> List[Tuple[int, float]]:
+    """v9.1.3: 多查询 BM25 并行 top_k（结果与串行逐位一致）。
+
+    _top_k_inverted 是只读 numpy 向量化路径（无共享写入；doc_lens/inv 均为
+    不可变数组）→ 多线程安全；numpy 向量段释放 GIL，多查询并行消除 Python
+    累加段串行（9 路实测 5.2s → 预期 ≈2-3x）。顺序与旧串行循环完全一致：
+    按 queries 提交顺序取结果拼接（每路 top_k 独立、无共享状态）。
+    """
+    if len(queries) <= 1:
+        return [hit for q in queries for hit in bm25.top_k(q, k=k)]
+    workers = min(4, len(queries))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(bm25.top_k, q, k) for q in queries]
+        out: List[Tuple[int, float]] = []
+        for f in futures:  # 按提交顺序取回 → 与串行逐位一致
+            out.extend(f.result())
+    return out
+
+
 def _load_bm25_cache(fp: str) -> Optional[BM25Plus]:
     p = _bm25_cache_path(fp)
     if not p.exists():
@@ -656,11 +675,13 @@ class MultiBatchRetriever:
 
         # v8.15 BM25 并行化：BM25 不依赖向量 embedding——先提交独立线程执行，
         # 与 embed（ONNX 释放 GIL）/向量检索重叠，融合前取回（省 ≈ min(bm25, embed) 延迟）
+        # v9.1.3（用户日志: 9 路查询 bm25_ms=5229s 为本地检索大头）: 查询间再并行——
+        # BM25 为只读 numpy 向量化路径（多线程安全），多查询并行可再获 ≈2-3x 收益，
+        # 结果与串行逐位一致（每路 top_k 独立、无共享状态）。
         t_bm25 = time.time()
         with ThreadPoolExecutor(max_workers=1) as _bm25_ex:
             _bm25_fut = _bm25_ex.submit(
-                lambda: [hit for q in queries
-                         for hit in self.bm25.top_k(q, k=settings.TOP_K_BM25)])
+                lambda: _bm25_search_parallel(self.bm25, queries, k=settings.TOP_K_BM25))
 
             t_embed = time.time()
             # v8.14-bugfix(2026-08-20): 查询编码必须走 embed_query（带 "query: " 前缀，E5 训练分布

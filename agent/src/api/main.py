@@ -349,10 +349,13 @@ async def chat_v2(req: ChatRequest):
                                 jobs_mod.update_job(job_id, status="completed",
                                                     progress_summary=ans[:200])
                                 # v8.4.1: 业务日志
+                                # v9.1.3: tools 口径与 supervisor_done 一致——tools_called
+                                # 为列表（AgentState 已声明，不再被 langgraph 丢弃），取长度
+                                _tools_n = len(output.get("tools_called") or [])
                                 try:
                                     from src.core.business_logger import blog
                                     blog("request_done", answer_chars=len(ans),
-                                         tools=output.get("tools_called", 0),
+                                         tools=_tools_n,
                                          ms=int((time.perf_counter() - t0) * 1000),
                                          job=job_id[:12])
                                 except Exception:
@@ -362,7 +365,7 @@ async def chat_v2(req: ChatRequest):
                                     from src.core.diag import diag
                                     diag("request_done", node=node_name,
                                          answer_chars=len(ans),
-                                         tools=output.get("tools_called", 0),
+                                         tools=_tools_n,
                                          ms=int((time.perf_counter() - t0) * 1000))
                                 except Exception:
                                     pass

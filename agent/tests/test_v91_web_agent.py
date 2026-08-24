@@ -335,6 +335,53 @@ def test_v91_lifespan_schema_snapshot():
           eg._AGENT_TOOLS is get_supervisor_tool_schemas())
 
 
+# ── F-9.1-10 v9.1.3 三项落实（tools 统计 / BM25 并行 / 历史侧栏保留）──
+def test_v913_three_fixes():
+    print("[VF-80] request_done tools 口径 + BM25 并行等价 + 历史侧栏保留")
+
+    # a. request_done tools=0 根因修复：AgentState 声明 + main.py len 口径
+    import src.graph.state as st
+    st_src = _inspect.getsource(st)
+    check("AgentState 声明 tools_called（langgraph 不再丢弃）",
+          "tools_called: list" in st_src)
+    import src.api.main as main_mod
+    mp_src = _inspect.getsource(main_mod)
+    check("request_done 统计用 len(tools_called) 口径（与 supervisor_done 一致）",
+          "len(output.get(\"tools_called\") or [])" in mp_src)
+
+    # b. 历史侧栏（v8.17.17 已落地，v9.1 重构未破坏）——references_data["historical"]
+    from src.graph import expert_graph as eg
+    eg_src = _inspect.getsource(eg)
+    check("references_data 仍注入 historical（v9.1 保留）",
+          '"historical": historical_refs' in eg_src
+          and "get_evidence_refs" in eg_src)
+    idx = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "index.html"), encoding="utf-8").read()
+    check("前端侧栏 4 组含 historical 手风琴（v8.17.17 保留）",
+          "historical" in idx and "H1" in idx or "历史" in idx)
+
+    # c. BM25 多查询并行：结果与串行逐位一致（零语义变化）
+    from src.retrieval.bm25 import BM25Plus
+    from src.retrieval.multi_retriever import _bm25_search_parallel
+    bm = BM25Plus()
+    corpus = [
+        "citrus huanglongbing pathogen Candidatus Liberibacter",
+        "citrus canker Xanthomonas citri resistance gene",
+        "citrus fruit quality sugar acid metabolism SWEET",
+        "UCR citrus variety collection cultivar germplasm",
+        "citrus postharvest storage coating quality",
+        "orange juice production global market 2025",
+    ]
+    bm.fit(corpus)
+    queries = ["citrus huanglongbing pathogen", "citrus variety UCR germplasm",
+               "citrus sugar metabolism", "orange market"]
+    serial = [hit for q in queries for hit in bm.top_k(q, k=3)]
+    para = _bm25_search_parallel(bm, queries, k=3)
+    check("BM25 并行与串行结果逐位一致",
+          serial == para, f"serial={serial} para={para}")
+    check("并行覆盖全部查询", len(para) == len(serial) and len(para) > 0)
+
+
 def test_v91_silent_summary():
     if failed:
         print(f"\n  ✗ v9.1 回归: {len(failed)} FAIL / {len(passed)} PASS")

@@ -20,6 +20,10 @@ class AgentState(TypedDict, total=False):
     # 下游节点 state，导致 save 节点证据账本为空（复测发现）
     main_results: list
     web_results: list
+    # v9.1.3（用户日志: request_done tools=0 统计失真）: tools_called 同样必须声明——
+    # supervisor 返回的 tool_names_called 列表未经声明会被 langgraph 丢弃，
+    # 下游 request_done 的 tools 统计恒 0（与 supervisor_done 口径不一致误导排查）。
+    tools_called: list
 
     answer: str
     gen_time_ms: float
