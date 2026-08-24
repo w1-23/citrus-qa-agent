@@ -22,16 +22,12 @@ _REF_NUM_RE = re.compile(r"\[(\d{1,3})\]")
 _REF_WH_RE = re.compile(r"\[([WH])(\d{1,3})\]", re.IGNORECASE)
 
 
-def filter_refs_by_answer(answer: str, cited_refs: list) -> list:
-    """v8.15: 只保留回答文本中真实引用的证据条目，并按首次出现顺序重排。
+def _extract_ref_order(answer: str) -> list[str]:
+    """回答内引用编号的「首次出现顺序」列表（v9.2 抽取，filter/renumber 共用）。
 
-    - 提取回答中出现的引用编号（[n] + [Wn]/[Hn]），按首次出现记序；
-    - cited_refs 仅保留 ref_id ∈ 引用集合的条目，顺序 = 回答中首次出现顺序；
-    - 回答中未出现的条目一律舍弃（侧栏 RAG/UCR/Web 组只显示真实引用）；
-    - 回答为空 → 原样返回（防御，不误伤）。
+    - 数字 [n] 组先扫描、[Wn]/[Hn] 组随后（与 v8.15 filter 语义逐位一致）；
+    - 同一编号只记首次出现位置（后续重复引用不改变顺序）。
     """
-    if not answer or not cited_refs:
-        return cited_refs
     order: list[str] = []
     seen: set = set()
     for m in _REF_NUM_RE.finditer(answer):
@@ -44,6 +40,20 @@ def filter_refs_by_answer(answer: str, cited_refs: list) -> list:
         if rid not in seen:
             seen.add(rid)
             order.append(rid)
+    return order
+
+
+def filter_refs_by_answer(answer: str, cited_refs: list) -> list:
+    """v8.15: 只保留回答文本中真实引用的证据条目，并按首次出现顺序重排。
+
+    - 提取回答中出现的引用编号（[n] + [Wn]/[Hn]），按首次出现记序；
+    - cited_refs 仅保留 ref_id ∈ 引用集合的条目，顺序 = 回答中首次出现顺序；
+    - 回答中未出现的条目一律舍弃（侧栏 RAG/UCR/Web 组只显示真实引用）；
+    - 回答为空 → 原样返回（防御，不误伤）。
+    """
+    if not answer or not cited_refs:
+        return cited_refs
+    order = _extract_ref_order(answer)
     if not order:
         return cited_refs  # 无任何引用编号 → 保持原样（防御路径）
     by_id = {str(it.get("ref_id")): it for it in cited_refs}
@@ -79,18 +89,7 @@ def renumber_refs(answer: str, cited_refs: list) -> tuple:
     """
     if not answer or not cited_refs:
         return answer, cited_refs, {}
-    order: list[str] = []
-    seen: set = set()
-    for m in _REF_NUM_RE.finditer(answer):
-        rid = m.group(1)
-        if rid not in seen:
-            seen.add(rid)
-            order.append(rid)
-    for m in _REF_WH_RE.finditer(answer):
-        rid = f"{m.group(1).upper()}{m.group(2)}"
-        if rid not in seen:
-            seen.add(rid)
-            order.append(rid)
+    order = _extract_ref_order(answer)
     if not order:
         return answer, cited_refs, {}
 

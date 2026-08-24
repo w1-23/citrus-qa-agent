@@ -234,7 +234,8 @@ async def chat_v2(req: ChatRequest):
         "idempotency_key": idem_key,
         # v8.15: 联网搜索由前端开关逐请求决定（config web_search.enabled 仅作部署默认值，
         # 不设启用门槛）——前端开则本次可联网，关则工具执行层短路为 [DISABLED]
-        "web_search_enabled": bool(req.web_search_enabled),
+        # v9.2: 开关只经 tracing contextvar（下行 set_web_search_enabled）传递，
+        # state 键为写而不读死字段已于重构中删除
     }
     from src.core.tracing import set_web_search_enabled, set_original_query, reset_web_budget
     set_web_search_enabled(bool(req.web_search_enabled))
@@ -248,10 +249,9 @@ async def chat_v2(req: ChatRequest):
 
     async def event_generator():
         from src.core.progress_bus import (
-            get_progress_queue,
             set_request_queue, clear_request_queue,
             _encode_event, log_sse_frame,
-            get_running_tools, get_tool_elapsed, clear_tool_timers,
+            get_running_tools, clear_tool_timers,
         )
 
         # v8.3.3: 每个请求独立队列（contextvars 绑定），并发会话互不串扰
@@ -328,7 +328,10 @@ async def chat_v2(req: ChatRequest):
                                 "main_count": len(output.get("main_results", [])),
                             }))
 
-                        if node_name in ("supervisor", "light_synthesize", "light_react"):
+                        # v9.2: 节点名改为真实值（原 "light_synthesize"/"light_react" 是
+                        # v8.3.0 前 light 老节点名→ light 恒落入兜底分支：丢 citation_info/
+                        # tools_called、job 永不 completed、request_done 日志缺失）
+                        if node_name in ("supervisor", "light_supervisor"):
                             ans = output.get("answer", "")
                             if ans:
                                 await asyncio.sleep(0.5)

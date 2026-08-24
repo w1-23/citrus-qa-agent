@@ -18,6 +18,8 @@ import uuid
 
 from langchain_core.messages import AIMessage, SystemMessage
 
+from src.core.evidence import src_of, renumber_refs
+
 logger = logging.getLogger(__name__)
 
 # 三层收尾 prompt 字节一致（原 expert `_FINAL_PROMPT` 与 light 内联 `final_prompt` 相同）
@@ -62,6 +64,74 @@ def dedup_by_doi(rows) -> list:
         seen.add(doi)
         out.append(r)
     return out
+
+
+def build_cited_refs(deduped_main: list, all_web_results: list,
+                     *, web_slot: int = 10) -> list:
+    """引用回执装配（v9.2 抽取，expert/light 两图共用——消除 40 行双实现）。
+
+    - 数字编号 [n] = deduped_main 顺序 i+1（rag/ucr 共用编号池，与侧栏同构）；
+    - 联网 [Wn] = all_web_results 顺序 W{i+1}，上限 web_slot（expert 10 / light 5）；
+    - 字段结构与前端 renderCitationItem 契约严格一致（含 UCR 专属字段）。
+    """
+    cited_refs: list = []
+    for i, r in enumerate(deduped_main[:20]):
+        cited_refs.append({
+            "ref_id": i + 1,
+            "type": "main",
+            "source": src_of(r),                       # v8.15: rag|ucr
+            "doi": r.get("doi", "N/A"),
+            "title": r.get("title", r.get("name", "Untitled")),
+            "section_name": r.get("section_name", ""),
+            "text_preview": (r.get("abstract") or r.get("snippet") or "")[:300],
+            "score": r.get("score", r.get("rerank_score", 0)) or 0,
+            "year": r.get("year", ""),
+            "authors": r.get("authors", ""),
+            # v8.15: UCR 品种条目专属字段（无 DOI 时前端显示登记号/品种名）
+            "variety_name": r.get("variety_name", ""),
+            "registry_id": r.get("registry_id", ""),
+        })
+    for i, wr in enumerate(all_web_results[:web_slot]):
+        cited_refs.append({
+            "ref_id": f"W{i+1}",
+            "type": "web",
+            "source": "web",
+            "url": wr.get("url", wr.get("link", "")),
+            "title": wr.get("title", wr.get("name", "Untitled")),
+            "text_preview": (wr.get("snippet") or wr.get("content")
+                             or wr.get("abstract") or "")[:300],
+            "score": 0,
+        })
+    return cited_refs
+
+
+def renumber_and_sync_trace(messages: list, answer: str, cited_refs: list) -> tuple:
+    """引用重排 + 轨迹同步（v9.2 抽取，expert/light 共用）。
+
+    对 answer/cited_refs 执行 renumber_refs（数字 [n]→1..k、[Wn]→W1..Wm、
+    [Hn]→H1..Hp）；若编号发生变化，把 messages 中承载原始回答的
+    AIMessage.content 更新为重排后文本——save 节点按
+    ``trace[-1].content == state.answer`` 判重，不同步会因编号差异追加重复消息。
+
+    返回 (new_answer, new_cited, remap)。
+    """
+    ref_remap: dict = {}
+    _orig = answer
+    try:
+        answer, cited_refs, ref_remap = renumber_refs(answer, cited_refs)
+    except Exception as e:
+        logger.debug(f"renumber_refs skipped: {e}")
+    if answer != _orig:
+        try:
+            for _m in messages:
+                if (isinstance(_m, AIMessage)
+                        and not getattr(_m, "tool_calls", None)
+                        and getattr(_m, "content", None) == _orig):
+                    _m.content = answer
+                    break
+        except Exception:
+            pass
+    return answer, cited_refs, ref_remap
 
 
 def last_message_content(messages: list, mode: str = "aimessage") -> str:

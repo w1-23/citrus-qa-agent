@@ -12,11 +12,11 @@ from langgraph.graph import StateGraph, END
 
 from src.graph.state import AgentState
 from src.config import settings, get_deepseek_model
-from src.core.evidence import (render_evidence, EVIDENCE_SNIPPET_MAX_CHARS,
-                               src_of, filter_refs_by_answer, renumber_refs)
+from src.core.evidence import (render_evidence, EVIDENCE_SNIPPET_MAX_CHARS, src_of)
 from src.core.agent_loop import (
     dedup_by_doi, emit_llm_usage, FINAL_ANSWER_PROMPT,
     invoke_llm_with_retry, force_final_answer,
+    build_cited_refs, renumber_and_sync_trace,
 )
 from src.prompts.loader import assemble_system_prompt
 
@@ -217,6 +217,7 @@ async def light_supervisor_node(state: AgentState) -> dict:
     all_main_results = list(state.get("main_results") or [])
     all_web_results = list(state.get("web_results") or [])
     tool_call_count = 0
+    tool_names_called: list[str] = []   # v9.2: 已调用工具名（main.py done 分支消费）
     t0 = time.perf_counter()
 
     try:
@@ -270,6 +271,8 @@ async def light_supervisor_node(state: AgentState) -> dict:
                     tc_name = getattr(tc, "name", "?")
                     tc_args = dict(getattr(tc, "args", None) or {})
                 logger.info(f"[LightGraph:supervisor] turn{turn}: call {tc_name}({str(tc_args)[:80]})")
+                if tc_name and tc_name not in tool_names_called:
+                    tool_names_called.append(tc_name)
                 try:
                     emit_tool_call_start(tc_name[:30], tc_args, tc_id)
                     emit_tool_executing(f"调用 {tc_name}...", tc_name[:30], tc_id)
@@ -344,53 +347,10 @@ async def light_supervisor_node(state: AgentState) -> dict:
 
     deduped_main = dedup_by_doi(all_main_results)
 
-    cited_refs = []
-    for i, r in enumerate(deduped_main[:20]):
-        cited_refs.append({
-            "ref_id": i + 1,
-            "type": "main",
-            "source": src_of(r),                       # v8.15: rag|ucr
-            "doi": r.get("doi", "N/A"),
-            "title": r.get("title", r.get("name", "Untitled")),
-            "section_name": r.get("section_name", ""),
-            "text_preview": (r.get("abstract") or r.get("snippet") or "")[:300],
-            "score": r.get("score", r.get("rerank_score", 0)) or 0,
-            "year": r.get("year", ""),
-            "authors": r.get("authors", ""),
-            "variety_name": r.get("variety_name", ""),
-            "registry_id": r.get("registry_id", ""),
-        })
-    for i, wr in enumerate(all_web_results[:5]):
-        cited_refs.append({
-            "ref_id": f"W{i+1}",
-            "type": "web",
-            "source": "web",
-            "url": wr.get("url", wr.get("link", "")),
-            "title": wr.get("title", wr.get("name", "Untitled")),
-            "text_preview": (wr.get("snippet") or wr.get("content") or wr.get("abstract") or "")[:300],
-            "score": 0,
-        })
-
-    # v9.2: 引用编号统一重排（后端一处收敛）——[n]→连续 1..k、[Wn]→W1..Wm；
-    # 内化原 v8.15 过滤+首次出现排序，remap 随 references_data 下发前端重写正文
-    ref_remap: dict = {}
-    _orig_answer = answer
-    try:
-        answer, cited_refs, ref_remap = renumber_refs(answer, cited_refs)
-    except Exception as e:
-        logger.debug(f"[LightGraph] renumber_refs skipped: {e}")
-    if answer != _orig_answer:
-        # v9.2: 轨迹内承载原始回答的 AIMessage 同步为重排后文本（save 节点
-        # 按 trace[-1].content == state.answer 判重，防编号差异追加重复消息）
-        try:
-            for _m in messages:
-                if (isinstance(_m, AIMessage)
-                        and not getattr(_m, "tool_calls", None)
-                        and getattr(_m, "content", None) == _orig_answer):
-                    _m.content = answer
-                    break
-        except Exception:
-            pass
+    # v9.2: 引用回执装配 + 统一重排收敛共享原语（agent_loop，web 槽位 light=5）
+    cited_refs = build_cited_refs(deduped_main, all_web_results, web_slot=5)
+    answer, cited_refs, ref_remap = renumber_and_sync_trace(
+        messages, answer, cited_refs)
 
     references_data = {"cited": cited_refs, "uncited": [],
                        "remap": ref_remap, "total": len(cited_refs)}
@@ -412,6 +372,8 @@ async def light_supervisor_node(state: AgentState) -> dict:
         "main_results": deduped_main[:20],
         "web_results": all_web_results[:5],
         "references_data": references_data,
+        # v9.2: 工具名列表（main.py done 分支对齐 expert——request_done 日志真实计数）
+        "tools_called": tool_names_called,
         # v8.3.8: 本轮完整轨迹（save 节点持久化）
         "turn_trace": messages[trace_start_index:],
         "_trace": {"node": "light_supervisor", "elapsed_ms": elapsed,

@@ -17,11 +17,11 @@ from langgraph.graph import StateGraph, END
 
 from src.graph.state import AgentState
 from src.config import settings, get_deepseek_model, PROJECT_ROOT
-from src.core.evidence import (render_evidence, EVIDENCE_SNIPPET_MAX_CHARS,
-                               src_of, filter_refs_by_answer, renumber_refs)
+from src.core.evidence import (render_evidence, EVIDENCE_SNIPPET_MAX_CHARS, src_of)
 from src.core.agent_loop import (
     tc_id as extract_tc_id, count_unique_docs, dedup_by_doi, emit_llm_usage,
     FINAL_ANSWER_PROMPT, invoke_llm_with_retry, force_final_answer,
+    build_cited_refs, renumber_and_sync_trace,
 )
 from src.prompts.loader import assemble_system_prompt
 
@@ -952,57 +952,12 @@ def _assemble_supervisor_answer(*, answer, all_main_results, all_web_results,
 
     deduped_main = dedup_by_doi(all_main_results)
 
-    cited_refs = []
-    for i, r in enumerate(deduped_main[:20]):
-        cited_refs.append({
-            "ref_id": i + 1,
-            "type": "main",
-            "source": src_of(r),                       # v8.15: rag|ucr（前端徽标/手风琴分组）
-            "doi": r.get("doi", "N/A"),
-            "title": r.get("title", r.get("name", "Untitled")),
-            "section_name": r.get("section_name", ""),
-            "text_preview": (r.get("abstract") or r.get("snippet") or "")[:300],
-            "score": r.get("score", r.get("rerank_score", 0)) or 0,
-            "year": r.get("year", ""),
-            "authors": r.get("authors", ""),
-            # v8.15: UCR 品种条目专属字段（无 DOI 时前端显示登记号/品种名）
-            "variety_name": r.get("variety_name", ""),
-            "registry_id": r.get("registry_id", ""),
-        })
-    for i, wr in enumerate(all_web_results[:10]):
-        cited_refs.append({
-            "ref_id": f"W{i+1}",
-            "type": "web",
-            "source": "web",
-            "url": wr.get("url", wr.get("link", "")),
-            "title": wr.get("title", wr.get("name", "Untitled")),
-            "text_preview": (wr.get("snippet") or wr.get("content") or wr.get("abstract") or "")[:300],
-            "score": 0,
-        })
-
-    # v9.2: 引用编号统一重排（重排收敛后端一处）——数字 [n] 连续 1..k、
-    # [Wn] 连续 W1..Wm、[Hn] 连续 H1..Hp；内化原 v8.15 filter_refs_by_answer
-    # 的「只保留真实引用 + 首次出现排序」，返回 remap 随 references_data 下发，
-    # 前端只按 remap 重写正文与 ref_id（取代 v8.17.3 前端 W 专用压缩）。
-    ref_remap: dict = {}
-    _orig_answer = answer
-    try:
-        answer, cited_refs, ref_remap = renumber_refs(answer, cited_refs)
-    except Exception as e:
-        logger.debug(f"[ExpertGraph] renumber_refs skipped: {e}")
-    if answer != _orig_answer:
-        # v9.2: 轨迹内承载原始回答的 AIMessage 同步为重排后文本——否则
-        # save 节点按 trace[-1].content == state.answer 判重会因编号差异
-        # 判不等而追加一条重复消息入历史
-        try:
-            for _m in messages:
-                if (isinstance(_m, AIMessage)
-                        and not getattr(_m, "tool_calls", None)
-                        and getattr(_m, "content", None) == _orig_answer):
-                    _m.content = answer
-                    break
-        except Exception:
-            pass
+    # v9.2: 引用回执装配 + 统一重排收敛共享原语（agent_loop.build_cited_refs /
+    # renumber_and_sync_trace——数字 1..k、W W1..Wm、H H1..Hp；remap 随
+    # references_data 下发前端重写正文；轨迹同步防 save 重复消息）
+    cited_refs = build_cited_refs(deduped_main, all_web_results, web_slot=10)
+    answer, cited_refs, ref_remap = renumber_and_sync_trace(
+        messages, answer, cited_refs)
 
     # v8.17.17（用户决策）：恢复历史引用进侧栏——与 web/rag/ucr 同级手风琴展示。
     # v8.15.2 曾移除（防侧栏膨胀）；用户实测：历史引用被"踢出"侧栏，跨轮信息只能
@@ -1064,10 +1019,8 @@ def _assemble_supervisor_answer(*, answer, all_main_results, all_web_results,
         _evidence_count = session_manager.count_evidence_items(session_id)
     except Exception:
         pass
-    try:
-        _ltm_chars = len(state.get("long_term_memory") or "")
-    except Exception:
-        pass
+    # v9.2: state 是普通 dict，.get 不可能抛异常——删除无意义 try/except 噪音
+    _ltm_chars = len(state.get("long_term_memory") or "")
     citation_info = check_citation_support(
         answer, all_main_results,
         "call_search_both" in tool_names_called,
