@@ -125,14 +125,18 @@ def test_v81715_web_back_in_agent():
     check("学术源随门控（默认关）", ("academic_search" not in names) == (not _aca))
 
     ar_src = _inspect.getsource(ar)
-    check("per-turn web 预算 = 1（_MAX_WEB_PER_TURN）",
-          "_MAX_WEB_PER_TURN = 1" in ar_src)
-    check("execution 层拦截分支（每轮上限 1 次，超限占位）",
-          "每轮联网搜索上限 1 次" in ar_src)
+    check("联网预算 = 全程仅 1 次（_web_used 请求级计数）",
+          "_web_used = 0" in ar_src and "turn > 0 or _web_used >= 1" in ar_src)
+    check("拦截信号 [WEB_BUDGET_EXHAUSTED]（不污染证据）",
+          "WEB_BUDGET_EXHAUSTED" in ar_src
+          and '"web_results": []' in ar_src)
     check("连续失败熔断保留（≥2 拦截）",
           "联网搜索已连续失败" in ar_src and "_web_fail_streak" in ar_src)
     check("web_summary 进 artifact（回执网络综述素材）",
           "web_summaries" in ar_src)
+    check("turn0 仅联网 → 自动补发本地检索（并发兜底）",
+          "仅联网 → 自动补发本地检索" in ar_src
+          and "rag-auto" in ar_src)
 
 
 # ── VF-49 deepseek_web_search goal 驱动 + 短路 + URL ────────────────
@@ -217,19 +221,65 @@ def test_v81715_prompt_snapshots():
     snap_ra = _src("src/prompts/snapshots/agent_retrieve-agent.txt")
     snap_dg = _src("src/prompts/snapshots/system_expert.txt")
 
-    check("retrieve-agent 允许 deepseek_web_search",
-          "deepseek_web_search" in ra and "最多调用 1 次" in ra)
+    check("retrieve-agent 允许 deepseek_web_search（全程仅第 1 轮 1 次）",
+          "deepseek_web_search" in ra and "全程仅第 1 轮允许调用 1 次" in ra)
     check("retrieve-agent 无「禁止调用」", "禁止调用" not in ra)
     check("retrieve-agent goal 驱动表述", "query=goal" in ra)
+    check("retrieve-agent 含 [WEB_BUDGET_EXHAUSTED] 说明", "[WEB_BUDGET_EXHAUSTED]" in ra)
     check("supervisor 无草稿活性语义（草稿层执行/原生回答参考段）",
       "草稿层唯一" not in dg and "原生回答参考（草稿预答）" not in dg
       and "已由草稿层" not in dg)
     check("supervisor 含联网证据仲裁规则（替代原生回答参考）", "联网证据默认可信" in dg)
+    check("supervisor goal 不写「仅联网」（v8.17.17 并发约束）",
+          "不要写「仅联网检索/只联网」" in dg or "仅联网" in dg)
     check("快照 agent_retrieve-agent.txt 同步新语义",
-          "最多调用 1 次" in snap_ra and "query=goal" in snap_ra)
+          "全程仅第 1 轮允许调用 1 次" in snap_ra and "query=goal" in snap_ra)
     check("快照 system_expert.txt 无「原生回答参考（草稿预答）」段渲染",
       "原生回答参考（草稿预答）" not in snap_dg
       and "原生回答参考段的使用规则" not in snap_dg)
+
+
+# ── VF-53 引用保存 web 条目（evidence 0 items 修复）+ historical 恢复 ──
+def test_v81717_evidence_web_and_historical():
+    print("[VF-53] evidence 保存 web 条目 + historical 侧栏恢复")
+    from src.graph import expert_graph as eg
+    from src.session import manager as sm
+    # agent 模块（保持与 project 一致的 src 引用路径兼容）
+    import src.graph.expert_graph as _eg2
+
+    eg_src = _inspect.getsource(eg)
+    check("evidence 保存含 web_results（0 items 修复）",
+          "web_results = state.get(\"web_results\") or []" in eg_src
+          or "for w in web_results[:30]" in eg_src)
+    check("web 条目带 url/source=web 入账本",
+          '"source": "web"' in eg_src and '"url": str(w.get("url", ""))' in eg_src)
+
+    # historical 恢复接线（references_data.historical 不再为空数组）
+    check("references_data 含 historical 注入（v8.17.17 恢复）",
+          '"historical": historical_refs' in eg_src)
+
+    # manager.get_evidence_refs 最近 10 轮 + url
+    sm_src = _inspect.getsource(sm.SessionManager.get_evidence_refs)
+    check("历史引用覆盖最近 10 轮（原 4）", "LIMIT 10" in sm_src)
+    check("历史引用保留 url（web 可跳转）", '"url": str(e.get("url") or "")[:300]' in sm_src)
+
+    # 前端 historical 链接渲染
+    idx = _src("index.html")
+    check("前端 historical url 可点（与 web 同级）",
+          "item.type === 'historical'" in idx and "item.url" in idx)
+
+
+# ── VF-54 联网摘要为空兜底 ──────────────────────────────────────────
+def test_v81717_empty_summary_fallback():
+    print("[VF-54] 联网 0 字摘要 → web_items 保留 + 不重试提示")
+    from src.tools import deepseek_web as dw
+    src = _src("src/tools/deepseek_web.py")
+    check("摘要为空分支 · 明示引用但无正文",
+          "返回引用条目但无正文摘要" in src)
+    check("不提示「模型判断无需联网」（误导消除）",
+          "模型判断无需联网，未检索" not in src)
+    check("web_items 仍构造（引用可用）",
+          '"ref_id": f"W{idx}"' in src)
 
 
 if __name__ == "__main__":

@@ -57,11 +57,13 @@ model:
   fast: "deepseek-v4-flash"
   embedding: "intfloat/multilingual-e5-large"
   reranker: "BAAI/bge-reranker-v2-m3"
-  # v8.15.3: 检索决策子代理思维链控制。default = 不发送任何参数（零风险，维持现状，
-  # v4-flash 默认带推理 → 每轮决策偏慢）；off = 对 retrieve-agent 下发
-  # thinking:{"type":"disabled"} 关闭推理（决策提速，但需先在真机确认该参数兼容，
-  # 沙箱无外网未实测——确认后改这里一行即生效）。
-  reasoning_mode: "default"   # default | off
+  # v8.15.3: 检索决策子代理思维链控制。default = 不发送任何参数；off = 对
+  # retrieve-agent 下发 thinking:{"type":"disabled"} 关闭推理（决策提速）。
+  # v8.17.17（用户决策）：改 off——检索决策轮只要"判断预算/角度/收尾"，无需
+  # 自由推理；用户日志实测推理显著拖慢 retrieve-agent 每轮 LLM（2.4~24.5s）。
+  # retrieve-agent 接线已存在（agent_runner thinking_off=...=="off"）；
+  # supervisor/expert 合成轮不接 thinking_off，保持默认（不发送，不影响）。
+  reasoning_mode: "off"     # default | off
 
 embedder:
   force_cpu: false          # 强制 CPU（调试用）

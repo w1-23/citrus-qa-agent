@@ -221,8 +221,20 @@ def deepseek_web_search(query: str) -> Tuple[str, dict]:
 
         _queries_line = ("\n\n本次模型联网检索了这些关键词:\n" + "、".join(
             f"「{q[:80]}」" for q in meta.get("queries", [])[:5])) if meta.get("queries") else ""
+        # v8.17.17: 摘要为空但引用存在（实测 0 字摘要 + 8 引用）——不再提示
+        # "模型判断无需联网"（误导），改为明示"返回引用但无正文"：web_items 照常
+        # 保留（侧栏 [Wn] 可用），正文缺口如实标注、不重试（预算仅 turn0 一次）。
+        if summary.strip():
+            _summary_part = f"联网检索摘要（DeepSeek 原生搜索返回）:\n{summary[:2000]}"
+        else:
+            _summary_part = ("[注意] 本次联网返回引用条目但无正文摘要（模型未生成综述）。"
+                             "请优先使用下方引用标题/URL 或结合本地证据作答；"
+                             "不要为获取正文重试联网（预算已用尽）。")
+            logger.info(
+                f"[deepseek_web_search] 摘要为空但含 {len(calls)} 条引用"
+                f"（web_items 保留，正文缺省，不重试）")
         text_result = (
-            f"联网检索摘要（DeepSeek 原生搜索返回）:\n{summary[:2000] or '(模型判断无需联网，未检索)'}"
+            _summary_part
             + _queries_line
             + ("\n\n引用:\n" + "\n".join(f"[W{i}] {c['title']} — {c['url']}"
                                           for i, c in enumerate(calls, 1)) if calls else "")

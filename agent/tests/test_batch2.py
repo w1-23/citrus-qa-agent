@@ -385,7 +385,9 @@ def test_ag22_output_routing():
           and "核心结论与证据点" not in prom
           and "一句话总结论" in prom and "停止检索，输出" in prom)
     # v8.4.3 指令A: 收敛由模型自然判断（不再按文献数代码强制），保留多轮与轮次上限
-    check("retrieve 多轮工作流", "第 1 轮：多角度并行检索" in prom
+    # v8.17.17: 第 1 轮更名为"强制并行本地 + 联网"
+    check("retrieve 多轮工作流", "第 1 轮：强制并行本地 + 联网" in prom
+          and "第 2 轮起：仅本地定向补检" in prom
           and "收尾（第 3 轮后或判断已充分）" in prom
           and "最多 3 轮" in prom)
     guide = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

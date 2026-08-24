@@ -961,14 +961,34 @@ def _assemble_supervisor_answer(*, answer, all_main_results, all_web_results,
     except Exception as e:
         logger.debug(f"[ExpertGraph] filter_refs_by_answer skipped: {e}")
 
+    # v8.17.17（用户决策）：恢复历史引用进侧栏——与 web/rag/ucr 同级手风琴展示。
+    # v8.15.2 曾移除（防侧栏膨胀）；用户实测：历史引用被"踢出"侧栏，跨轮信息只能
+    # 经上下文传递、不可回溯 → 改回注入，来源按历史证据分组（historical 组）。
+    # 取最近 10 轮 session_evidence 条目（去重由前端按 ref_id 天然处理）。
+    historical_refs: list[dict] = []
+    try:
+        _hist = session_manager.get_evidence_refs(session_id, limit=10)
+        for _h in (_hist or []):
+            historical_refs.append({
+                "ref_id": str(_h.get("ref_id", "")),
+                "type": "historical",
+                "source": str(_h.get("source") or "rag"),
+                "doi": str(_h.get("doi") or "N/A"),
+                "url": str(_h.get("url") or ""),
+                "title": str(_h.get("title") or "")[:150],
+                "year": str(_h.get("year") or ""),
+                "text_preview": str(_h.get("snippet") or "")[:250],
+                "score": 0,
+            })
+    except Exception as e:
+        logger.debug(f"[ExpertGraph] historical refs skipped: {e}")
+
     references_data = {
         "cited": cited_refs,
         "uncited": [],
+        "historical": historical_refs,
         "total": len(cited_refs),
     }
-
-    # v8.15.2: 不再注入历史证据引用（H1..Hn）——侧栏只显示本轮回答真实引用的证据，
-    # 防止侧栏膨胀；历史跨轮信息仍经上下文/证据账本传递。（原 v8.4.6 F2 行为已移除）
 
     if answer:
         try:
@@ -1261,7 +1281,11 @@ async def expert_save_node(state: AgentState) -> dict:
                 report_parts.append(str(m.content))
         report_text = "\n\n---\n\n".join(report_parts)
         main_results = state.get("main_results") or []
-        if report_text or main_results:
+        # v8.17.17: 纯联网轮（0 main_results + N web_results）不再存 0 items——
+        # 用户日志实测证据账本 0 items（纯联网轮 main_results 为空）；
+        # web_results [Wn] 条目按联网来源并入 evidence（doi 空/url 带完整地址）。
+        web_results = state.get("web_results") or []
+        if report_text or main_results or web_results:
             evidence = [
                 {
                     "doi": r.get("doi", ""),
@@ -1275,6 +1299,18 @@ async def expert_save_node(state: AgentState) -> dict:
                     "snippet": render_evidence(r, max_chars=EVIDENCE_SNIPPET_MAX_CHARS),
                 }
                 for r in main_results[:30]
+            ] + [
+                {
+                    "doi": "",
+                    "chunk_id": str(w.get("url", ""))[:200],
+                    "title": str(w.get("title", ""))[:150],
+                    "score": float(w.get("score", 0) or 0),
+                    "year": "",
+                    "source": "web",
+                    "snippet": str(w.get("abstract", w.get("snippet", "")))[:500],
+                    "url": str(w.get("url", "")),
+                }
+                for w in web_results[:30]
             ]
             spawn(session_manager.save_evidence(
                 session_id, query, evidence, report_text))

@@ -8,6 +8,7 @@
 - 需要写长文时，调用 `call_write_agent`（其内部执行 Plan-Execute）。
 - 需要保存现成内容时，直接调用 `write_local_file`。
 - 需要数据分析时，调用 `call_data_analysis_agent`（若存在）或按 #08 规则自己处理。
+- **给 call_retrieve_agent 的 goal 不要写「仅联网检索/只联网」（v8.17.17）**：即使问题偏时效/政策/新闻，goal 也要按「本地与联网并行的最新信息」口径描述——检索子代理第 1 轮强制并发本地+联网；goal 写「仅联网」会误导其跳过本地检索。
 
 ## 证据来源
 - 检索回执（`evidence_report`）由系统确定性组装，包含：

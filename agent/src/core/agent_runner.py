@@ -433,6 +433,10 @@ async def run_agent(
     # v8.15.3: 联网搜索失败熔断（请求内连续失败 ≥2 停止重试——失败无感知是
     # "7 次 30s 重试"类等待的根因；成功则清零）
     _web_fail_streak = 0
+    # v8.17.17: 联网全请求级预算——仅 turn0（第一轮）允许 1 次，此后一律拦截。
+    # 用户日志实测：retrieve-agent 3 轮全调 web（207s/219s，成本高且无新增益），
+    # turn≥1 的联网大多重复角度、只增耗时与费用 → 代码级硬限制。
+    _web_used = 0
 
     for turn in range(max_turns):
         # v8.4.3 指令A: 移除"≥6 篇强制收敛"——动态阈值已过滤 chunk，检索到的
@@ -557,17 +561,51 @@ async def run_agent(
                         artifact={"main_results": [], "web_results": []})
                     logger.info(f"[AgentRunner] 联网搜索熔断拦截（连续失败 {_web_fail_streak} 次）")
                     continue
-                # v8.15: 联网搜索预算（与学术源同档：每轮 ≤1 次；连续失败熔断见 _web_fail_streak）
-                if _turn_web >= _MAX_WEB_PER_TURN:
+                # v8.17.17: 联网全请求仅 turn0 可用（用户决策）——代码级硬限制：
+                #   - turn ≥ 1：直接拦截，返回 [WEB_BUDGET_EXHAUSTED] 控制信号；
+                #   - turn0 内已调用过 1 次（_web_used ≥ 1）：同样拦截；
+                #   拦截结果不写 web_results/正文（不污染 supervisor 证据列表），
+                #   仅作为"立即收尾"的系统消息交回模型。
+                if turn > 0 or _web_used >= 1:
                     tc_id = tc_ids[idx] if idx < len(tc_ids) else extract_tc_id(tc)
                     placeholder_results[idx] = ToolMessage(
-                        content="[SEARCH_BUDGET] 每轮联网搜索上限 1 次，该检索未执行。",
+                        content="[WEB_BUDGET_EXHAUSTED] 联网检索预算已用尽（仅第一轮允许 1 次）。"
+                                "不要再尝试调用 deepseek_web_search；"
+                                "基于已有本地证据收尾，或在总结论中如实声明联网信息缺口。",
                         tool_call_id=tc_id, name="deepseek_web_search",
                         artifact={"main_results": [], "web_results": []})
-                    logger.info(f"[AgentRunner] {agent_name} 每轮联网搜索上限拦截")
+                    logger.info(
+                        f"[AgentRunner] {agent_name} 联网预算拦截"
+                        f"（turn={turn}, used={_web_used}）→ [WEB_BUDGET_EXHAUSTED]")
                     continue
-                _turn_web += 1
+                _web_used += 1
             exec_calls.append((idx, tc))
+
+        # v8.17.17（用户决策）：turn0 强制并发本地+联网——模型若只调 web 未调
+        # rag（实测 supervisor goal 常写"仅联网检索"、retrieve-agent 跟随只联网，
+        # 本地库内容被跳过），自动补发一个本地检索，保证两路证据并行进入回执。
+        if (agent_name == "retrieve-agent" and turn == 0 and exec_calls
+                and any(_make_tool_call_dict(_tc2).get("name") == "deepseek_web_search"
+                        for _, _tc2 in exec_calls)
+                and not any(_make_tool_call_dict(_tc2).get("name") == "citrus_rag_search"
+                            for _, _tc2 in exec_calls)):
+            _auto_q = next(
+                (str(_make_tool_call_dict(_tc2).get("args", {}).get("query", "") or "")
+                 for _, _tc2 in exec_calls
+                 if _make_tool_call_dict(_tc2).get("name") == "deepseek_web_search"),
+                "")
+            if _auto_q:
+                import uuid as _uuid
+                _auto_id = f"rag-auto-{_uuid.uuid4().hex[:8]}"
+                exec_calls.append((
+                    len(response.tool_calls) + 1000,
+                    {"name": "citrus_rag_search",
+                     "args": {"query": _auto_q[:200]},
+                     "id": _auto_id},
+                ))
+                logger.info(
+                    f"[AgentRunner] {agent_name} turn0 仅联网 → 自动补发本地检索"
+                    f"（query={_auto_q[:60]}… 兜底并发）")
 
         t_tool = time.perf_counter()
         try:
@@ -586,12 +624,18 @@ async def run_agent(
                     pass
             break
 
-        # 按原始调用顺序合并执行结果与去重占位（INV-01 配对保持）
+        # 按原始调用顺序合并执行结果与去重占位（INV-01 配对保持）；
+        # v8.17.17: 自动补发条目 idx 超界 → 收集到 extra_results 单独处理
         tool_results: list = [None] * len(response.tool_calls)
+        extra_results: list = []
         for (idx, _tc), tr in zip(exec_calls, exec_results):
-            tool_results[idx] = tr
+            if 0 <= idx < len(tool_results):
+                tool_results[idx] = tr
+            else:
+                extra_results.append(tr)
         for idx, tr in placeholder_results.items():
-            tool_results[idx] = tr
+            if 0 <= idx < len(tool_results):
+                tool_results[idx] = tr
         rag_search_count += sum(
             1 for _, tc in exec_calls
             if _make_tool_call_dict(tc).get("name") == "citrus_rag_search")
@@ -655,6 +699,27 @@ async def run_agent(
                     tc_id,
                     summary=_summary,
                 )
+            except Exception:
+                pass
+
+        # v8.17.17: 自动补发结果（本 turn 的独立 ToolMessage）——入消息、收集证据、推前端
+        for _xr in extra_results:
+            try:
+                messages.append(_xr)
+                _xart = getattr(_xr, "artifact", {}) or {}
+                if isinstance(_xart, dict):
+                    collected_artifacts["main_results"].extend(
+                        _xart.get("main_results", []))
+                    collected_artifacts["web_results"].extend(
+                        _xart.get("web_results", []))
+                _xtext = str(getattr(_xr, "content", "") or "")[:200]
+                logger.info(f"[AgentRunner] {agent_name} 自动补发结果入消息"
+                            f"（{_xtext[:60]}…）")
+                try:
+                    from src.core.progress_bus import emit_tool_result as _etr
+                    _etr("citrus_rag_search", _xtext, "rag-auto", summary="本地检索（并发兜底）")
+                except Exception:
+                    pass
             except Exception:
                 pass
 

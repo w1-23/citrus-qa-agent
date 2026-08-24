@@ -848,6 +848,7 @@ class SessionManager:
 
     def get_evidence_refs(self, session_id: str, limit: int = 20) -> list:
         """v8.4.6 F2: 历史证据引用条目（前端侧栏 historical 面板）。
+        v8.17.17: 查询覆盖最近 10 轮（原 4）+ web 条目带 url 链接。
 
         返回最近若干轮证据账本的去重条目（doi/title/year/score/chunk_id），
         ref_id=H1..Hn；基于 [历史检索证据] 作答时侧栏不再为空。
@@ -858,7 +859,7 @@ class SessionManager:
                 conn.row_factory = sqlite3.Row
                 rows = conn.execute(
                     "SELECT evidence_json FROM session_evidence "
-                    "WHERE session_id=? ORDER BY id DESC LIMIT 4",
+                    "WHERE session_id=? ORDER BY id DESC LIMIT 10",
                     (session_id,)).fetchall()
         except Exception as e:
             logger.debug(f"[SessionManager] get_evidence_refs failed: {e}")
@@ -886,6 +887,8 @@ class SessionManager:
                     "type": "historical",
                     "source": str(e.get("source", "rag") or "rag"),   # v8.15: 历史证据保留来源徽标
                     "doi": doi or "N/A",
+                    # v8.17.17: web 历史条目保留 URL（原存于 chunk_id，前端可跳转）
+                    "url": str(e.get("url") or "")[:300],
                     "title": title,
                     "year": str(e.get("year", "")),
                     "score": e.get("score", 0) or 0,

@@ -10,6 +10,7 @@
 """
 import sys
 import os
+import inspect as _inspect
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -68,11 +69,11 @@ def test_v8153_evidence_report_web_unavailable():
     check("熔断提示下证据完整", "[1]" in broke and "[RAG]" in broke, broke)
 
 
-# ── F-15.3-3 推理控制（配置默认不发送参数，off 时接线 thinking:disabled）──
+# ── F-15.3-3 推理控制（v8.17.17: reasoning_mode=off，retrieve-agent 关思维链）──
 def test_v8153_reasoning_mode():
-    print("[VF-11] model.reasoning_mode 接线")
-    check("默认值 = default（不发送任何参数）",
-          getattr(settings, "MODEL_REASONING_MODE", "default") == "default")
+    print("[VF-11] model.reasoning_mode 接线（v8.17.17 = off）")
+    check("默认值 = off（用户决策：检索决策关思维链）",
+          getattr(settings, "MODEL_REASONING_MODE", "default") == "off")
     from src.core.llm_pool import get_llm
 
     llm_off = get_llm("t-model", "k-1", "https://x", max_tokens=64, thinking_off=True)
@@ -85,6 +86,12 @@ def test_v8153_reasoning_mode():
     # 同参数复用同一实例（进程级复用不回退）
     llm_off2 = get_llm("t-model", "k-1", "https://x", max_tokens=64, thinking_off=True)
     check("同参数复用实例", llm_off2 is llm_off)
+    # v8.15.3: retrieve-agent 接线（agent_runner thinking_off=...=="off"）
+    from src.core import agent_runner as ar
+    ar_src = _inspect.getsource(ar)
+    check("retrieve-agent 接线 reasoning_mode==off → thinking_off",
+          'agent_name in ("retrieve-agent",)' in ar_src
+          and 'MODEL_REASONING_MODE' in ar_src)
 
 
 # ── F-15.3-4 联网失败详情（HTTP 状态码 / 超时分支）─────────────────
@@ -154,12 +161,12 @@ def test_v8153_prompt_mechanisms():
           "政府工作报告" in ra and "最新新闻" in ra)
     check("retrieve-agent 早停阈值规则(通过≤2/过滤≥50%)",
           "通过 ≤2 条" in ra and "过滤占比 ≥50%" in ra)
-    # v8.17.15: 草稿层删除——retrieve-agent 重新可调 deepseek_web_search（每轮 ≤1 次）
-    check("retrieve-agent 允许联网调用（v8.17.15，每轮≤1 次）",
-          "deepseek_web_search" in ra and "最多调用 1 次" in ra
-          and "禁止调用" not in ra)
+    # v8.17.17: 联网仅第 1 轮 1 次（用户决策）——提示词同步
+    check("retrieve-agent 允许联网（v8.17.17，仅第 1 轮 1 次）",
+          "deepseek_web_search" in ra and "全程仅第 1 轮允许调用 1 次" in ra)
+    check("retrieve-agent 无「禁止调用」", "禁止调用" not in ra)
     check("retrieve-agent 联网=goal 驱动",
-          "query=goal" in ra and "每轮" in ra)
+          "query=goal" in ra and "[WEB_BUDGET_EXHAUSTED]" in ra)
     check("supervisor 含覆盖表+自审", "数据源覆盖边界与检索前自审" in dg)
     check("supervisor 含检索后自审(引用对齐)", "检索后自审" in dg and "引用对齐" in dg)
     check("supervisor 含证据来源仲裁规则", "证据来源仲裁与引用规则" in dg)

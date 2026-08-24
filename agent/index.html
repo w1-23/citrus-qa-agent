@@ -2755,8 +2755,8 @@ async function sendMsg(isFollowUp) {
     h += '<div class="citation-header"><span class="' + b + '">[' + escapeHtml(item.ref_id) + ']</span>';
     h += '<span class="src-badge ' + sm.cls + '">' + escapeHtml(sm.tag) + ':</span>';
     h += '<span class="citation-score">' + escapeHtml(sl) + '</span></div>';
-    // 链接：web→URL；UCR（多无 DOI）→显示登记号文本；其余→DOI
-    if (item.type === 'web' && item.url) {
+    // 链接：web/historical→URL；UCR（多无 DOI）→显示登记号文本；其余→DOI
+    if ((item.type === 'web' || item.type === 'historical') && item.url) {
       h += '<a href="' + escapeHtml(item.url) + '" target="_blank" class="citation-doi" onclick="event.stopPropagation()">' + escapeHtml(item.url) + '</a>';
     } else if (isUcr && item.registry_id) {
       h += '<div class="citation-doi" style="color:var(--accent)">登记号: ' + escapeHtml(item.registry_id) + '</div>';
