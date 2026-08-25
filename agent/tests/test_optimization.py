@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """性能优化回归（v8.3.1）:
-  ① academic_search min_keep=3（治因：打断"全丢→换词→再丢"空转）
+  ① academic_search 全链删除后残留检查（v9.2）
   ② supervisor ≤2 retrieve + retrieve 单轮 ≤2 工具（止血，BUDGET_LIMIT 告知）
   ③ write-agent max_tokens 12000 + prompt 分块（治截断）
   ④ write 结果回显预览 + 假引用移除
@@ -25,14 +25,13 @@ def check(name, cond, detail=""):
     print(f"  {'PASS' if cond else 'FAIL'}  {name}  {detail}")
 
 
-def test_min_keep():
-    print("[①] academic_search min_keep")
+def test_no_academic_remnant():
+    print("[①] academic_search 全链删除后的归因/残留检查")
     src = open(os.path.join(BASE, 'src', 'tools', 'search.py'), encoding='utf-8').read()
-    check("含 min_keep=3", "min_keep=3" in src)
-    check("全丢时保留 top3", "deduped[:3]" in src)
-    check("非柑橘标注", "非柑橘相关，仅供参考" in src)
-
-    # 行为模拟: citrus filter 全丢场景
+    check("无 academic_search 残留", "academic_search" not in src)
+    check("无学术源 API 常量", "S2_API" not in src and "CROSSREF_API" not in src
+          and "PUBMED_" not in src and "OPALEX" not in src)
+    # 行为模拟: citrus filter 纯函数（pdf_read 链路保留）
     import sys as _s
     _s.path.insert(0, BASE)
     from src.tools.search import _is_citrus_related
@@ -63,9 +62,6 @@ def test_reason_feedback():
     check("阈值拦截归因 threshold_blocked", "threshold_blocked" in ret and "threshold_blocked" in search)
     check("无匹配归因 no_match", '"no_match"' in ret or "'no_match'" in ret)
     check("RAG 空结果附建议(换特异词)", "换更特异的柑橘术语" in search)
-    check("RAG 空结果附建议(换源)", "academic_search 学术源补充" in search)
-    check("academic 网络失败回传", "[ERR_NETWORK] 学术源请求失败" in search and "source_errors" in search)
-    check("academic 空结果附建议", "换更特异的英文关键词" in search)
     check("_classify_error 补建议策略", "建议: " in reg and "pip install" in reg)
     check("write-agent 归因要求", "结果归因" in open(os.path.join(BASE, 'src', 'prompts', 'source', '05_academic_writing_common.md'), encoding='utf-8').read())
     check("analyze-agent 归因要求", "结果归因" in open(os.path.join(BASE, 'src', 'prompts', 'source', '08_data_analysis_experiment.md'), encoding='utf-8').read())
@@ -116,7 +112,7 @@ def test_write_preview():
 
 
 if __name__ == "__main__":
-    test_min_keep()
+    test_no_academic_remnant()
     test_budget_removed()
     test_reason_feedback()
     test_write_token()

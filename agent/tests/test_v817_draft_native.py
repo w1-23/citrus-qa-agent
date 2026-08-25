@@ -121,8 +121,7 @@ def test_v81715_web_back_in_agent():
     check("retrieve-agent 白名单无联网工具（根除只联网不本地）",
           "deepseek_web_search" not in names, str(names))
     check("白名单含本地检索", "citrus_rag_search" in names)
-    _aca = settings.ACADEMIC_ENABLED
-    check("学术源随门控（默认关）", ("academic_search" not in names) == (not _aca))
+    check("白名单无 academic 工具（v9.2 已全链删除）", "academic_search" not in names)
 
     ar_src = _inspect.getsource(ar)
     check("agent_runner 不再持有联网预算/熔断（v9.1 迁移至工具层）",

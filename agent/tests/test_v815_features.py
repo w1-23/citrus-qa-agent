@@ -31,11 +31,9 @@ def _with(attr, val):
     return lambda: setattr(settings, attr, old)
 
 
-# ── F-15-1 配置默认值（学术联网关 / 缓存开 / 联网的部署展示默认）─────
+# ── F-15-1 配置默认值（缓存开 / 联网的部署展示默认）─────────────
 def test_v815_config_defaults():
     print("[VF-1] v8.15 配置默认值")
-    check("ACADEMIC_ENABLED 默认关", settings.ACADEMIC_ENABLED is False)
-    check("ACADEMIC_SOURCES 默认空", settings.ACADEMIC_SOURCES == [])
     check("RAG_CACHE_ENABLED 默认开", settings.RAG_CACHE_ENABLED is True)
     check("RAG_CACHE_SIZE=300", settings.RAG_CACHE_SIZE == 300)
     check("RAG_CACHE_TTL_HOURS=24", settings.RAG_CACHE_TTL_HOURS == 24)
@@ -68,60 +66,34 @@ def test_v815_src_of():
     check("SOURCE_ORDER 前端分组顺序", list(SOURCE_ORDER) == ["rag", "ucr", "web", "historical"])
 
 
-# ── F-15-3 工具注册门控（academic 随开关；deepseek_web 始终注册）────────
+# ── F-15-3 工具注册（academic 全链删除；deepseek_web 始终注册）────────
 def test_v815_tool_registry_gating():
-    print("[VF-3] 工具注册门控")
+    print("[VF-3] 工具注册")
     from src.tools.registry import get_tool_spec, init_tool_registry
     from src.core import agent_runner as ar
 
-    _aca = settings.ACADEMIC_ENABLED
-    try:
-        # 场景 A：学术关闭默认态
-        settings.ACADEMIC_ENABLED = False
-        init_tool_registry()
-        check("学术工具未注册", get_tool_spec("academic_search") is None)
-        check("全文工具未注册", get_tool_spec("fetch_fulltext") is None)
-        check("本地检索仍注册", get_tool_spec("citrus_rag_search") is not None)
-        # v8.15: 联网搜索工具始终注册（前端开关是总开关，不在注册层剔除）
-        check("联网搜索工具始终注册", get_tool_spec("deepseek_web_search") is not None)
-        # v9.1: 联网移出 retrieve-agent（独立 web-agent 并行）——白名单仅本地
-        names = ar._resolve_tool_names("retrieve-agent")
-        check("retrieve-agent 白名单无联网工具（v9.1 架构）",
-              "deepseek_web_search" not in names and "citrus_rag_search" in names,
-              str(names))
-
-        # 场景 B：学术开启恢复
-        settings.ACADEMIC_ENABLED = True
-        init_tool_registry()
-        check("学术工具恢复注册", get_tool_spec("academic_search") is not None)
-        check("全文工具恢复注册", get_tool_spec("fetch_fulltext") is not None)
-        names2 = ar._resolve_tool_names("retrieve-agent")
-        expect = ["citrus_rag_search", "academic_search", "fetch_fulltext"]
-        check("retrieve-agent 工具列表（学术开，v9.1 无联网）",
-              names2 == expect, str(names2))
-    finally:
-        settings.ACADEMIC_ENABLED = _aca
-        init_tool_registry()
+    init_tool_registry()
+    # v9.2: academic_search/fetch_fulltext 全链删除——注册表与白名单均不应存在
+    check("academic_search 未注册（已删除）", get_tool_spec("academic_search") is None)
+    check("fetch_fulltext 未注册（已删除）", get_tool_spec("fetch_fulltext") is None)
+    check("本地检索仍注册", get_tool_spec("citrus_rag_search") is not None)
+    # v8.15: 联网搜索工具始终注册（前端开关是总开关，不在注册层剔除）
+    check("联网搜索工具始终注册", get_tool_spec("deepseek_web_search") is not None)
+    # v9.1: 联网移出 retrieve-agent（独立 web-agent 并行）——白名单仅本地
+    names = ar._resolve_tool_names("retrieve-agent")
+    check("retrieve-agent 白名单仅本地（v9.1/9.2 架构）",
+          names == ["citrus_rag_search"], str(names))
 
 
 # ── F-15-4 工具级 DISABLED 守卫（请求 contextvar 短路）───────────────
 def test_v815_tool_guards():
     print("[VF-4] 工具关闭守卫")
-    from src.tools.search import academic_search
-    from src.tools.fulltext import fetch_fulltext
     from src.tools.deepseek_web import deepseek_web_search
     from src.core.tracing import set_web_search_enabled, web_search_enabled
 
-    _aca = settings.ACADEMIC_ENABLED
     try:
-        settings.ACADEMIC_ENABLED = False
         # 联网开关（请求 contextvar）默认关闭 → deepseek_web_search 短路
         set_web_search_enabled(False)
-        c, a = academic_search.func("citrus huanglongbing 2025")
-        check("academic_search 短路 [DISABLED]", isinstance(c, str) and c.startswith("[DISABLED]"))
-        check("academic_search artifact 双键空", a == {"main_results": [], "web_results": []}, str(a))
-        c2, a2 = fetch_fulltext.func("10.1038/nature25447", "hlb titer")
-        check("fetch_fulltext 短路 [DISABLED]", c2.startswith("[DISABLED]"))
         c3, a3 = deepseek_web_search.func("最新柑橘品种")
         check("deepseek_web_search 开关关 → [DISABLED]", c3.startswith("[DISABLED]"))
         check("deepseek_web_search artifact 空", a3 == {"main_results": [], "web_results": []})
@@ -132,7 +104,6 @@ def test_v815_tool_guards():
         set_web_search_enabled(False)
         check("web_search_enabled 复位 False", web_search_enabled() is False)
     finally:
-        settings.ACADEMIC_ENABLED = _aca
         set_web_search_enabled(False)
 
 

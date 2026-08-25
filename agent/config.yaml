@@ -26,14 +26,6 @@ retrieval:
   rag_cache_size: 300            # LRU 上限（条）
   rag_cache_ttl_hours: 24        # 过期时间（小时）
 
-# 学术搜索配置（CrossRef/PubMed/Semantic Scholar/OpenAlex）
-# v8.15: 默认关闭联网学术检索（enabled: false）——PubMed 结果质量差（esummary 无摘要，
-# 模型易"补脑"）且每次检索增加 5~12s 网络等待。代码与工具保留不删，重开只需 enabled: true。
-academic_search:
-  enabled: false         # 总开关：false = academic_search/fetch_fulltext 不注册进工具列表
-  enabled_sources: []    # 保留：["pubmed"] 等；enabled=false 时忽略。重开时按需填回
-  timeout_per_source: 5  # 单源超时秒数
-
 # ── 联网搜索（v8.15，DeepSeek 原生 Responses API web_search tool）──
 # 「联网」开关在前端（输入框左下），由用户逐条开启/关闭，随请求下发到后端：
 # 前端开 → 本次请求可联网（DeepSeek 自主决定何时检索、不限制网站），引用带网址
@@ -253,28 +245,10 @@ subagents:
 light:
   max_turns: 2                   # light 模式 supervisor 最大轮次（v8.3.3 接线）
 
-# ── Tool Tags (Agent tool 标签系统) ──
-tool_tags:
-  rag: [citrus_rag_search]
-  analysis_stat: [statistical_analysis, experimental_design]
-  file_io: [read_local_file, pdf_read]
-  web: [academic_search]
-  fulltext: [fetch_fulltext]
-  agent: [call_specialist]
-  orchestrator_tools: [call_specialist]
-
 # ── Tool Registry (YAML 注册替代代码注册) ──
 tools:
   registrations:
     - name: citrus_rag_search
-      category: rag
-      readonly: true
-      concurrency_key: rag
-    - name: academic_search
-      category: web
-      readonly: true
-      concurrency_key: web
-    - name: fetch_fulltext
       category: rag
       readonly: true
       concurrency_key: rag

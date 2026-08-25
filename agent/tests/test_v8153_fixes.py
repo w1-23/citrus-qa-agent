@@ -53,22 +53,6 @@ def test_v8153_rag_stats_note():
     check("同查询统计正常输出", match != "" and "相关性低" in match, match)
 
 
-# ── F-15.3-2 确定性回执的联网熔断提示 ──────────────────────────────
-def test_v8153_evidence_report_web_unavailable():
-    print("[VF-10] build_evidence_report 联网熔断提示")
-    from src.core.agent_runner import build_evidence_report
-
-    arts = {"main_results": [{"title": "P1", "doi": "10.1/x", "year": 2023, "text": "body"}],
-            "web_results": []}
-    base = build_evidence_report(arts, "citrus hlb", 2)
-    check("未熔断默认无提示", "已标记不可用" not in base and "⚠" not in base)
-    broke = build_evidence_report(arts, "citrus hlb", 2, web_unavailable=True)
-    check("熔断后回执明示联网不可用", "⚠ 联网搜索本次请求已标记不可用" in broke, broke)
-    check("熔断提示含不再重试语义", "未再重试" in broke and "如实声明缺口" in broke)
-    # 熔断提示不应影响正常证据条目
-    check("熔断提示下证据完整", "[1]" in broke and "[RAG]" in broke, broke)
-
-
 # ── F-15.3-3 推理控制（v8.17.17: reasoning_mode=off；v8.17.19: extra_body 下发关闭字段）──
 def test_v8153_reasoning_mode():
     print("[VF-11] model.reasoning_mode 接线（v8.17.19 = off，extra_body 通道）")
@@ -136,19 +120,6 @@ def test_v8153_web_failure_details():
     finally:
         dw.requests = old
         set_web_search_enabled(False)
-
-
-# ── F-15.3-5 联网失败熔断状态机（_web_streak_step 纯函数）──────────
-def test_v8153_web_streak_state_machine():
-    print("[VF-13] 联网失败熔断状态机")
-    from src.core.agent_runner import _web_streak_step
-
-    check("[ERR_NETWORK] 失败 +1", _web_streak_step(0, "[ERR_NETWORK] 调用失败") == 1)
-    check("连续失败累计", _web_streak_step(1, "[ERR_EMPTY] 无内容") == 2)
-    check("熔断占位 [ERR] 不计不重置", _web_streak_step(2, "[ERR] 联网搜索已连续失败…") == 2)
-    check("[DISABLED] 清零", _web_streak_step(2, "[DISABLED] 联网搜索未开启") == 0)
-    check("成功结果清零", _web_streak_step(2, "[ToolResult] deepseek_web_search…") == 0)
-    check("空内容清零", _web_streak_step(1, "") == 0)
 
 
 # ── F-15.3-6 提示词机制回归（防未来清理误删 v8.15.3 机制标记）──────

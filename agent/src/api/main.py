@@ -644,7 +644,6 @@ async def runtime_config():
         # v8.5.0 开源版: 只暴露"是否已配置"，永不回传 key 本身
         "has_api_key": bool(settings.RESOLVED_MAIN_API_KEY),
         # v8.15: 数据源开关状态（前端据此动态显示欢迎语/联网按钮可用性）
-        "academic_enabled": bool(settings.ACADEMIC_ENABLED),
         "web_search": {
             "enabled": bool(settings.WEB_SEARCH_ENABLED),
             # v8.15: provider 纯信息展示；启用时一律走 DeepSeek Responses 原生 web_search。

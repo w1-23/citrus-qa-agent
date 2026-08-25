@@ -14,7 +14,7 @@ _CARDS: List[dict] = [
      "prompt": "用citrus_rag_search对本地柑橘文献库+UCR品种库并行检索多个角度，不串行等待。检索英文关键词。"},
     {"id": "retrieval_002", "type": "retrieval", "name": "高引优先检索",
      "description": "本地检索优先高覆盖高质量文献",
-     "prompt": "本地检索时优先采信rerank分数高、含具体机制/数值的文献；联网学术检索（academic_search）默认关闭时不要臆造外源文献。"},
+     "prompt": "本地检索时优先采信rerank分数高、含具体机制/数值的文献；联网检索未开启时不要臆造外源文献。"},
     {"id": "retrieval_003", "type": "retrieval", "name": "时效优先检索",
      "description": "优先获取近3年文献",
      "prompt": "检索时添加年份限定词(recent/2022-2025)，优先获取近3年最新文献。如无结果再放宽年限。"},

@@ -90,12 +90,6 @@ class Settings(BaseSettings):
     RRF_WEIGHT_HYDE_DENSE: float = Field(default_factory=lambda: _yaml_val("retrieval", "rrf_weights", "hyde_dense", default=1.0))
     RRF_WEIGHT_BM25: float = Field(default_factory=lambda: _yaml_val("retrieval", "rrf_weights", "bm25", default=1.0))
 
-    # Academic search settings
-    ACADEMIC_SOURCES: list = Field(default_factory=lambda: _yaml_val("academic_search", "enabled_sources", default=["crossref", "pubmed"]))
-    ACADEMIC_TIMEOUT: int = Field(default_factory=lambda: _yaml_val("academic_search", "timeout_per_source", default=8))
-    # v8.15: 联网学术检索总开关（默认关闭——质量差+延迟高；工具与代码保留不删，重开只改 config）
-    ACADEMIC_ENABLED: bool = Field(default_factory=lambda: _yaml_val("academic_search", "enabled", default=False))
-
     # v8.15: 查询级结果缓存（citrus_rag_search 全链路；键=规范化query+HyDE开关+语料指纹）
     RAG_CACHE_ENABLED: bool = Field(default_factory=lambda: _yaml_val("retrieval", "rag_cache_enabled", default=True))
     RAG_CACHE_SIZE: int = Field(default_factory=lambda: _yaml_val("retrieval", "rag_cache_size", default=300))
@@ -149,7 +143,7 @@ class Settings(BaseSettings):
     PERMISSION_WAIT_SEC: int = Field(default_factory=lambda: _yaml_val("permission", "wait_sec", default=90))
 
     # ── Version (v8.4.5: 版本单源——UI/健康检查/文档以此为准) ──
-    VERSION: str = "8.14.1"
+    VERSION: str = "9.3.0"
 
     # ── Context Engineering (阶段1: 静态前缀灰度开关) ──
     # true = SystemMessage 字节级稳定（format 指南/策略卡片/skills 移出前缀，

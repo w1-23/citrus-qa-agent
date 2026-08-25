@@ -1,5 +1,5 @@
-﻿# ============================================================
-#  Citrus QA Agent 发布打包（v8.14.1）
+# ============================================================
+#  Citrus QA Agent 发布打包（v9.3.0）
 #  ------------------------------------------------------------
 #  用法:
 #    powershell -File pack_release.ps1                # 主包（代码，~2MB）
@@ -17,7 +17,7 @@ param([switch]$IncludeModels, [switch]$IncludeData, [switch]$CorpusOnly,
 
 $ErrorActionPreference = 'Stop'
 $Root = $PSScriptRoot
-$Version = '8.14.1'
+$Version = '9.3.0'
 $CorpusVersion = '8.13.0'   # 语料附件归属 Release（旧卷 1-3 原地不动，增量卷 4 挂此版本，文件名用此版本）
 $Dist = Join-Path $Root 'dist'
 $Suffix = $(if ($IncludeModels) { '-full' } else { '' }) + $(if ($IncludeData) { '-data' } else { '' })

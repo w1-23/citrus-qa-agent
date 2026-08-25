@@ -167,6 +167,16 @@ def main():
                 print(f"    ⚠ 索引创建失败（flat 扫描兜底）: {e}")
         else:
             table.add(rows)
+            # v9.2 审计修正: 追加路径同样保证索引存在（旧表/手工建表无索引时
+            # 升空到 flat 扫描；与 reindex_lance.py 与新建路径同参数幂等）
+            try:
+                if not table.list_indices():
+                    table.create_index(metric="cosine", index_type="IVF_HNSW_FLAT",
+                                       num_partitions=64, m=16, ef_construction=200,
+                                       replace=True)
+                    print(f"    ⚠ 表 [{batch}] 原无索引，已补建 IVF_HNSW_FLAT")
+            except Exception as e:
+                print(f"    ⚠ 索引检查/创建失败（flat 扫描兜底）: {e}")
         print(f"    ✓ LanceDB 表 [{batch}] 现有 {table.count_rows()} 行")
     else:
         from qdrant_client import QdrantClient

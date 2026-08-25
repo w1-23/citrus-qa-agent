@@ -531,9 +531,6 @@ def test_retrieve_budget_and_convergence():
                  "args": {"query": f"retrieval angle {i} round {self._turn} "
                                    f"specific {self._turn * 10 + i}"}}
                 for i in range(3)
-            ] + [
-                {"id": "a1", "name": "academic_search", "args": {"query": "web angle"}},
-                {"id": "a2", "name": "academic_search", "args": {"query": "web angle 2"}},
             ])
 
     class FakeChat2:
@@ -565,7 +562,6 @@ def test_retrieve_budget_and_convergence():
                         for i in range(1, n_items + 1)
                     ]}))
             else:
-                state["aca"] += 1
                 msgs.append(ToolMessage(content="ok", tool_call_id=tc["id"],
                                         name=name, artifact={}))
         return msgs
@@ -585,12 +581,11 @@ def test_retrieve_budget_and_convergence():
         ar.PartitionedToolNode.execute_tools = fake_exec
         pool.get_llm = lambda **kw: FakeChat2(**kw)
 
-        # A) 预算: 每轮 3 rag 请求 → 只执行 2；academic 每轮只执行 1
+        # A) 预算: 每轮 3 rag 请求 → 只执行 2
         state.update(rag=0, aca=0, turns=0, same_doi=False)
         r = _run()
         check("每轮 rag 上限 2（3 轮共 6）", state["rag"] == 6, f"rag={state['rag']}")
         check("请求级 rag 预算 ≤6", state["rag"] <= 6, f"rag={state['rag']}")
-        check("每轮 academic 上限 1（3 轮共 3）", state["aca"] == 3, f"aca={state['aca']}")
         check("回执含预算拦截说明", "SEARCH_BUDGET" in r.get("result", ""),
               "result 未含预算说明")
 
