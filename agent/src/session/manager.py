@@ -26,6 +26,10 @@ from langchain_core.messages import (
 
 from src.config import PROJECT_ROOT
 
+# v9.2 CON-8: 统一连接工厂/建表收敛至 src/core/db（WAL + busy_timeout=30s 口径
+# 与 v8.13 SQL-1 逐位一致；原 manager/memory 双份 _connect_db 实现在此收敛）
+from src.core.db import connect_db as _connect_db, ensure_memory_store
+
 logger = logging.getLogger(__name__)
 
 STATE_DIR = PROJECT_ROOT / "state"
@@ -50,33 +54,7 @@ def _get_session_lock(session_id: str) -> threading.Lock:
         return lock
 
 
-def _connect_db(db_path: str):
-    """v8.13 SQL-1: 统一 SQLite 连接工厂——WAL + busy_timeout=30s。
-
-    此前各处裸连接默认 busy_timeout≈5s 且无 WAL：并发写（多请求/多模块
-    共用 sessions.db）锁冲突抛 OperationalError，被宽 except 吞掉 →
-    save_messages/set_checkpoint 静默失败（消息丢失）。统一口径后由 SQLite
-    自身在 30s 窗口内等待锁释放，静默丢失路径关闭。
-
-    journal_mode 切换只在 DELETE→WAL 迁移时需要（持久属性）；库已是 WAL
-    时查询即返回、零开销。需切换时以 2s 快失败（其他连接占用时切换会
-    busy——保持当前模式继续，busy_timeout 已兜底业务写锁）。
-    """
-    import sqlite3
-    conn = sqlite3.connect(db_path, timeout=30)
-    conn.execute("PRAGMA busy_timeout=30000")
-    try:
-        cur_mode = (conn.execute("PRAGMA journal_mode").fetchone() or ("",))[0]
-        if cur_mode and str(cur_mode).lower() != "wal":
-            conn.execute("PRAGMA busy_timeout=2000")
-            try:
-                conn.execute("PRAGMA journal_mode=WAL")
-            except sqlite3.OperationalError:
-                pass
-            conn.execute("PRAGMA busy_timeout=30000")
-    except Exception:
-        pass
-    return conn
+# v9.2 CON-8: 统一连接工厂收敛至 src/core/db.connect_db（见文件顶部 import 注释）
 
 
 def compute_idempotency_key(session_id: str, query: str,
@@ -239,14 +217,8 @@ class SessionManager:
         import sqlite3
         try:
             with _connect_db(self.db_path) as conn:
-                conn.execute(
-                    """CREATE TABLE IF NOT EXISTS memory_store (
-                        session_id TEXT NOT NULL,
-                        key TEXT NOT NULL,
-                        value TEXT NOT NULL,
-                        updated_at TEXT NOT NULL,
-                        PRIMARY KEY (session_id, key))"""
-                )
+                # v9.2 CON-8: memory_store 建表收敛共享常量（core/db）
+                ensure_memory_store(conn)
                 marked = conn.execute(
                     "SELECT COUNT(*) FROM memory_store WHERE key='_synth_purge_v843'"
                 ).fetchone()[0]

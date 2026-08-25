@@ -232,6 +232,38 @@ def test_v92_save_node_shared_core():
           '"chunk_id"' not in eg_norm and '"chunk_id"' not in lg_norm)
 
 
+# ── VF-108 连接工厂/建表收敛（P8: core/db）─────────────────────────
+def test_v92_db_factory_converged():
+    print("[VF-108] _connect_db 双份合一 + memory_store DDL ×4 收敛")
+    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    db_src = open(os.path.join(base, "src/core/db.py"), encoding="utf-8").read()
+    mgr_src = open(os.path.join(base, "src/session/manager.py"), encoding="utf-8").read()
+    mem_src = open(os.path.join(base, "src/guardrails/memory.py"), encoding="utf-8").read()
+
+    check("core/db 统一工厂存在", "def connect_db(db_path: str):" in db_src)
+    check("DDL 单一真源常量", "MEMORY_STORE_DDL" in db_src
+          and "PRIMARY KEY (session_id, key)" in db_src)
+    check("建表助手存在", "def ensure_memory_store(conn) -> None:" in db_src)
+
+    # 两模块不再各自定义 _connect_db，改为别名导入（口径只有一个真源）
+    check("manager 无本地 _connect_db 定义", "def _connect_db(db_path: str):" not in mgr_src)
+    check("memory 无本地 _connect_db 定义", "def _connect_db(db_path: str):" not in mem_src)
+    check("manager 别名导入", "from src.core.db import connect_db as _connect_db" in mgr_src)
+    check("memory 别名导入", "from src.core.db import connect_db as _connect_db" in mem_src)
+
+    # 字面量 DDL 全部收敛（manager 1 处 + memory 3 处 → ensure_memory_store 调用）
+    ddl_lit = "CREATE TABLE IF NOT EXISTS memory_store"
+    check("manager 无 memory_store DDL 字面量", ddl_lit not in mgr_src)
+    check("memory 无 memory_store DDL 字面量", ddl_lit not in mem_src)
+    check("调用点在两模块共 4 处",
+          mem_src.count("ensure_memory_store(conn)") == 3
+          and mgr_src.count("ensure_memory_store(conn)") == 1)
+    # 连接口径锚点（行为不变量 6）
+    check("WAL + busy_timeout=30s 口径保留", "PRAGMA busy_timeout=30000" in db_src
+          and "PRAGMA journal_mode=WAL" in db_src and "PRAGMA busy_timeout=2000" in db_src)
+
+
 # ── 汇总 ──────────────────────────────────────────────────────────
 def _summary():
     print(f"\n[VF-9.2] PASS {len(passed)} / FAIL {len(failed)}"

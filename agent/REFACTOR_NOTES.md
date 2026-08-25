@@ -64,7 +64,7 @@
 | P5 | 高 | expert/light save 节点 | save 节点双图 ~85% 重复（证据账本 light 缺 web 条目、LTM 门槛已漂移） | ✅ 批次5已修（run_save_node 参数化；用户决策：只抽核心，两图行为不变） |
 | P6 | 中 | expert/light supervisor | 消息装配 + LoadedContext 重建 + LLM 客户端装配 + 逐轮预算守卫重复（light 每轮重建 ContextBudget） | 待修 |
 | P7 | 中 | manager.py:794-944 | 证据账本读取器 ×4（build_evidence_block/count_evidence_items/get_evidence_refs/get_evidence_materials）同一模板 | ✅ 批次4已修（_load_evidence_rows 统一读取器） |
-| P8 | 中 | manager.py:53-79 / memory.py:21-41 | _connect_db 逐字重复两份；memory_store DDL ×4 处 | 待修 |
+| P8 | 中 | manager.py:53-79 / memory.py:21-41 | _connect_db 逐字重复两份；memory_store DDL ×4 处 | ✅ 批次6已修（core/db.connect_db + MEMORY_STORE_DDL/ensure_memory_store 单点） |
 | P9 | 中 | context_budget.py:68-84/301-318 | 压缩熔断永久降级（无冷却窗口）+ _compaction_failures 无界增长 | 待修 |
 | P10 | 中 | 全仓 ~25 处 | blog/diag 同构 try/import/except-pass 样板 | 待修（safe_blog/safe_diag） |
 | P11 | 中 | graph 层 ~20 处 | `except Exception: pass` 包裹业务异常（expert 1079 曾掩盖 NameError 数版本） | 待修 |
@@ -77,6 +77,24 @@
 | P18 | 中 | 各层 | 4 组审计确认的次级项：save 节点二合一、消息装配/预算守卫共享、证据账本读取器×4、_connect_db 双份、压缩熔断永久降级 | 待修 |
 
 ## 3. 变更日志
+
+### 批次 6（P8：连接工厂/建表收敛，2026-08-25）
+- 提交：`<BATCH6_HASH>`（待填；回滚点 `a888173`）。
+- **改动**：
+  - 新增 `src/core/db.py`：`connect_db()`（原 manager/memory 双份逐字相同的
+    _connect_db 收敛单点，WAL + busy_timeout=30s + 2s 快失败口径逐位不变）、
+    `MEMORY_STORE_DDL` 常量 + `ensure_memory_store(conn)`（原 4 处字面量 DDL
+    收敛——manager._purge_synth_history ×1 + memory._ensure_ltm_schema/
+    _save_store/clear_session ×3）。
+  - `src/session/manager.py` / `src/guardrails/memory.py`：删除本地 `_connect_db`
+    定义，改顶部别名导入；4 处建表调用改 `ensure_memory_store(conn)`。
+  - 死 import 顺清：`memory.py` 顶层 `import sqlite3`（原仅 _connect_db 用）与
+    typing 全量未用导入删除；`_fetch_ltm_rows` 补局部 `import sqlite3`
+    （原依赖顶层 import，删除后补回局部——与文件其它函数惯例一致）。
+  - 新增 `tests/test_refactor_v92.py` VF-108 锁定收敛（工厂/常量/助手存在、
+    两模块别名导入、无 DDL 字面量、调用点计数、WAL/busy_timeout 锚点）。
+- **验证**：tests 全量 = 230 passed。
+- **回滚点**：单 commit revert 可回 `a888173`。
 
 ### 批次 5（P5：save 节点二合一，2026-08-25）
 - 提交：`251da24`（feature/v8.17-draft-native-ucr；回滚点 `373b6b6`）。

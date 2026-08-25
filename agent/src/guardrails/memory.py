@@ -10,35 +10,17 @@ Memory System — 多类型记忆存储
 import json
 import logging
 import re
-import sqlite3
 import threading
 from datetime import datetime
-from typing import Dict, List, Optional, Set, Tuple
+
+# v9.2 重构清理：顶层 sqlite3（原仅 _connect_db 使用，已收敛至 core/db；
+# 各方法内保留局部 import）与 typing（全文件无类型注解使用）删除
+
+# v9.2 CON-8: 统一连接工厂/建表收敛至 src/core/db（WAL + busy_timeout=30s 口径
+# 与 v8.13 SQL-1 逐位一致；原 manager/memory 双份 _connect_db 实现在此收敛）
+from src.core.db import connect_db as _connect_db, ensure_memory_store
 
 logger = logging.getLogger(__name__)
-
-
-def _connect_db(db_path: str):
-    """v8.13 SQL-1: 统一 SQLite 连接工厂——WAL + busy_timeout=30s。
-
-    与 session/manager._connect_db 同口径：此前裸连接默认 busy_timeout≈5s，
-    与多模块并发共用 sessions.db 时锁冲突被宽 except 吞掉 → 记忆静默丢失。
-    journal_mode 切换以 2s 快失败（库已是 WAL 时查询即返回、零开销）。
-    """
-    conn = sqlite3.connect(db_path, timeout=30)
-    conn.execute("PRAGMA busy_timeout=30000")
-    try:
-        cur_mode = (conn.execute("PRAGMA journal_mode").fetchone() or ("",))[0]
-        if cur_mode and str(cur_mode).lower() != "wal":
-            conn.execute("PRAGMA busy_timeout=2000")
-            try:
-                conn.execute("PRAGMA journal_mode=WAL")
-            except sqlite3.OperationalError:
-                pass
-            conn.execute("PRAGMA busy_timeout=30000")
-    except Exception:
-        pass
-    return conn
 
 
 class MemoryStore:
@@ -148,14 +130,8 @@ class MemoryStore:
             "CREATE INDEX IF NOT EXISTS idx_ltm_fact_key ON ltm_facts(fact_key)")
 
         # 一次性迁移老表 → 新表（幂等：迁移标记行）
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS memory_store (
-                session_id TEXT NOT NULL,
-                key TEXT NOT NULL,
-                value TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (session_id, key))"""
-        )
+        # v9.2 CON-8: memory_store 建表收敛共享常量（core/db）
+        ensure_memory_store(conn)
         migrated = conn.execute(
             "SELECT COUNT(*) FROM memory_store WHERE key='_ltm_migrated_v2'"
         ).fetchone()[0]
@@ -328,6 +304,7 @@ class MemoryStore:
     def _fetch_ltm_rows(self, conn, limit: int = 500, owner_session: str = ""):
         """v8.4: 从 ltm_facts 读取；若新表为空回退老表（迁移前兼容）。
         v8.9 域过滤：本会话域 + 全局高置信（≥0.9）+ 旧数据（无域标记）三类。"""
+        import sqlite3  # v9.2: 原依赖顶层 import（已收敛删除），本函数补局部导入
         conn.row_factory = sqlite3.Row
         if owner_session:
             rows = conn.execute(
@@ -545,14 +522,8 @@ class MemoryStore:
             from src.config import PROJECT_ROOT
             db_path = Path(self.db_path)
             with _connect_db(str(db_path)) as conn:
-                conn.execute(
-                    "CREATE TABLE IF NOT EXISTS memory_store ("
-                    "session_id TEXT NOT NULL, "
-                    "key TEXT NOT NULL, "
-                    "value TEXT NOT NULL, "
-                    "updated_at TEXT NOT NULL, "
-                    "PRIMARY KEY (session_id, key))"
-                )
+                # v9.2 CON-8: memory_store 建表收敛共享常量（core/db）
+                ensure_memory_store(conn)
                 conn.execute(
                     """INSERT OR REPLACE INTO memory_store (session_id, key, value, updated_at)
                        VALUES (?, ?, ?, ?)""",
@@ -570,14 +541,8 @@ class MemoryStore:
             from src.config import PROJECT_ROOT
             db_path = Path(self.db_path)
             with _connect_db(str(db_path)) as conn:
-                conn.execute(
-                    "CREATE TABLE IF NOT EXISTS memory_store ("
-                    "session_id TEXT NOT NULL, "
-                    "key TEXT NOT NULL, "
-                    "value TEXT NOT NULL, "
-                    "updated_at TEXT NOT NULL, "
-                    "PRIMARY KEY (session_id, key))"
-                )
+                # v9.2 CON-8: memory_store 建表收敛共享常量（core/db）
+                ensure_memory_store(conn)
                 conn.execute("DELETE FROM memory_store WHERE session_id = ?", (session_id,))
                 conn.commit()
             logger.info(f"[Memory] 会话 {session_id[:8]}... 记忆已清空")
