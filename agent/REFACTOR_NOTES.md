@@ -72,10 +72,33 @@
 | P13 | 低 | state.py:41 / graph.py:13 | web_search_enabled 写而不读死键；graph.py 未用 logger | 待修 |
 | P14 | 低 | progress_bus.py:55/143-147 | QueueFull 守卫永不触发；get_tool_elapsed 无调用方 | 待修（死代码清理） |
 | P15 | 中 | 前端 index.html:1978-1998 | _citationsRetry 延时重试猜落库时序（根因：spawn 落库与响应流解耦） | 待修（save 完成事件驱动） |
+| P16 | 高 | multi_retriever.py:659 / search.py:480 | rag_stats_note 防串号误杀：last_stats 记 rerank_query（HyDE 主路径=生成段落）≠用户原文，检索早停统计在默认路径永不生效 | ✅ 批次3已修（original_query 接线） |
+| P17 | 高 | expert_graph.py:794-796 | pdf_read 直调 .func(file_path, False) 多传参 → 恒 TypeError 被吞成整答失败，且绕过统一出口 | ✅ 批次3已修（run_tool_checked） |
+| P18 | 中 | 各层 | 4 组审计确认的次级项：save 节点二合一、消息装配/预算守卫共享、证据账本读取器×4、_connect_db 双份、压缩熔断永久降级 | 待修 |
 
 ## 3. 变更日志
 
+### 批次 3（P16+P17：检索统计接线修复 + pdf_read 统一出口，2026-08-25）
+- 提交：`<BATCH3_HASH>`（待填；回滚点 `b779336`）。
+- **改动**：
+  - `src/retrieval/multi_retriever.py`：`search_multi` 新增 `original_query` 入参，
+    `_fuse_rerank_select` 统计归属记录用户原文（`original_query or rerank_query`）；
+    `search()` 单查询路径同步接线。**根因修复**：默认 HyDE 主路径 queries[0]=
+    生成段落 ≠ 用户原文，工具侧 expect_query=用户原文比对恒不等 → 检索早停统计
+    （候选/通过/过滤）被防串号校验误杀（HyDE 关闭时反而生效）；防串号语义保留
+    （不同用户查询取回仍丢弃）。
+  - `src/tools/search.py`：`rag.search_multi(queries, original_query=query)`。
+  - `src/graph/expert_graph.py`：pdf_read 分支改走 `run_tool_checked`（与
+    read_local_file/write_local_file 同出口）——原 `pdf_read_func.func(file_path, False)`
+    多传位置参数（现签名单参）恒 TypeError 且被外层吞成整答失败；现经沙箱/超时/
+    offload，返回内容字符串（artifact 原为惰性字段，下游不消费）。
+  - `tests/test_refactor_v92.py`（新增）：VF-101~105 锁定共享原语字段契约、
+    轨迹同步判重不变量、original_query 接线、pdf_read 统一出口、死代码移除。
+- **验证**：tests 全量 = 227 passed。
+- **回滚点**：单 commit revert 可回 `b779336`。
+
 ### 批次 2（P2+P3：图装配共享原语 + light done 路径根治，2026-08-25）
+- 提交：`b779336`（feature/v8.17-draft-native-ucr，已推送；回滚点 `5beca7a`）。
 - **改动**：
   - `src/core/agent_loop.py`：新增 `build_cited_refs(deduped_main, all_web_results, web_slot=10)`
     （expert/light 40 行双实现收敛为单份，web 槽位参数化 10/5）与
@@ -89,9 +112,13 @@
     删除过期名 `light_synthesize`/`light_react`（v8.3.0 前 light 老节点名）。
     **根因修复**：light 模式 done 事件此前落入 elif 兜底分支——无 citation_info/
     tools_called、job 状态卡 running、request_done 业务日志缺失；现与 expert 对齐。
-- **验证**：tests/test_evidence + test_v815_features + test_light_final + test_batch1
-  + test_batch2 + test_agent_loop = 66 passed（批次后追加回归 35 passed）。
-- **回滚点**：批次 1 之后的新 commit。
+- **同期死代码清理（批次 3 并入此提交）**：`state.py` 删写而不读的
+  `web_search_enabled` 键；`progress_bus.py` 删 `get_tool_elapsed`（全仓零调用）与
+  恒 True 的 `_sse_debug_enabled` 守卫；`graph.py` 删未用 logger/import logging；
+  `main.py` 删未用 import（get_progress_queue/get_tool_elapsed）与 state 写入；
+  `expert_graph.py` 删 `_ltm_chars` 纯噪音 try/except（state.get 对 dict 不抛异常）。
+- **验证**：tests 全量 = 222 passed（含 test_light_final/test_batch1/2/test_agent_loop）。
+- **回滚点**：`b779336` 单 commit revert 即可回到批次 1 后状态。
 
 ### 批次 1（P1：evidence 引用处理去重，2026-08-25）
 - **改动**：

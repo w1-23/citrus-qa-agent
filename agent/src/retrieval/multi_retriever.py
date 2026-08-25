@@ -581,7 +581,8 @@ class MultiBatchRetriever:
                             weights: List[float], stream_labels: List[str],
                             rerank_query: str, mode: str, t0: float,
                             stage_ms: Dict[str, float], n_queries: int = 1,
-                            fallback_query: Optional[str] = None) -> List[Dict]:
+                            fallback_query: Optional[str] = None,
+                            original_query: Optional[str] = None) -> List[Dict]:
         """去重 → RRF → 候选全文 → rerank → 动态阈值 → 空归因 → 日志，返回 passed 证据。
         """
         # 每流独立「分数降序 → 按 global_idx 去重（保留最高分）」
@@ -655,18 +656,27 @@ class MultiBatchRetriever:
         except Exception:
             pass
         # v8.15.3: 候选/通过统计（决策器早停依据：filtered 占比高 → 角度相关性低）。
-        # 附带本次 rerank_query 作防串号（同轮并发检索共享单例，取回时核对 query）
+        # 附带本次 rerank_query 作防串号（同轮并发检索共享单例，取回时核对 query）。
+        # v9.2: 记录 original_query（用户原文）而非 rerank_query——默认 HyDE 主路径
+        # queries[0]=生成段落 ≠ 用户原文，工具侧 expect_query=用户原文比对恒不等，
+        # 早停统计被防串号校验误杀（HyDE 关闭时反而生效）。防串号语义保留：
+        # 取回时仍核对用户查询归属。
         self.last_stats = {"candidates": len(candidates), "passed": len(passed),
-                           "filtered": len(filtered), "query": rerank_query}
+                           "filtered": len(filtered),
+                           "query": original_query or rerank_query}
         return passed
 
-    def search_multi(self, queries: List[str]) -> List[Dict]:
+    def search_multi(self, queries: List[str],
+                     original_query: str = "") -> List[Dict]:
         """多路并发检索。
 
         v8.17 修订：不做检索层来源路由/加权（数据库混合存储无物理分区，两阶段
         路由在架构上不可行）——UCR 优先改由 evidence_report 组装时聚拢置前
         （元数据标记层）+ retrieve-agent Prompt 引导（模型生成检索词倾向 UCR），
         保持各批次融合公平性。
+
+        v9.2: 新增 original_query 入参（用户原文）——统计归属按用户查询记录，
+        修复默认 HyDE 主路径上检索早停统计被防串号校验误杀的问题。
         """
         if not queries:
             return []
@@ -718,10 +728,12 @@ class MultiBatchRetriever:
             t0=_t0,
             stage_ms={"embed": dt_embed, "vector": dt_vector, "bm25": dt_bm25},
             n_queries=len(queries),
+            original_query=original_query,
         )
 
     def search(self, query: str) -> List[Dict]:
-        return self.search_multi([query])
+        # v9.2: 单查询路径同样登记用户原文（保持非 HyDE 路径统计校验不回归）
+        return self.search_multi([query], original_query=query)
 
     def search_hyde(self, original_query: str, hyde_answer: str) -> List[Dict]:
         """HyDE hybrid search: dual dense (original + hyde) + BM25 + RRF + Reranker(original_query).

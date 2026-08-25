@@ -791,10 +791,14 @@ async def _execute_supervisor_tools(*, turn, response, messages,
                 mark_tool_start(tc_id, "pdf_read")
             except Exception:
                 pass
-            from src.tools.search import pdf_read as pdf_read_func
-            file_path = tc_dict["args"].get("file_path", "")
-            content, artifact = await asyncio.to_thread(pdf_read_func.func, file_path, False)
-            sub_result = {"agent": "pdf_read", "result": content or "", "artifacts": artifact or {}}
+            # v9.2: 统一工具出口（同 read_local_file/write_local_file）——原代码
+            # 直调 pdf_read_func.func(file_path, False) 多传一个位置参数，而现签名
+            # 仅 pdf_read(file_path)，恒 TypeError 被外层吞成整答失败；且绕过
+            # 沙箱/超时/offload。registry.run_tool_checked 已处理 content_and_artifact。
+            from src.tools.search import pdf_read as pdf_read_tool
+            from src.tools.registry import run_tool_checked
+            content = await run_tool_checked(pdf_read_tool, tc_dict["args"])
+            sub_result = {"agent": "pdf_read", "result": content or "", "artifacts": {}}
             try:
                 emit_tool_result("pdf_read", str(content)[:100000], tc_id,
                                  summary=f"文献提取完成 ({len(str(content))} 字符)")

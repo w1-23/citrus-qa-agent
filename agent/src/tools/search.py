@@ -430,7 +430,7 @@ def citrus_rag_search(query: str) -> tuple[str, dict]:
                 queries.append(query)
                 logger.info(f"[HyDE] 结构化仅 HyDE 段，补充原始查询保底 → "
                             f"{len(queries)} 路查询")
-            results = rag.search_multi(queries)
+            results = rag.search_multi(queries, original_query=query)
         else:
             results = rag.search(query)
 
