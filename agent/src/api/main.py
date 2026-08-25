@@ -261,12 +261,14 @@ async def chat_v2(req: ChatRequest):
         event_queue: asyncio.Queue = asyncio.Queue()
 
         async def bridge_progress():
+            # v9.2 P4 根治: 事件驱动桥——原 0.3s 轮询（wait_for(timeout=0.3)）带来
+            # 至多 300ms 转发延迟，且是后续 sleep(0.5)/轮询排空时序补丁的根因之一。
+            # 改阻塞 get()：事件即刻转发；任务取消经 CancelledError 传播（finally
+            # 统一 cancel，无泄漏）。
             while True:
                 try:
-                    evt = await asyncio.wait_for(request_queue.get(), timeout=0.3)
+                    evt = await request_queue.get()
                     await event_queue.put(evt)
-                except asyncio.TimeoutError:
-                    continue
                 except asyncio.CancelledError:
                     break
                 except Exception:
@@ -304,6 +306,17 @@ async def chat_v2(req: ChatRequest):
             if observer_connected:
                 await event_queue.put(evt)
 
+        async def flush_bridge() -> None:
+            # v9.2 P4 根治: 确定性排空替代时序补丁（原 done 前 sleep(0.5) 与
+            # finally 10×0.1s 轮询排空）。事件驱动桥下，工具线程返回前已入队的
+            # 事件即刻转发；此处显式把 request_queue 中仍在等待转发的事件一次
+            # 性搬入 event_queue，并让出数轮事件循环吸收并发入队，保证它们
+            # 先于 done / sentinel 到达（done 契约"事件顺序"不变量保持）。
+            for _ in range(3):
+                while not request_queue.empty():
+                    await event_queue.put(request_queue.get_nowait())
+                await asyncio.sleep(0)
+
         async def process_graph():
             # v8.4.11: 注册运行任务（cancel 端点按 job_id 定位取消）
             _running_graph_tasks[job_id] = asyncio.current_task()
@@ -334,7 +347,9 @@ async def chat_v2(req: ChatRequest):
                         if node_name in ("supervisor", "light_supervisor"):
                             ans = output.get("answer", "")
                             if ans:
-                                await asyncio.sleep(0.5)
+                                # v9.2 P4 根治: 排空桥替代原 sleep(0.5) 时序猜
+                                # 测——工具线程已入队的进度事件先于 done 到达
+                                await flush_bridge()
                                 done_payload = {
                                     "session_id": sid,
                                     "answer": ans,
@@ -415,11 +430,9 @@ async def chat_v2(req: ChatRequest):
                 _running_graph_tasks.pop(job_id, None)
                 # v8.17.15: 草稿任务注册表已删除（草稿全链移除，联网回归
                 # retrieve-agent 工具链），此处不再等待草稿——直接关闭连接。
-                # Drain pending bridge events before sending sentinel
-                for _ in range(10):
-                    if request_queue.empty():
-                        break
-                    await asyncio.sleep(0.1)
+                # v9.2 P4 根治: 确定性排空替代原 10×0.1s 轮询排空——桥中遗留
+                # 事件全部先搬到 event_queue，再发 sentinel（事件顺序不变量）
+                await flush_bridge()
                 heartbeat_task.cancel()
                 if observer_connected:
                     await event_queue.put(None)

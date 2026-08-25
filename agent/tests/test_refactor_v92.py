@@ -293,6 +293,22 @@ def test_v92_supervisor_assembly_converged():
     check("light 预算一次构造", "_budget = build_context_budget()" in lg_src)
 
 
+# ── VF-110 SSE 桥竞态根治（P4: 删 sleep/轮询时序补丁）─────────────
+def test_v92_sse_bridge_root_fix():
+    print("[VF-110] SSE 双队列桥事件驱动化 + 确定性排空")
+    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(base, "src/api/main.py"), encoding="utf-8").read()
+    norm = "".join(src.split())
+
+    check("事件驱动桥（阻塞 get，无 0.3s 轮询）",
+          "wait_for(request_queue.get(), timeout=0.3)" not in norm)
+    check("确定性排空助手存在", "asyncdefflush_bridge(" in norm)
+    check("done 前无 sleep 时序猜", "asyncio.sleep(0.5)" not in norm)
+    check("finally 无轮询排空", "range(10)" not in norm)
+    check("done/排空接线", "awaitflush_bridge()" in norm)
+    check("桥阻塞 get 转发", "awaitrequest_queue.get()" in norm)
+
+
 # ── 汇总 ──────────────────────────────────────────────────────────
 def _summary():
     print(f"\n[VF-9.2] PASS {len(passed)} / FAIL {len(failed)}"

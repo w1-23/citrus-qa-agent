@@ -60,7 +60,7 @@
 | P1 | 中 | evidence.py | filter_refs_by_answer 与 renumber_refs 提取逻辑重复，图里 import 已死 | ✅ 批次1已修 |
 | P2 | 高 | expert/light_graph | cited_refs 装配 40 行双实现（web 槽位已漂移 10/5） | ✅ 批次2已修 |
 | P3 | 高 | main.py:331 | light 节点名 "light_synthesize"/"light_react" 过期 → light done 落入兜底分支：丢 citation_info/tools_called、job 永不 completed、request_done 缺失 | ✅ 批次2已修 |
-| P4 | 中 | main.py:334/416-419 | done 前 sleep(0.5) + 10×0.1 轮询排空——双队列桥竞态的补丁式掩蔽 | 待修（根因：await 桥排空） |
+| P4 | 中 | main.py:334/416-419 | done 前 sleep(0.5) + 10×0.1 轮询排空——双队列桥竞态的补丁式掩蔽 | ✅ 批次9已修（桥事件驱动化 + flush_bridge 确定性排空） |
 | P5 | 高 | expert/light save 节点 | save 节点双图 ~85% 重复（证据账本 light 缺 web 条目、LTM 门槛已漂移） | ✅ 批次5已修（run_save_node 参数化；用户决策：只抽核心，两图行为不变） |
 | P6 | 中 | expert/light supervisor | 消息装配 + LoadedContext 重建 + LLM 客户端装配 + 逐轮预算守卫重复（light 每轮重建 ContextBudget） | ✅ 批次8已修（装配/LoadedContext/预算构造/占用率判定共享；LLM 客户端装配已由 llm_pool 覆盖） |
 | P7 | 中 | manager.py:794-944 | 证据账本读取器 ×4（build_evidence_block/count_evidence_items/get_evidence_refs/get_evidence_materials）同一模板 | ✅ 批次4已修（_load_evidence_rows 统一读取器） |
@@ -77,6 +77,25 @@
 | P18 | 中 | 各层 | 4 组审计确认的次级项：save 节点二合一、消息装配/预算守卫共享、证据账本读取器×4、_connect_db 双份、压缩熔断永久降级 | 待修 |
 
 ## 3. 变更日志
+
+### 批次 9（P4：SSE 双队列桥竞态根治，2026-08-25）
+- 提交：`<BATCH9_HASH>`（待填；回滚点 `ea3e241`）。
+- **根因**：bridge_progress 用 0.3s 轮询（wait_for(timeout=0.3)）转发工具事件
+  → 事件在桥内滞留至 300ms；done 前用 sleep(0.5) 猜测"桥已转发完"、finally
+  用 10×0.1s 轮询"排空"——全是时序猜，无法证明事件顺序，且每请求固定 +500ms。
+- **改动**（`src/api/main.py`，事件顺序/done 契约不变量保持）：
+  - 桥事件驱动化：`await request_queue.get()` 阻塞转发（取消经 CancelledError
+    传播，finally 统一 cancel；0.3s 轮询与 TimeoutError 分支删除）。
+  - 新增 `flush_bridge()`：确定性排空——把 request_queue 中在途事件一次性搬入
+    event_queue 并让出数轮事件循环吸收并发入队（事件驱动下通常 1 轮即空）。
+  - done 前 `asyncio.sleep(0.5)` → `await flush_bridge()`（工具线程返回前已入队
+    的进度事件保证先于 done 到达；每请求省 500ms）。
+  - finally 10×0.1s 轮询排空 → `await flush_bridge()` 后再发 sentinel。
+  - 新增 `tests/test_refactor_v92.py` VF-110 锁定（无 0.3s 轮询/无 sleep(0.5)/
+    无 range(10) 轮询、flush_bridge 存在、桥阻塞 get）。
+- **验证**：tests 全量 = 233 passed（注：test_batch2 AG-27 为既有 flaky
+  并发断言，单独复跑稳定通过，与本次改动无关）。
+- **回滚点**：单 commit revert 可回 `ea3e241`。
 
 ### 批次 8（P6：supervisor 装配/预算守卫收敛，2026-08-25）
 - 提交：`c1889aa`（feature/v8.17-draft-native-ucr；回滚点 `ca5f64c`）。
