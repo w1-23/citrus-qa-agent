@@ -79,7 +79,7 @@
 ## 3. 变更日志
 
 ### 批次 7（P9：压缩熔断永久降级根治，2026-08-25）
-- 提交：`<BATCH7_HASH>`（待填；回滚点 `be150aa`）。
+- 提交：`6d4b586`（feature/v8.17-draft-native-ucr；回滚点 `be150aa`）。
 - **改动**（`src/core/context_budget.py`）：
   - 熔断恢复路径不再依赖"从未发生过的 LLM 成功"：新增冷却窗口
     `_COMPACTION_COOLDOWN_SEC=300`——连续失败 ≥3 后 5 分钟内规则式降级，
