@@ -257,7 +257,10 @@ def test_v81717_evidence_web_and_historical():
 
     # manager.get_evidence_refs 最近 10 轮 + url
     sm_src = _inspect.getsource(sm.SessionManager.get_evidence_refs)
-    check("历史引用覆盖最近 10 轮（原 4）", "LIMIT 10" in sm_src)
+    # v9.2 重构：LIMIT 字面量移入共享读取器 _load_evidence_rows，两处任一命中即保序
+    check("历史引用覆盖最近 10 轮（原 4）",
+          "LIMIT 10" in sm_src
+          or "_load_evidence_rows(session_id, 10)" in sm_src)
     check("历史引用保留 url（web 可跳转）", '"url": str(e.get("url") or "")[:300]' in sm_src)
 
     # 前端 historical 链接渲染

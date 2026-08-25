@@ -63,7 +63,7 @@
 | P4 | 中 | main.py:334/416-419 | done 前 sleep(0.5) + 10×0.1 轮询排空——双队列桥竞态的补丁式掩蔽 | 待修（根因：await 桥排空） |
 | P5 | 高 | expert/light save 节点 | save 节点双图 ~85% 重复（证据账本 light 缺 web 条目、LTM 门槛已漂移） | 待修（共享 persist_turn） |
 | P6 | 中 | expert/light supervisor | 消息装配 + LoadedContext 重建 + LLM 客户端装配 + 逐轮预算守卫重复（light 每轮重建 ContextBudget） | 待修 |
-| P7 | 中 | manager.py:794-944 | 证据账本读取器 ×4（build_evidence_block/count_evidence_items/get_evidence_refs/get_evidence_materials）同一模板 | 待修 |
+| P7 | 中 | manager.py:794-944 | 证据账本读取器 ×4（build_evidence_block/count_evidence_items/get_evidence_refs/get_evidence_materials）同一模板 | ✅ 批次4已修（_load_evidence_rows 统一读取器） |
 | P8 | 中 | manager.py:53-79 / memory.py:21-41 | _connect_db 逐字重复两份；memory_store DDL ×4 处 | 待修 |
 | P9 | 中 | context_budget.py:68-84/301-318 | 压缩熔断永久降级（无冷却窗口）+ _compaction_failures 无界增长 | 待修 |
 | P10 | 中 | 全仓 ~25 处 | blog/diag 同构 try/import/except-pass 样板 | 待修（safe_blog/safe_diag） |
@@ -77,6 +77,19 @@
 | P18 | 中 | 各层 | 4 组审计确认的次级项：save 节点二合一、消息装配/预算守卫共享、证据账本读取器×4、_connect_db 双份、压缩熔断永久降级 | 待修 |
 
 ## 3. 变更日志
+
+### 批次 4（P7：证据账本读取器 ×4 收敛，2026-08-25）
+- 提交：`<BATCH4_HASH>`（待填；回滚点 `4b945a4`）。
+- **改动**：
+  - `src/session/manager.py`：新增 `_load_evidence_rows(session_id, limit, …)` 统一
+    读取器（连接/查询/异常面收敛，cols 字面量参数化），`build_evidence_block` /
+    `count_evidence_items` / `get_evidence_refs` / `get_evidence_materials` 改为
+    薄视图层，各自保留消费逻辑（渲染/计数/去重/字段投影）与既有口径
+    （LIMIT 2 / 全表 / 10 轮 / 4 轮、失败日志级别 warning/debug）。
+  - `tests/test_v817_draft_native.py`：源码级 needle 更新（"LIMIT 10" 或
+    `_load_evidence_rows(session_id, 10)` 任一命中，行为不变）。
+- **验证**：tests 全量 = 227 passed（targeted 42 passed）。
+- **回滚点**：本批与第 1 版变更前行为逐字一致，单 commit revert 可回 `4b945a4`。
 
 ### 批次 3（P16+P17：检索统计接线修复 + pdf_read 统一出口，2026-08-25）
 - 提交：`709a684`（feature/v8.17-draft-native-ucr；回滚点 `b779336`）。

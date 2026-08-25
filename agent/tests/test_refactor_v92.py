@@ -176,6 +176,33 @@ def test_v92_dead_code_removed():
     check("graph.py 无未用 logger", "logger = logging" not in graph_src)
 
 
+# ── VF-106 证据账本读取器×4 收敛（P7）──────────────────────────────
+def test_v92_evidence_readers_converged():
+    print("[VF-106] 证据账本读取器 ×4 → _load_evidence_rows")
+    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    mgr_src = open(os.path.join(base, "src/session/manager.py"), encoding="utf-8").read()
+
+    check("统一读取器存在", "def _load_evidence_rows(self, session_id" in mgr_src)
+    for fn, call in [("build_evidence_block", "_load_evidence_rows(session_id,limit,"),
+                     ("count_evidence_items", "_load_evidence_rows(session_id,None)"),
+                     ("get_evidence_refs", "_load_evidence_rows(session_id,10)"),
+                     ("get_evidence_materials", "_load_evidence_rows(session_id,4)")]:
+        # 函数体内转写为委托调用（按缩进块切出函数源段，去空白后做子串校验，
+        # 兼容多行调用排版）
+        seg = mgr_src.split(f"def {fn}(")[1]
+        seg = seg.split("\n    def ")[0]
+        check(f"{fn} 委托统一读取器 ({call})", call in "".join(seg.split()))
+    # 口径锚点仍在（LIMIT 10 轮 / LIMIT 4 轮 / 全表计数 / 渲染列）
+    refs_seg = mgr_src.split("def get_evidence_refs(")[1].split("\n    def ")[0]
+    materials_seg = mgr_src.split("def get_evidence_materials(")[1].split("\n    def ")[0]
+    count_seg = mgr_src.split("def count_evidence_items(")[1].split("\n    def ")[0]
+    block_seg = mgr_src.split("def build_evidence_block(")[1].split("\n    def ")[0]
+    check("refs 保留 10 轮口径", "session_id, 10" in refs_seg)
+    check("materials 保留 4 轮口径", "session_id, 4" in materials_seg)
+    check("count 保留全表口径", "session_id, None" in count_seg)
+    check("block 保留四列渲染", "turn_seq, query, evidence_json, report_text" in block_seg)
+
+
 # ── 汇总 ──────────────────────────────────────────────────────────
 def _summary():
     print(f"\n[VF-9.2] PASS {len(passed)} / FAIL {len(failed)}"
