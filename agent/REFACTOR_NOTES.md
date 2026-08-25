@@ -79,7 +79,7 @@
 ## 3. 变更日志
 
 ### 批次 4（P7：证据账本读取器 ×4 收敛，2026-08-25）
-- 提交：`<BATCH4_HASH>`（待填；回滚点 `4b945a4`）。
+- 提交：`22ed7d6`（feature/v8.17-draft-native-ucr；回滚点 `4b945a4`）。
 - **改动**：
   - `src/session/manager.py`：新增 `_load_evidence_rows(session_id, limit, …)` 统一
     读取器（连接/查询/异常面收敛，cols 字面量参数化），`build_evidence_block` /
