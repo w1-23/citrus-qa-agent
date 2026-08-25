@@ -8,7 +8,6 @@ import re
 import time
 
 from langchain_core.messages import (
-    SystemMessage,
     HumanMessage,
     AIMessage,
     ToolMessage,
@@ -641,6 +640,7 @@ def _guard_supervisor_budget(supervisor_budget, messages, *, turn, max_turns,
     返回 (call_messages, force_reason)：force_reason 为 "budget" 时调用方须就地
     强制收尾；否则 call_messages（含预算占用率 + 软阈值收敛提示）可直接供 LLM。
     """
+    from src.core.context_manager import budget_usage_ratio  # v9.2 P6 共享占用率
     status_msg = _build_status_message(
         turn=turn, max_turns=max_turns, tool_call_count=tool_call_count,
         max_tools_per_turn=max_tools_per_turn, all_main_results=all_main_results,
@@ -648,36 +648,34 @@ def _guard_supervisor_budget(supervisor_budget, messages, *, turn, max_turns,
         tool_names_called=tool_names_called, format_hint=format_hint,
     )
     call_messages = list(messages) + [status_msg]
-    if supervisor_budget is None:
+    # v9.2 P6: 占用率判定收敛共享 budget_usage_ratio（None = budget 缺失/估算异常，
+    # 与原 try/except 吞错返回 call_messages, None 语义一致）
+    ratio = budget_usage_ratio(supervisor_budget, call_messages)
+    if ratio is None:
         return call_messages, None
-    try:
-        est = supervisor_budget.estimate_tokens(call_messages)
-        ratio = est / supervisor_budget.config.max_tokens
-        if ratio >= supervisor_budget.config.hard_threshold:
-            logger.warning(
-                f"[ExpertGraph:supervisor] 上下文占用 {ratio:.1%} ≥ "
-                f"硬阈值 {supervisor_budget.config.hard_threshold:.0%}，强制收尾")
-            return call_messages, "budget"
-        status_msg = _build_status_message(
-            turn=turn, max_turns=max_turns, tool_call_count=tool_call_count,
-            max_tools_per_turn=max_tools_per_turn, all_main_results=all_main_results,
-            used_queries=used_queries, consecutive_failures=consecutive_failures,
-            tool_names_called=tool_names_called, format_hint=format_hint, ratio=ratio,
-        )
+    if ratio >= supervisor_budget.config.hard_threshold:
+        logger.warning(
+            f"[ExpertGraph:supervisor] 上下文占用 {ratio:.1%} ≥ "
+            f"硬阈值 {supervisor_budget.config.hard_threshold:.0%}，强制收尾")
+        return call_messages, "budget"
+    status_msg = _build_status_message(
+        turn=turn, max_turns=max_turns, tool_call_count=tool_call_count,
+        max_tools_per_turn=max_tools_per_turn, all_main_results=all_main_results,
+        used_queries=used_queries, consecutive_failures=consecutive_failures,
+        tool_names_called=tool_names_called, format_hint=format_hint, ratio=ratio,
+    )
+    call_messages = list(messages) + [status_msg]
+    if ratio >= supervisor_budget.config.soft_threshold:
+        logger.warning(
+            f"[ExpertGraph:supervisor] 上下文占用 {ratio:.1%} ≥ "
+            f"软阈值 {supervisor_budget.config.soft_threshold:.0%}")
+        status_msg = HumanMessage(content=(
+            f"{status_msg.content}\n"
+            f"[budget] 上下文占用 {ratio:.1%}（软阈值 "
+            f"{supervisor_budget.config.soft_threshold:.0%}），"
+            f"请尽快收敛输出。"))
         call_messages = list(messages) + [status_msg]
-        if ratio >= supervisor_budget.config.soft_threshold:
-            logger.warning(
-                f"[ExpertGraph:supervisor] 上下文占用 {ratio:.1%} ≥ "
-                f"软阈值 {supervisor_budget.config.soft_threshold:.0%}")
-            status_msg = HumanMessage(content=(
-                f"{status_msg.content}\n"
-                f"[budget] 上下文占用 {ratio:.1%}（软阈值 "
-                f"{supervisor_budget.config.soft_threshold:.0%}），"
-                f"请尽快收敛输出。"))
-            call_messages = list(messages) + [status_msg]
-        return call_messages, None
-    except Exception:
-        return call_messages, None
+    return call_messages, None
 
 
 # v8.13-b5a: expert supervisor 循环骨架·本轮工具轮（预算跳过/检索去重/写序并行/装配截断/熔断）
@@ -1098,29 +1096,17 @@ async def supervisor_node(state: AgentState) -> dict:
         query=query,
     )
 
-    from src.core.context_manager import LoadedContext, build_human_message
-    ctx = LoadedContext(
-        session_id=state.get("session_id", ""),
-        mode="expert",
-        query=query,
-        history_summary=state.get("history_summary"),
-        long_term_memory=state.get("long_term_memory"),
-        resident_cards=state.get("resident_cards"),
-        search_suggestions=state.get("search_suggestions", []),
-        format_hint=format_hint,
-    )
+    from src.core.context_manager import (build_loaded_context,
+                                          assemble_supervisor_messages,
+                                          build_human_message,
+                                          build_context_budget,
+                                          budget_usage_ratio)
+    # v9.2 P6: LoadedContext 构造收敛（expert/light 共用）
+    ctx = build_loaded_context(state, mode="expert", format_hint=format_hint)
     current_human = build_human_message(ctx)
-
-    messages: list = [SystemMessage(content=system_prompt)]
-    history_msgs = list(state.get("messages", []))
-    if history_msgs:
-        messages.extend(history_msgs)
-    # v8.3.8: 历史检索证据块（跨轮复用）——注入在系统与历史之后、本轮问题之前
-    if state.get("history_evidence_block"):
-        messages.append(HumanMessage(content=state["history_evidence_block"]))
-    messages.append(current_human)
-    # v8.3.8: 本轮轨迹起点（save 节点完整持久化含工具配对）
-    trace_start_index = len(messages) - 1
+    # v9.2 P6: 消息装配收敛（System + 历史 + [历史检索证据] + 本轮 human）
+    messages, trace_start_index = assemble_supervisor_messages(
+        system_prompt, state, current_human)
 
     # v8.4: 客户端进程级复用（llm_pool），避免每请求新建 ChatOpenAI/连接池
     from src.core.llm_pool import get_llm as _pool_get_llm
@@ -1145,15 +1131,8 @@ async def supervisor_node(state: AgentState) -> dict:
     consecutive_failures = 0
     max_tools_per_turn = getattr(settings, "SUPERVISOR_MAX_TOOLS_PER_TURN", 2) or 2
     # v8.3.6 预算前移 (规范 2.2.5): 每次模型调用前检查上下文占用（原仅 load 时检查一次）
-    try:
-        from src.core.context_budget import ContextBudget, ContextBudgetConfig
-        supervisor_budget = ContextBudget(ContextBudgetConfig(
-            max_tokens=settings.CONTEXT_BUDGET_MAX_TOKENS,
-            soft_threshold=settings.CONTEXT_BUDGET_SOFT_THRESHOLD,
-            hard_threshold=settings.CONTEXT_BUDGET_HARD_THRESHOLD,
-        ))
-    except Exception:
-        supervisor_budget = None
+    # v9.2 P6: 预算构造收敛共享 build_context_budget（构造失败 → None，语义不变）
+    supervisor_budget = build_context_budget()
 
     try:
         emit_status("step_done", step_id="load")

@@ -29,9 +29,75 @@ from langchain_core.messages import (
 )
 
 from src.config import settings
-from src.core.context_budget import ContextBudget, ContextBudgetLevel
+from src.core.context_budget import ContextBudget, ContextBudgetConfig, ContextBudgetLevel
 
 logger = logging.getLogger(__name__)
+
+
+# ── v9.2 P6: supervisor 装配/预算守卫共享收敛 ────────────────────────
+# 原 expert_graph._guard_supervisor_budget 中预算构造（1148-1156）与
+# light_graph supervisor 循环内每轮重建 ContextBudget（228-233）两份同构；
+# LoadedContext 构造与消息装配（System + 历史 + [历史检索证据] + 本轮 human）
+# 也在两图 supervisor 内逐项重复。收敛到此处单一真源，两图行为保持不变。
+
+def build_context_budget():
+    """supervisor 预算守卫构造收敛（expert/light 共用）。
+
+    构造失败 → None（与原两图 try/except 吞错语义一致；None 时守卫跳过）。
+    构造确定性且无状态，light 原"每轮重建"改为一次构造后复用，判定语义不变。
+    """
+    try:
+        return ContextBudget(ContextBudgetConfig(
+            max_tokens=settings.CONTEXT_BUDGET_MAX_TOKENS,
+            soft_threshold=settings.CONTEXT_BUDGET_SOFT_THRESHOLD,
+            hard_threshold=settings.CONTEXT_BUDGET_HARD_THRESHOLD,
+        ))
+    except Exception:
+        return None
+
+
+def budget_usage_ratio(budget, messages) -> float | None:
+    """预算占用率 estimate/max_tokens；budget 为 None 或估算异常 → None
+    （调用方按"不触发阈值"处理，与原两图 except 吞错语义一致）。"""
+    if budget is None:
+        return None
+    try:
+        est = budget.estimate_tokens(messages)
+        return est / budget.config.max_tokens
+    except Exception:
+        return None
+
+
+def build_loaded_context(state: dict, *, mode: str, format_hint):
+    """LoadedContext 构造收敛（expert/light supervisor 共用，v9.2 P6）。"""
+    return LoadedContext(
+        session_id=state.get("session_id", ""),
+        mode=mode,
+        query=state.get("query", ""),
+        history_summary=state.get("history_summary"),
+        long_term_memory=state.get("long_term_memory"),
+        resident_cards=state.get("resident_cards"),
+        search_suggestions=state.get("search_suggestions", []),
+        format_hint=format_hint,
+    )
+
+
+def assemble_supervisor_messages(system_prompt: str, state: dict, human_msg):
+    """supervisor 消息装配收敛（expert/light 逐项一致，v9.2 P6）：
+    [System] + [历史 messages] + [历史检索证据块] + [本轮 human 消息]。
+
+    返回 (messages, trace_start_index)；trace_start_index 指向本轮轨迹起点
+    （save 节点完整持久化定位、与 tool_calls/ToolMessage 配对基线用）。
+    """
+    messages: list = [SystemMessage(content=system_prompt)]
+    history_msgs = list(state.get("messages", []))
+    if history_msgs:
+        messages.extend(history_msgs)
+    # v8.3.8: 历史检索证据块（跨轮复用）——注入在系统与历史之后、本轮问题之前
+    if state.get("history_evidence_block"):
+        messages.append(HumanMessage(content=state["history_evidence_block"]))
+    messages.append(human_msg)
+    return messages, len(messages) - 1
 
 
 @dataclass

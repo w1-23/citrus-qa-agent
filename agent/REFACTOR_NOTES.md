@@ -62,7 +62,7 @@
 | P3 | 高 | main.py:331 | light 节点名 "light_synthesize"/"light_react" 过期 → light done 落入兜底分支：丢 citation_info/tools_called、job 永不 completed、request_done 缺失 | ✅ 批次2已修 |
 | P4 | 中 | main.py:334/416-419 | done 前 sleep(0.5) + 10×0.1 轮询排空——双队列桥竞态的补丁式掩蔽 | 待修（根因：await 桥排空） |
 | P5 | 高 | expert/light save 节点 | save 节点双图 ~85% 重复（证据账本 light 缺 web 条目、LTM 门槛已漂移） | ✅ 批次5已修（run_save_node 参数化；用户决策：只抽核心，两图行为不变） |
-| P6 | 中 | expert/light supervisor | 消息装配 + LoadedContext 重建 + LLM 客户端装配 + 逐轮预算守卫重复（light 每轮重建 ContextBudget） | 待修 |
+| P6 | 中 | expert/light supervisor | 消息装配 + LoadedContext 重建 + LLM 客户端装配 + 逐轮预算守卫重复（light 每轮重建 ContextBudget） | ✅ 批次8已修（装配/LoadedContext/预算构造/占用率判定共享；LLM 客户端装配已由 llm_pool 覆盖） |
 | P7 | 中 | manager.py:794-944 | 证据账本读取器 ×4（build_evidence_block/count_evidence_items/get_evidence_refs/get_evidence_materials）同一模板 | ✅ 批次4已修（_load_evidence_rows 统一读取器） |
 | P8 | 中 | manager.py:53-79 / memory.py:21-41 | _connect_db 逐字重复两份；memory_store DDL ×4 处 | ✅ 批次6已修（core/db.connect_db + MEMORY_STORE_DDL/ensure_memory_store 单点） |
 | P9 | 中 | context_budget.py:68-84/301-318 | 压缩熔断永久降级（无冷却窗口）+ _compaction_failures 无界增长 | ✅ 批次7已修（冷却窗口半开恢复 + 惰性清理 + 1024 硬上限） |
@@ -77,6 +77,31 @@
 | P18 | 中 | 各层 | 4 组审计确认的次级项：save 节点二合一、消息装配/预算守卫共享、证据账本读取器×4、_connect_db 双份、压缩熔断永久降级 | 待修 |
 
 ## 3. 变更日志
+
+### 批次 8（P6：supervisor 装配/预算守卫收敛，2026-08-25）
+- 提交：`<BATCH8_HASH>`（待填；回滚点 `ca5f64c`）。
+- **改动**（行为纯重构，两图 supervisor 行为逐位一致）：
+  - `src/core/context_manager.py` 新增共享助手：
+    - `build_context_budget()`——erpert 1148-1156 / light 228-233 的
+      ContextBudget 构造收敛单点（构造失败 → None，吞错语义一致）；
+    - `budget_usage_ratio(budget, messages)`——占用率 estimate/max_tokens
+      判定统一（None = 预算缺失/估算异常 → 不触发阈值，与原 except 吞错一致）；
+    - `build_loaded_context(state, *, mode, format_hint)`——两图 supervisor
+      的 LoadedContext 构造收敛（逐字段一致）；
+    - `assemble_supervisor_messages(system_prompt, state, human_msg)`——
+      System + 历史 + [历史检索证据] + 本轮 human 装配收敛，返回
+      (messages, trace_start_index)。
+  - `expert_graph.py`：supervisor 节点改用共享助手；`_guard_supervisor_budget`
+    内部估算改 `budget_usage_ratio`（显式 None 分支替代原 try/except 整块）；
+    supervisor_budget 一次构造；删未用 SystemMessage import。
+  - `light_graph.py`：装配收敛；预算从"每轮循环内重建"改**一次构造**后循环
+    复用（构造确定性无状态，判定语义逐次一致）；删未用 SystemMessage import。
+  - 锚点随迁：`tests/test_batch2.py` AG-26（estimate_tokens(call_messages)
+    → budget_usage_ratio + context_manager 锚点）；新增 `tests/test_refactor_v92.py`
+    VF-109 锁定收敛（助手存在、两图装配接线、light 循环内无预算重建、
+    light 预算构造单点、一次构造）。
+- **验证**：tests 全量 = 232 passed。
+- **回滚点**：单 commit revert 可回 `ca5f64c`。
 
 ### 批次 7（P9：压缩熔断永久降级根治，2026-08-25）
 - 提交：`6d4b586`（feature/v8.17-draft-native-ucr；回滚点 `be150aa`）。

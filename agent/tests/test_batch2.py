@@ -412,7 +412,12 @@ def test_ag26_budget_forward():
     print("[AG-26] 预算检查前移（规范 2.2.5，每次调用前）")
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             'src', 'graph', 'expert_graph.py'), encoding='utf-8').read()
-    check("每轮调用前估算", "estimate_tokens(call_messages)" in src)
+    cm = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           'src', 'core', 'context_manager.py'), encoding='utf-8').read()
+    # v9.2 P6: 占用率估算收敛至共享 budget_usage_ratio（原逐字 estimate_tokens(call_messages)）
+    check("每轮调用前估算（共享占用率）",
+          "budget_usage_ratio(supervisor_budget, call_messages)" in src
+          and "estimate_tokens" in cm)
     check("硬阈值强制收尾", "硬阈值" in src and "强制收尾" in src)
     check("软阈值状态栏提示", "软阈值" in src and "尽快收敛" in src)
     from src.core.context_budget import ContextBudget, ContextBudgetConfig

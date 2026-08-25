@@ -264,6 +264,35 @@ def test_v92_db_factory_converged():
           and "PRAGMA journal_mode=WAL" in db_src and "PRAGMA busy_timeout=2000" in db_src)
 
 
+# ── VF-109 supervisor 装配/预算守卫收敛（P6）────────────────────────
+def test_v92_supervisor_assembly_converged():
+    print("[VF-109] supervisor 装配/LoadedContext/预算守卫共享")
+    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    cm_src = open(os.path.join(base, "src/core/context_manager.py"), encoding="utf-8").read()
+    eg_src = open(os.path.join(base, "src/graph/expert_graph.py"), encoding="utf-8").read()
+    lg_src = open(os.path.join(base, "src/graph/light_graph.py"), encoding="utf-8").read()
+
+    for fn in ["def build_context_budget(", "def budget_usage_ratio(",
+               "def build_loaded_context(", "def assemble_supervisor_messages("]:
+        check(f"context_manager 提供 {fn[5:]}", fn in cm_src)
+
+    check("expert supervisor 用共享预算构造", "supervisor_budget = build_context_budget()" in eg_src)
+    check("expert 守卫用共享占用率", "ratio = budget_usage_ratio(supervisor_budget, call_messages)" in eg_src)
+    check("expert 装配收敛", "assemble_supervisor_messages(" in eg_src
+          and "build_loaded_context(state, mode=\"expert\"" in eg_src)
+    check("light 装配收敛", "assemble_supervisor_messages(" in lg_src
+          and "build_loaded_context(state, mode=\"light\"" in lg_src)
+
+    # light 不再每轮重建 ContextBudget（原循环内 try 块已收敛）：
+    # 循环体内不得再有 ContextBudget 构造；全文件仅 load 节点 1 处
+    check("light 循环内无预算重建",
+          "for turn in range(LIGHT_MAX_TURNS)" in lg_src
+          and "budget_usage_ratio(_budget, messages)" in lg_src)
+    check("light 预算构造单点（load 节点）", lg_src.count("ContextBudget(") == 1)
+    check("light 预算一次构造", "_budget = build_context_budget()" in lg_src)
+
+
 # ── 汇总 ──────────────────────────────────────────────────────────
 def _summary():
     print(f"\n[VF-9.2] PASS {len(passed)} / FAIL {len(failed)}"

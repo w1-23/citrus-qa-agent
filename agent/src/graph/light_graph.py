@@ -7,7 +7,7 @@ import asyncio
 import logging
 import time
 
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END
 
 from src.graph.state import AgentState
@@ -178,31 +178,19 @@ async def light_supervisor_node(state: AgentState) -> dict:
         mode="light", format_hint=format_hint, query=query,
     )
 
-    from src.core.context_manager import LoadedContext, build_human_message
-    ctx = LoadedContext(
-        session_id=state.get("session_id", ""),
-        mode="light",
-        query=query,
-        history_summary=state.get("history_summary"),
-        long_term_memory=state.get("long_term_memory"),
-        resident_cards=state.get("resident_cards"),
-        search_suggestions=state.get("search_suggestions", []),
-        format_hint=format_hint,
-    )
+    from src.core.context_manager import (build_loaded_context,
+                                          assemble_supervisor_messages,
+                                          build_human_message,
+                                          build_context_budget,
+                                          budget_usage_ratio)
+    # v9.2 P6: LoadedContext 构造收敛（expert/light 共用）
+    ctx = build_loaded_context(state, mode="light", format_hint=format_hint)
     # v8.4.6 F1: 代码级预检索结果注入 <retrieval_context>（light_rules 的既定通道）
     human_msg = build_human_message(
         ctx, retrieval_context=state.get("retrieval_context") or "")
-
-    messages: list = [SystemMessage(content=system_prompt)]
-    history_msgs = list(state.get("messages", []))
-    if history_msgs:
-        messages.extend(history_msgs)
-    # v8.3.8: 历史检索证据块
-    if state.get("history_evidence_block"):
-        messages.append(HumanMessage(content=state["history_evidence_block"]))
-    messages.append(human_msg)
-    # v8.3.8: 本轮轨迹起点
-    trace_start_index = len(messages) - 1
+    # v9.2 P6: 消息装配收敛（System + 历史 + [历史检索证据] + 本轮 human）
+    messages, trace_start_index = assemble_supervisor_messages(
+        system_prompt, state, human_msg)
 
     from src.tools import _TOOL_REGISTRY_BY_NAME
     tools = [t for t_name in LIGHT_TOOL_NAMES
@@ -220,26 +208,22 @@ async def light_supervisor_node(state: AgentState) -> dict:
     tool_names_called: list[str] = []   # v9.2: 已调用工具名（main.py done 分支消费）
     t0 = time.perf_counter()
 
+    # v9.2 P6: 预算一次构造（原每轮循环内重建 ContextBudget；构造确定性无状态，
+    # 一次复用后判定语义与重建逐次一致）
+    _budget = build_context_budget()
+
     try:
         for turn in range(LIGHT_MAX_TURNS):
             # v8.4.6 B1: 预算前移（与 expert 一致）——每次模型调用前检查上下文占用，
             # 超硬阈值直接统一收尾（light 无独立熔断，窗口 1M 下风险低但须兜底）
-            try:
-                from src.core.context_budget import ContextBudget, ContextBudgetConfig
-                _budget = ContextBudget(ContextBudgetConfig(
-                    max_tokens=settings.CONTEXT_BUDGET_MAX_TOKENS,
-                    soft_threshold=settings.CONTEXT_BUDGET_SOFT_THRESHOLD,
-                    hard_threshold=settings.CONTEXT_BUDGET_HARD_THRESHOLD,
-                ))
-                _est = _budget.estimate_tokens(messages)
-                if _est / _budget.config.max_tokens >= _budget.config.hard_threshold:
-                    logger.warning(
-                        f"[LightGraph:supervisor] 上下文占用 "
-                        f"{_est / _budget.config.max_tokens:.1%} ≥ 硬阈值，强制收尾")
-                    answer = await _light_force_final(messages)
-                    break
-            except Exception:
-                pass
+            # v9.2 P6: 占用率判定收敛共享 budget_usage_ratio（None = 预算缺失/异常）
+            _ratio = budget_usage_ratio(_budget, messages)
+            if _ratio is not None and _ratio >= _budget.config.hard_threshold:
+                logger.warning(
+                    f"[LightGraph:supervisor] 上下文占用 "
+                    f"{_ratio:.1%} ≥ 硬阈值，强制收尾")
+                answer = await _light_force_final(messages)
+                break
             t_llm = time.perf_counter()
             # v8.13-b5a: LLM 重试收敛至 invoke_llm_with_retry（3 次/3s/失败上抛）
             response, _, _ = await invoke_llm_with_retry(
