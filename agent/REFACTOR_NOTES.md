@@ -79,7 +79,7 @@
 ## 3. 变更日志
 
 ### 批次 8（P6：supervisor 装配/预算守卫收敛，2026-08-25）
-- 提交：`<BATCH8_HASH>`（待填；回滚点 `ca5f64c`）。
+- 提交：`c1889aa`（feature/v8.17-draft-native-ucr；回滚点 `ca5f64c`）。
 - **改动**（行为纯重构，两图 supervisor 行为逐位一致）：
   - `src/core/context_manager.py` 新增共享助手：
     - `build_context_budget()`——erpert 1148-1156 / light 228-233 的
