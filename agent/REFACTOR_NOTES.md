@@ -79,7 +79,7 @@
 ## 3. 变更日志
 
 ### 批次 5（P5：save 节点二合一，2026-08-25）
-- 提交：`<BATCH5_HASH>`（待填；回滚点 `373b6b6`）。
+- 提交：`251da24`（feature/v8.17-draft-native-ucr；回滚点 `373b6b6`）。
 - **改动**：
   - `src/core/agent_loop.py`：新增 `run_save_node(state, *, log_tag, include_web,
     ltm_gate)`——原 expert_save_node / save_context_node 双图 ~85% 同构收敛为
