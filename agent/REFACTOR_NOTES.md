@@ -79,7 +79,7 @@
 ## 3. 变更日志
 
 ### 批次 3（P16+P17：检索统计接线修复 + pdf_read 统一出口，2026-08-25）
-- 提交：`<BATCH3_HASH>`（待填；回滚点 `b779336`）。
+- 提交：`709a684`（feature/v8.17-draft-native-ucr；回滚点 `b779336`）。
 - **改动**：
   - `src/retrieval/multi_retriever.py`：`search_multi` 新增 `original_query` 入参，
     `_fuse_rerank_select` 统计归属记录用户原文（`original_query or rerank_query`）；
