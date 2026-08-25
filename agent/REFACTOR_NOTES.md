@@ -79,7 +79,7 @@
 ## 3. 变更日志
 
 ### 批次 6（P8：连接工厂/建表收敛，2026-08-25）
-- 提交：`<BATCH6_HASH>`（待填；回滚点 `a888173`）。
+- 提交：`8e46c6c`（feature/v8.17-draft-native-ucr；回滚点 `a888173`）。
 - **改动**：
   - 新增 `src/core/db.py`：`connect_db()`（原 manager/memory 双份逐字相同的
     _connect_db 收敛单点，WAL + busy_timeout=30s + 2s 快失败口径逐位不变）、
