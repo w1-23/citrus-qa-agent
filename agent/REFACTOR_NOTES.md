@@ -65,7 +65,7 @@
 | P6 | 中 | expert/light supervisor | 消息装配 + LoadedContext 重建 + LLM 客户端装配 + 逐轮预算守卫重复（light 每轮重建 ContextBudget） | 待修 |
 | P7 | 中 | manager.py:794-944 | 证据账本读取器 ×4（build_evidence_block/count_evidence_items/get_evidence_refs/get_evidence_materials）同一模板 | ✅ 批次4已修（_load_evidence_rows 统一读取器） |
 | P8 | 中 | manager.py:53-79 / memory.py:21-41 | _connect_db 逐字重复两份；memory_store DDL ×4 处 | ✅ 批次6已修（core/db.connect_db + MEMORY_STORE_DDL/ensure_memory_store 单点） |
-| P9 | 中 | context_budget.py:68-84/301-318 | 压缩熔断永久降级（无冷却窗口）+ _compaction_failures 无界增长 | 待修 |
+| P9 | 中 | context_budget.py:68-84/301-318 | 压缩熔断永久降级（无冷却窗口）+ _compaction_failures 无界增长 | ✅ 批次7已修（冷却窗口半开恢复 + 惰性清理 + 1024 硬上限） |
 | P10 | 中 | 全仓 ~25 处 | blog/diag 同构 try/import/except-pass 样板 | 待修（safe_blog/safe_diag） |
 | P11 | 中 | graph 层 ~20 处 | `except Exception: pass` 包裹业务异常（expert 1079 曾掩盖 NameError 数版本） | 待修 |
 | P12 | 中 | manager.py:613-643 | replace_history DEPRECATED 生产零调用（且 INSERT 缺幂等列） | 待修（删/移测试） |
@@ -77,6 +77,23 @@
 | P18 | 中 | 各层 | 4 组审计确认的次级项：save 节点二合一、消息装配/预算守卫共享、证据账本读取器×4、_connect_db 双份、压缩熔断永久降级 | 待修 |
 
 ## 3. 变更日志
+
+### 批次 7（P9：压缩熔断永久降级根治，2026-08-25）
+- 提交：`<BATCH7_HASH>`（待填；回滚点 `be150aa`）。
+- **改动**（`src/core/context_budget.py`）：
+  - 熔断恢复路径不再依赖"从未发生过的 LLM 成功"：新增冷却窗口
+    `_COMPACTION_COOLDOWN_SEC=300`——连续失败 ≥3 后 5 分钟内规则式降级，
+    窗口过后半开放行一次 LLM 重试（`_breaker_tripped` 判定）；成功即闭合
+    （计数归零），失败重新计时。EXACT 语义保留：前 2 次失败仍走规则式、
+    第 3 次起熔断、降级标记不丢失（不变量 10）。
+  - 无界增长根治：`_prune_stale_breakers()` 惰性清理（条目 >64 时剔除
+    1 小时无失败条目）+ `_COMPACTION_MAX_ENTRIES=1024` 硬上限逐出最老。
+  - 结构兼容：`_compaction_failures` 保持 int 计数（外部契约不变），
+    新增 `_compaction_breaker_at` 时间戳 dict 同步写。
+  - 新增 `tests/test_compaction_v2.py` CP-5：半开恢复（窗口内熔断 → 窗口
+    后重试成功闭合）＋陈旧条目剔除＋硬上限；CP-4 原断言零改动。
+- **验证**：tests 全量 = 231 passed。
+- **回滚点**：单 commit revert 可回 `be150aa`。
 
 ### 批次 6（P8：连接工厂/建表收敛，2026-08-25）
 - 提交：`8e46c6c`（feature/v8.17-draft-native-ucr；回滚点 `a888173`）。

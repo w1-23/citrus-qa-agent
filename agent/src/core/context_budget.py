@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Optional
@@ -64,24 +65,71 @@ def _estimate_chars_tokens(text: str) -> int:
 
 
 # 压缩失败熔断器（书 2.7.4 L3 全量压缩熔断）: 连续失败 ≥3 次后降级为规则式，
-# 避免在压缩失败的会话上持续烧钱。key=session_id（跨请求存活）
+# 避免在压缩失败的会话上持续烧钱。key=session_id（跨请求存活）。
+#
+# v9.2 P9 根治（审计: "熔断后不再尝试 LLM → 永久规则式降级 + 条目无界增长"）:
+#   - 追加冷却窗口（_COMPACTION_COOLDOWN_SEC）: 熔断后 5 分钟内保持规则式；
+#     窗口过后放行一次 LLM 重试（半开），成功即闭合（计数归零），失败即重新计时。
+#     恢复路径不再依赖"从未发生过的 LLM 成功"。
+#   - 条目清理: 惰性剔除 1 小时无失败条目 + 硬上限逐出最老（防无界增长）。
+#   - _compaction_failures 保持 int 计数结构（对外契约不变）。
 _compaction_failures: dict = {}
+# session_id -> 最近失败时间戳（熔断时间窗判定；与计数 dict 同步写）
+_compaction_breaker_at: dict = {}
+
+_COMPACTION_COOLDOWN_SEC = 300.0   # 熔断冷却窗口：5 分钟（窗口内规则式，过后半开重试）
+_COMPACTION_STALE_SEC = 3600.0     # 条目清理：1 小时无失败的条目剔除
+_COMPACTION_MAX_ENTRIES = 1024     # 硬上限：极端场景逐出最老，绝不无界
+
+
+def _prune_stale_breakers() -> None:
+    """防无界增长：条目 >64 时启动惰性清理——剔除 1 小时无失败条目，
+    剩余仍超硬上限则逐出最老（最保守 ≤1024 条）。"""
+    if len(_compaction_failures) <= 64:
+        return
+    now = time.time()
+    stale = [sid for sid in _compaction_failures
+             if (now - _compaction_breaker_at.get(sid, 0.0)) > _COMPACTION_STALE_SEC]
+    for sid in stale:
+        _compaction_failures.pop(sid, None)
+        _compaction_breaker_at.pop(sid, None)
+    while len(_compaction_failures) > _COMPACTION_MAX_ENTRIES:
+        oldest = min(_compaction_failures,
+                     key=lambda s: _compaction_breaker_at.get(s, 0.0))
+        _compaction_failures.pop(oldest, None)
+        _compaction_breaker_at.pop(oldest, None)
 
 
 def _record_compaction_failure(session_id: str) -> bool:
-    """返回 True 表示熔断（已连续失败 ≥3 次）。"""
+    """返回 True 表示熔断（已连续失败 ≥3 次，进入冷却窗口）。"""
     n = _compaction_failures.get(session_id, 0) + 1
     _compaction_failures[session_id] = n
+    _compaction_breaker_at[session_id] = time.time()
+    _prune_stale_breakers()
     if n >= 3:
         logger.warning(
             f"[ContextBudget] 压缩熔断 (session={session_id[:8]}): "
-            f"连续失败 {n} 次，降级为规则式截断")
+            f"连续失败 {n} 次，降级为规则式截断"
+            f"（{int(_COMPACTION_COOLDOWN_SEC)}s 冷却窗口后自动重试 LLM）")
         return True
     return False
 
 
 def _reset_compaction_failures(session_id: str) -> None:
     _compaction_failures.pop(session_id, None)
+    _compaction_breaker_at.pop(session_id, None)
+
+
+def _breaker_tripped(session_id: str) -> bool:
+    """熔断判定（P9 半开语义）：连续失败 ≥3 且仍在冷却窗口内 → 规则式；
+    窗口过后放行一次 LLM 重试（半开），成功即闭合，失败即重新计时。"""
+    if not session_id:
+        return False
+    n = _compaction_failures.get(session_id, 0)
+    if n < 3:
+        return False
+    last_fail = _compaction_breaker_at.get(session_id, 0.0)
+    return (time.time() - last_fail) < _COMPACTION_COOLDOWN_SEC
 
 
 def _keep_identifiers(content: str, max_chars: int = 2500) -> str:
@@ -300,10 +348,10 @@ class ContextBudget:
 
     async def _safe_compact(self, messages: list, query: str, session_id: str,
                             prior_summary: str = "") -> str:
-        """LLM 压缩 + 熔断器（连续失败 ≥3 → 规则式截断）。"""
+        """LLM 压缩 + 熔断器（连续失败 ≥3 → 规则式截断；P9 冷却窗口后自动重试）。"""
         if not self._compact_fn:
             return self._rules_summary(messages)
-        if session_id and _compaction_failures.get(session_id, 0) >= 3:
+        if session_id and _breaker_tripped(session_id):
             return self._rules_summary(messages)
         try:
             summary = await self._compact_fn(
