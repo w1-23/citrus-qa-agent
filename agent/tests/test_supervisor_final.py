@@ -130,8 +130,8 @@ def test_max_turns_forces_detailed_final():
     print("[SF-2] 跑满轮次 → 统一收尾（详尽 prompt，临时列表不入史）")
     from src.graph import expert_graph as eg
     tool_calls_msg = AIMessage(content="", tool_calls=[
-        {"id": "c1", "name": "call_retrieve_agent",
-         "args": {"query": "citrus anthocyanin", "goal": "g"}}])
+        {"id": "c1", "name": "call_search_both",
+         "args": {"local_goal": "citrus anthocyanin", "web_goal": "citrus anthocyanin 2025"}}])
     orig = _patch_llm_pool([tool_calls_msg, tool_calls_msg,
                             AIMessage(content="跑满轮次后的详尽最终回答")])
     orig_turns = eg.SUPERVISOR_MAX_TURNS

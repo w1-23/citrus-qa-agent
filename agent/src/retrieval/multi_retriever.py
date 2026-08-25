@@ -41,6 +41,25 @@ def _bm25_fingerprint(texts: List[str], k1: float, b: float, delta: float) -> st
     return h.hexdigest()
 
 
+def _bm25_search_parallel(bm25: BM25Plus, queries: List[str], k: int = 20) -> List[Tuple[int, float]]:
+    """v9.1.3: 多查询 BM25 并行 top_k（结果与串行逐位一致）。
+
+    _top_k_inverted 是只读 numpy 向量化路径（无共享写入；doc_lens/inv 均为
+    不可变数组）→ 多线程安全；numpy 向量段释放 GIL，多查询并行消除 Python
+    累加段串行（9 路实测 5.2s → 预期 ≈2-3x）。顺序与旧串行循环完全一致：
+    按 queries 提交顺序取结果拼接（每路 top_k 独立、无共享状态）。
+    """
+    if len(queries) <= 1:
+        return [hit for q in queries for hit in bm25.top_k(q, k=k)]
+    workers = min(4, len(queries))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(bm25.top_k, q, k) for q in queries]
+        out: List[Tuple[int, float]] = []
+        for f in futures:  # 按提交顺序取回 → 与串行逐位一致
+            out.extend(f.result())
+    return out
+
+
 def _load_bm25_cache(fp: str) -> Optional[BM25Plus]:
     p = _bm25_cache_path(fp)
     if not p.exists():
@@ -562,8 +581,10 @@ class MultiBatchRetriever:
                             weights: List[float], stream_labels: List[str],
                             rerank_query: str, mode: str, t0: float,
                             stage_ms: Dict[str, float], n_queries: int = 1,
-                            fallback_query: Optional[str] = None) -> List[Dict]:
-        """去重 → RRF → 候选全文 → rerank → 动态阈值 → 空归因 → 日志，返回 passed 证据。"""
+                            fallback_query: Optional[str] = None,
+                            original_query: Optional[str] = None) -> List[Dict]:
+        """去重 → RRF → 候选全文 → rerank → 动态阈值 → 空归因 → 日志，返回 passed 证据。
+        """
         # 每流独立「分数降序 → 按 global_idx 去重（保留最高分）」
         deduped: List[List[Tuple[int, float]]] = []
         for hits in streams:
@@ -635,12 +656,28 @@ class MultiBatchRetriever:
         except Exception:
             pass
         # v8.15.3: 候选/通过统计（决策器早停依据：filtered 占比高 → 角度相关性低）。
-        # 附带本次 rerank_query 作防串号（同轮并发检索共享单例，取回时核对 query）
+        # 附带本次 rerank_query 作防串号（同轮并发检索共享单例，取回时核对 query）。
+        # v9.2: 记录 original_query（用户原文）而非 rerank_query——默认 HyDE 主路径
+        # queries[0]=生成段落 ≠ 用户原文，工具侧 expect_query=用户原文比对恒不等，
+        # 早停统计被防串号校验误杀（HyDE 关闭时反而生效）。防串号语义保留：
+        # 取回时仍核对用户查询归属。
         self.last_stats = {"candidates": len(candidates), "passed": len(passed),
-                           "filtered": len(filtered), "query": rerank_query}
+                           "filtered": len(filtered),
+                           "query": original_query or rerank_query}
         return passed
 
-    def search_multi(self, queries: List[str]) -> List[Dict]:
+    def search_multi(self, queries: List[str],
+                     original_query: str = "") -> List[Dict]:
+        """多路并发检索。
+
+        v8.17 修订：不做检索层来源路由/加权（数据库混合存储无物理分区，两阶段
+        路由在架构上不可行）——UCR 优先改由 evidence_report 组装时聚拢置前
+        （元数据标记层）+ retrieve-agent Prompt 引导（模型生成检索词倾向 UCR），
+        保持各批次融合公平性。
+
+        v9.2: 新增 original_query 入参（用户原文）——统计归属按用户查询记录，
+        修复默认 HyDE 主路径上检索早停统计被防串号校验误杀的问题。
+        """
         if not queries:
             return []
         _t0 = time.time()
@@ -648,11 +685,13 @@ class MultiBatchRetriever:
 
         # v8.15 BM25 并行化：BM25 不依赖向量 embedding——先提交独立线程执行，
         # 与 embed（ONNX 释放 GIL）/向量检索重叠，融合前取回（省 ≈ min(bm25, embed) 延迟）
+        # v9.1.3（用户日志: 9 路查询 bm25_ms=5229s 为本地检索大头）: 查询间再并行——
+        # BM25 为只读 numpy 向量化路径（多线程安全），多查询并行可再获 ≈2-3x 收益，
+        # 结果与串行逐位一致（每路 top_k 独立、无共享状态）。
         t_bm25 = time.time()
         with ThreadPoolExecutor(max_workers=1) as _bm25_ex:
             _bm25_fut = _bm25_ex.submit(
-                lambda: [hit for q in queries
-                         for hit in self.bm25.top_k(q, k=settings.TOP_K_BM25)])
+                lambda: _bm25_search_parallel(self.bm25, queries, k=settings.TOP_K_BM25))
 
             t_embed = time.time()
             # v8.14-bugfix(2026-08-20): 查询编码必须走 embed_query（带 "query: " 前缀，E5 训练分布
@@ -689,10 +728,12 @@ class MultiBatchRetriever:
             t0=_t0,
             stage_ms={"embed": dt_embed, "vector": dt_vector, "bm25": dt_bm25},
             n_queries=len(queries),
+            original_query=original_query,
         )
 
     def search(self, query: str) -> List[Dict]:
-        return self.search_multi([query])
+        # v9.2: 单查询路径同样登记用户原文（保持非 HyDE 路径统计校验不回归）
+        return self.search_multi([query], original_query=query)
 
     def search_hyde(self, original_query: str, hyde_answer: str) -> List[Dict]:
         """HyDE hybrid search: dual dense (original + hyde) + BM25 + RRF + Reranker(original_query).

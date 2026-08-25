@@ -196,7 +196,7 @@ citrus-qa-agent/
 │   │   ├── session/            # 会话持久化（SQLite）/ 权限授权
 │   │   ├── tools/              # 检索 / 读文件 / 统计 / 写文件（沙箱化）
 │   │   ├── retrieval/          # 向量检索 + 重排（LanceDB/BM25/混合）
-│   │   ├── prompts/            # 全部提示词（静态前缀 + 动态块）
+│   │   ├── prompts/            # 提示词：source/ 20 份源文件 + builds/ 固定角色 system prompt（启动时拼接，之后不变）
 │   │   └── guardrails/         # 记忆 / 提示注入消毒 / 日志脱敏
 │   ├── tests/                  # 150 个回归测试
 │   └── workspace/output/       # 写作成果输出目录（运行时生成）

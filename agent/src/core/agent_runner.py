@@ -155,7 +155,7 @@ def build_evidence_report(collected_artifacts: dict, query: str,
                           budget_blocked: int = 0,
                           dedup_blocked: int = 0,
                           web_unavailable: bool = False,
-                          draft_extra_count: int = 0) -> str:
+                          ucr_first: bool = False) -> str:
     """确定性证据回执（v8.4.6，纯函数可单测）。
 
     检索回执由代码组装而非模型转述——保证"管道而非漏斗"：
@@ -170,8 +170,18 @@ def build_evidence_report(collected_artifacts: dict, query: str,
         从文尾切掉的正是 [W1..W8] URL 清单与引用提示 → supervisor 无法挂 [Wn]
         → 回答概括化（v8.16.2 实证）。重排后截断只会损失主文献尾部,
         必读的 [Wn] 清单与编号导引恒在截断线之前；cap 同步 40000→60000。
+      - v8.17 修订: ucr_first=True 时主文献按来源**聚拢置前**——UCR 品种库条目
+        （[UCR] 前缀）稳定分区到回执 [n] 清单前部（组内保序，非按分重排），
+        supervisor 更易优先引用；**仅展示层排序，不改检索融合**（混合库无物理
+        分区，两阶段检索路由在架构上不可行，见修正1）。
+      - v8.17.15（用户决策）: 草稿全链删除——draft_answer「原生回答参考」段与
+        draft_extra_count 多路检索补充已移除；原生联网回归 retrieve-agent 工具链，
+        其正文经 web_summaries（网络综述段）+ [Wn] 条目随回执注入，天然融合。
     """
     main = _dedup_evidence_items(list(collected_artifacts.get("main_results") or []))
+    if ucr_first:
+        main = ([r for r in main if src_of(r) == "ucr"]
+                + [r for r in main if src_of(r) != "ucr"])
     web = list(collected_artifacts.get("web_results") or [])
     lines = [
         "## 检索回执（系统组装）",
@@ -180,14 +190,6 @@ def build_evidence_report(collected_artifacts: dict, query: str,
         f"- 检索目标: {str(query)[:200]}",
         "",
     ]
-    # v8.16.1: 草稿先行多路检索补充（DRAFT_EN + MULTI_QUERY + SUMMARY 随
-    # load 后并行产出并入，supervisor 可见该路证据来源与量级）
-    if draft_extra_count:
-        lines.append(
-            f"- 草稿多路检索补充: {draft_extra_count} 条证据"
-            "（DRAFT_EN + MULTI_QUERY + SUMMARY 并行产出，已并入 [n] 清单）"
-        )
-        lines.append("")
     if budget_blocked or dedup_blocked:
         lines.append(
             f"- [SEARCH_BUDGET] 预算拦截: {budget_blocked} 次检索未执行 "
@@ -328,19 +330,9 @@ async def run_agent(
     tool_names = _resolve_tool_names(agent_name)
     tools = [_TOOL_REGISTRY_BY_NAME[n] for n in tool_names if n in _TOOL_REGISTRY_BY_NAME]
 
-    # v8.15: 联网搜索状态提示——向检索子代理明示本次请求是否开启联网（前端「联网」开关）。
-    # 开关关时模型应避免空调用 deepseek_web_search（即便误调用，工具执行层也会短路 [DISABLED]）。
-    try:
-        if agent_name == "retrieve-agent":
-            from src.core.tracing import web_search_enabled as _req_web_on
-            _web_hint = ("<web_search_status>\n本次联网搜索已开启：本地覆盖不足的最新/实时信息可使用 "
-                         "deepseek_web_search（每轮 ≤1 次）；引用会带网址进入「联网搜索」证据组。\n"
-                         "</web_search_status>\n" if _req_web_on() else
-                         "<web_search_status>\n本次联网搜索未开启（前端「联网」开关关闭）：请勿调用 "
-                         "deepseek_web_search，本地不足时如实声明缺口。\n</web_search_status>\n")
-            _extra_block = (_web_hint + _extra_block) if _extra_block else _web_hint
-    except Exception:
-        pass
+    # v9.1（用户决策）: 联网不再属于 retrieve-agent——Supervisor 经 call_search_both
+    # 并行下发本地+联网（web-agent 无 LLM 决策、单次调用）。此处不再注入联网状态提示
+    # （工具列表已无 deepseek_web_search，提示只会误导；前端开关由 web-agent 路径消费）。
 
     goal = task.get("goal", "")
     query = task.get("query", "")
@@ -395,9 +387,9 @@ async def run_agent(
         temperature=settings.TEMPERATURE_MAIN,
         max_tokens=max_t,
         timeout=timeout_sec,
-        # v8.15.3: 决策类子代理思维链控制（config model.reasoning_mode="off" 时
-        # 发送 thinking:disabled——决策慢的根因之一是 v4-flash 默认推理；
-        # 默认 "default" 不发送任何参数，等配置项被确认兼容后再开启）
+        # v8.17.19: 决策类子代理思维链控制（config model.reasoning_mode="off" 时
+        # retrieve-agent 经 llm_pool extra_body 下发关闭字段（fail-soft：网关拒绝
+        # 自动去参回退重试，点位不挂）；supervisor 不传 → 思维链保持开启做融合判断）
         thinking_off=(agent_name in ("retrieve-agent",)
                       and getattr(settings, "MODEL_REASONING_MODE", "default") == "off"),
     )
@@ -423,9 +415,14 @@ async def run_agent(
     rag_search_count = 0
     # v8.4.8: 代码级收敛——累计唯一证据数与边际收益判定
     _prev_unique = 0
-    # v8.15.3: 联网搜索失败熔断（请求内连续失败 ≥2 停止重试——失败无感知是
-    # "7 次 30s 重试"类等待的根因；成功则清零）
-    _web_fail_streak = 0
+    # v9.1（用户决策）: 联网移出 retrieve-agent（独立 web-agent 无 LLM 单次调用，
+    # 请求级预算见 src.core.tracing web_budget）——此处不再有 _web_used/_web_fail_streak。
+    # v8.17.18（bugfix）: placeholder_results 必须在 turn 循环外初始化——
+    # 此前在循环体内定义，LLM 全失败（response is None → break 提前出循环）后，
+    # 收尾段 build_evidence_report 的 budget/dedup 统计仍引用它 → UnboundLocalError
+    # （日志实证：cannot access local variable 'placeholder_results'）。挪到这里后
+    # 无论走哪条路径（0 轮/提前 break/正常收尾）都有定义。
+    placeholder_results: dict = {}
 
     for turn in range(max_turns):
         # v8.4.3 指令A: 移除"≥6 篇强制收敛"——动态阈值已过滤 chunk，检索到的
@@ -500,7 +497,6 @@ async def run_agent(
         _MAX_WEB_PER_TURN = 1
         _MAX_RAG_PER_REQUEST = 6
         exec_calls: list = []
-        placeholder_results: dict = {}
         for idx, tc in enumerate(response.tool_calls):
             tc_dict = _make_tool_call_dict(tc)
             _tname = tc_dict.get("name", "")
@@ -539,27 +535,6 @@ async def run_agent(
                     logger.info(f"[AgentRunner] {agent_name} 每轮学术检索上限拦截")
                     continue
                 _turn_aca += 1
-            elif agent_name == "retrieve-agent" and _tname == "deepseek_web_search":
-                # v8.15.3: 失败熔断——连续失败 ≥2 后直接拦截，不再重复尝试
-                if _web_fail_streak >= 2:
-                    tc_id = tc_ids[idx] if idx < len(tc_ids) else extract_tc_id(tc)
-                    placeholder_results[idx] = ToolMessage(
-                        content="[ERR] 联网搜索已连续失败，系统已停止重试（请勿再调用 "
-                                "deepseek_web_search；基于本地证据收尾或如实声明缺口）。",
-                        tool_call_id=tc_id, name="deepseek_web_search",
-                        artifact={"main_results": [], "web_results": []})
-                    logger.info(f"[AgentRunner] 联网搜索熔断拦截（连续失败 {_web_fail_streak} 次）")
-                    continue
-                # v8.15: 联网搜索预算（与学术源同档：每轮 ≤1 次；连续失败熔断见 _web_fail_streak）
-                if _turn_web >= _MAX_WEB_PER_TURN:
-                    tc_id = tc_ids[idx] if idx < len(tc_ids) else extract_tc_id(tc)
-                    placeholder_results[idx] = ToolMessage(
-                        content="[SEARCH_BUDGET] 每轮联网搜索上限 1 次，该检索未执行。",
-                        tool_call_id=tc_id, name="deepseek_web_search",
-                        artifact={"main_results": [], "web_results": []})
-                    logger.info(f"[AgentRunner] {agent_name} 每轮联网搜索上限拦截")
-                    continue
-                _turn_web += 1
             exec_calls.append((idx, tc))
 
         t_tool = time.perf_counter()
@@ -582,9 +557,11 @@ async def run_agent(
         # 按原始调用顺序合并执行结果与去重占位（INV-01 配对保持）
         tool_results: list = [None] * len(response.tool_calls)
         for (idx, _tc), tr in zip(exec_calls, exec_results):
-            tool_results[idx] = tr
+            if 0 <= idx < len(tool_results):
+                tool_results[idx] = tr
         for idx, tr in placeholder_results.items():
-            tool_results[idx] = tr
+            if 0 <= idx < len(tool_results):
+                tool_results[idx] = tr
         rag_search_count += sum(
             1 for _, tc in exec_calls
             if _make_tool_call_dict(tc).get("name") == "citrus_rag_search")
@@ -612,17 +589,6 @@ async def run_agent(
             tc_id = tc_ids[idx] if idx < len(tc_ids) else extract_tc_id(tc)
             tc_name = (tc.get("name", "") if isinstance(tc, dict)
                        else getattr(tc, "name", "") if tc else "")
-            # v8.15.3: 联网搜索失败记账（真实工具错误 [ERR_*] 算失败；
-            # 熔断占位 "[ERR] ..." 不计也不清零（否则拦截自身会把 streak 复位、
-            # 熔断失效且 web_unavailable 提示消失）；[DISABLED]/成功清零——
-            # 连续失败 ≥2 后由分派块拦截，杜绝"失败仍反复重试 30s×N"
-            if agent_name == "retrieve-agent" and tc_name == "deepseek_web_search":
-                _rc = str(getattr(tr, "content", "") or "")
-                _prev_streak = _web_fail_streak
-                _web_fail_streak = _web_streak_step(_web_fail_streak, _rc)
-                if _web_fail_streak > _prev_streak:
-                    logger.warning(f"[AgentRunner] deepseek_web_search 失败"
-                                   f"（连续 {_web_fail_streak} 次）: {_rc[:80]}")
             # AG-8: 子 Agent 内工具结果分档截断（与 supervisor 的 TOOL_RESULT_CAPS 一致）
             caps = getattr(settings, "TOOL_RESULT_CAPS", {}) or {}
             cap = caps.get(agent_name, caps.get("default", 100000))
@@ -722,11 +688,17 @@ async def run_agent(
     # v8.4.6: retrieve-agent 回执由代码确定性组装——summary + 文献细节 + chunk 全文
     # 直接进上下文（ToolMessage → 历史可见，追问无需重检索）——不再依赖模型转述
     # （"管道而非漏斗"，历史模型报告 34~176 字极短回执由此根治）。
+    # v9.1（用户决策）：联网移出 retrieve-agent（web-agent 无 LLM 单次调用），
+    # 本地证据 web_results 概念保留（防御/兼容——若将来 retrieve 工具链出现
+    # 联网型工具，artifacts 收集仍生效）。
     if agent_name == "retrieve-agent":
-        # v8.16.3: 草稿证据并入已移除——草稿改为纯前端预览，不再写入 draft_store
-        # （检索由 citrus_rag_search 的 HyDE 结构化独立承担）。draft_extra_count 保留
-        # 参数兼容（恒 0），build_evidence_report 的补充行仅在建置调用方显式传入时出现。
-        draft_extra_count = 0
+        # v8.17 修订: UCR 优先改为「提示词引导 + 回执聚拢置前」——品种意图命中时
+        # 回执 [UCR] 条目前置（展示层排序，键=关键词匹配；不做检索层路由/加权）
+        try:
+            from src.tools.search import _is_variety_intent
+            _ucr_first = _is_variety_intent(query)
+        except Exception:
+            _ucr_first = False
         budget_blocked = sum(
             1 for m in placeholder_results.values()
             if str(getattr(m, "content", "") or "").startswith("[SEARCH_BUDGET]"))
@@ -736,13 +708,29 @@ async def run_agent(
         code_report = build_evidence_report(
             collected_artifacts, query, rag_search_count,
             budget_blocked=budget_blocked, dedup_blocked=dedup_blocked,
-            web_unavailable=(_web_fail_streak >= 2),
-            draft_extra_count=draft_extra_count)
-        if result_content:
+            ucr_first=_ucr_first)
+        # v8.17.4: 模型自述不再被确定性回执覆盖——自述保留为「检索员判定」段，
+        # 与确定性证据回执合并输出（用户要求：检索子代理对 [Wn] 联网数据的
+        # 综合裁决必须传到 supervisor，不能被本地库回执一刀切抹掉）。
+        # 两者职责分工：
+        #   ① 检索员判定 = retrieve-agent 模型的总结论（含"以联网 [Wn] 为准/
+        #     证据已够"等仲裁表述，supervisor 直接可见）；
+        #   ② 确定性回执 = 代码组装的证据清单（[n]/[Wn]/UCR/网络综述段，
+        #     继续保证证据保真，INV-05 不回归）。
+        _judgement = (result_content or "").strip()
+        if _judgement:
             logger.info(
-                f"[AgentRunner] retrieve-agent 模型自述({len(result_content)} chars) "
-                f"被确定性回执替代({len(code_report)} chars)")
-        result_content = code_report
+                f"[AgentRunner] retrieve-agent 模型自述({len(_judgement)} chars) "
+                f"与确定性回执({len(code_report)} chars) 合并（v8.17.4 不再覆盖）")
+            # 判定段独立成节，明示其为模型裁决而非证据（防注入隔离同回执内层）
+            _jd = "\n".join(f"> {ln}" for ln in _judgement.splitlines())
+            result_content = (
+                "## 检索员判定（模型总结论）\n"
+                f"{_jd}\n\n"
+                + code_report
+            )
+        else:
+            result_content = code_report
 
     try:
         emit_encoded("agent_summary", {
@@ -818,9 +806,13 @@ def _make_tool_call_dict(tc) -> dict:
 
 def _resolve_tool_names(agent_name: str) -> list[str]:
     mapping = {
+        # v9.1（用户决策）：联网移出 retrieve-agent——独立 web-agent（无 LLM 决策、
+        # 单次调用）经 call_search_both 并行执行；Root 除"只联网不本地"：retrieve
+        # 工具列表无联网工具，本地检索必执行。联网预算/开关在 deepseek_web_search
+        # 工具层（请求级 contextvar + 前端开关短路）。
         "retrieve-agent": [
-            "citrus_rag_search", "academic_search", "fetch_fulltext",
-            "deepseek_web_search",
+            "citrus_rag_search",
+            "academic_search", "fetch_fulltext",
         ],
         "write-agent": ["write_local_file"],
         "analyze-agent": [
@@ -829,8 +821,7 @@ def _resolve_tool_names(agent_name: str) -> list[str]:
     }
     names = mapping.get(agent_name, [])
     # v8.15: 学术联网门控——academic_search/fetch_fulltext 随 ACADEMIC_ENABLED
-    # （默认关，代码保留不删）。deepseek_web_search 始终注册：启用与否由
-    # 前端「联网」开关逐请求决定（工具执行层读取请求 contextvar 短路）。
+    # （默认关，代码保留不删）。
     if not getattr(settings, "ACADEMIC_ENABLED", False):
         names = [n for n in names if n not in ("academic_search", "fetch_fulltext")]
     return names

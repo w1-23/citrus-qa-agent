@@ -146,12 +146,83 @@ def test_circuit_breaker():
     _reset_compaction_failures("cb_test")
 
 
+def test_circuit_breaker_half_open_recovery():
+    print("[CP-5] 熔断冷却窗口半开恢复 + 条目清理（P9 根治）")
+    import time
+    from src.core.context_budget import (
+        ContextBudget, ContextBudgetConfig,
+        _compaction_failures, _compaction_breaker_at,
+        _reset_compaction_failures, _record_compaction_failure,
+        _breaker_tripped, _COMPACTION_COOLDOWN_SEC)
+
+    # ── 半开恢复：冷却窗口过后放行 LLM 重试，成功即闭合（熔断非永久）──
+    _reset_compaction_failures("cb_half")
+    calls = {"n": 0}
+
+    async def flaky_fn(msgs, query="", prior_summary=""):
+        calls["n"] += 1
+        if calls["n"] <= 3:
+            raise RuntimeError("boom")
+        return "LLM-RECOVERED-SUMMARY"
+
+    budget = ContextBudget(ContextBudgetConfig(max_tokens=1000, soft_threshold=0.0,
+                                               hard_threshold=0.99))
+    budget.set_compact_fn(flaky_fn)
+    msgs = build_history(5, 100)
+
+    async def run():
+        for _ in range(3):
+            await budget.check(msgs, query="q", session_id="cb_half")
+        return await budget.check(msgs, query="q", session_id="cb_half")
+
+    r = asyncio.new_event_loop().run_until_complete(run())
+    check("熔断计数达 3", _compaction_failures.get("cb_half", 0) == 3)
+    check("冷却窗口内熔断生效（规则式降级）", _breaker_tripped("cb_half")
+          and not str(r.summary).startswith("LLM-RECOVERED"))
+
+    _compaction_breaker_at["cb_half"] = time.time() - _COMPACTION_COOLDOWN_SEC - 1
+    check("窗口过后半开放行", not _breaker_tripped("cb_half"))
+    rr = asyncio.new_event_loop().run_until_complete(
+        budget.check(msgs, query="q", session_id="cb_half"))
+    check("半开重试成功 → 熔断闭合（计数清零）",
+          rr.summary == "LLM-RECOVERED-SUMMARY"
+          and "cb_half" not in _compaction_failures
+          and "cb_half" not in _compaction_breaker_at)
+
+    # ── 条目清理：惰性剔除陈旧（1h 无失败）+ 硬上限逐出 ──
+    _reset_compaction_failures("cb_half")
+    now = time.time()
+    stale_sids = [f"cb_stale_{i}" for i in range(70)]
+    for sid in stale_sids:
+        _compaction_failures[sid] = 3
+        _compaction_breaker_at[sid] = now - 7200          # 2h 前 → 陈旧，应被剔除
+    _record_compaction_failure("cb_fresh")                # 触发惰性清理（>64 条）
+    left = set(_compaction_failures.keys())
+    check("陈旧条目被剔除", not (set(stale_sids) & left))
+    check("新条目保留且计数 1", _compaction_failures.get("cb_fresh", 0) == 1)
+
+    _reset_compaction_failures("cb_fresh")
+    for sid in stale_sids:
+        _reset_compaction_failures(sid)
+
+    bulk = [f"cb_bulk_{i}" for i in range(1050)]          # 超硬上限 1024
+    for sid in bulk:
+        _compaction_failures[sid] = 1
+        _compaction_breaker_at[sid] = time.time()
+    _record_compaction_failure("cb_trigger")              # 触发上限逐出
+    check("硬上限生效（≤1024 条）", len(_compaction_failures) <= 1024,
+          f"len={len(_compaction_failures)}")
+    for sid in bulk + ["cb_trigger"]:
+        _reset_compaction_failures(sid)
+
+
 print()
 if __name__ == "__main__":
     test_checkpoint_persistence_append_only()
     test_batch_compression_and_protection()
     test_noise_trim_and_identifiers()
     test_circuit_breaker()
+    test_circuit_breaker_half_open_recovery()
     print(f"compaction v2 tests: {len(passed)} passed, {len(failed)} failed")
     if failed:
         print("FAILED:", failed)

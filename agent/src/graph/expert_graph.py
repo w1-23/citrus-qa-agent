@@ -8,7 +8,6 @@ import re
 import time
 
 from langchain_core.messages import (
-    SystemMessage,
     HumanMessage,
     AIMessage,
     ToolMessage,
@@ -17,11 +16,11 @@ from langgraph.graph import StateGraph, END
 
 from src.graph.state import AgentState
 from src.config import settings, get_deepseek_model, PROJECT_ROOT
-from src.core.evidence import (render_evidence, EVIDENCE_SNIPPET_MAX_CHARS,
-                               src_of, filter_refs_by_answer)
 from src.core.agent_loop import (
     tc_id as extract_tc_id, count_unique_docs, dedup_by_doi, emit_llm_usage,
     FINAL_ANSWER_PROMPT, invoke_llm_with_retry, force_final_answer,
+    build_cited_refs, renumber_and_sync_trace,
+    run_save_node, default_ltm_gate,
 )
 from src.prompts.loader import assemble_system_prompt
 
@@ -62,16 +61,26 @@ def check_citation_support(answer: str, main_results: list,
     ∪ 长期记忆(LTM)。历史轮次检索的证据（引用编号在会话证据库中）不再误报。
     检测但不强制改写（只标记 + 日志 + 前端轻提示）。
     """
-    cited = {int(n) for n in re.findall(r"\[(\d{1,3})\]", answer or "")}
+    # v8.17.4: 双轨引用统计——[n]（本地/品种库）+ [Wn]（联网）+ [Hn]（历史）
+    # 全部计入引用数；此前只认 [n]，[Wn] 引用多时误报"引用>文献"（根因 B 修复）。
+    # 支撑判定：本地检索 或 联网检索 或 历史/记忆 任一存在即视为有支撑
+    # （联网引用 [Wn] 由 DeepSeek 原生联网回答产生，v8.17.4 起默认可信）。
+    import re as _re
+    cited = {int(n) for n in _re.findall(r"\[(\d{1,3})\]", answer or "")}
+    cited_wn = len(_re.findall(r"\[[WH]\d{1,3}\]", answer or "", _re.IGNORECASE))
     unique_dois = count_unique_docs(main_results)
-    supported = ((bool(retrieval_tool_called) and unique_dois > 0)
+    retrieval_tool_called = bool(retrieval_tool_called) or cited_wn > 0
+    supported = ((retrieval_tool_called and (unique_dois > 0 or cited_wn > 0))
                  or evidence_count > 0 or ltm_chars > 0)
     return {
-        "citation_count": len(cited),
+        "citation_count": len(cited) + cited_wn,
         "retrieval_count": unique_dois,
+        "web_citation_count": cited_wn,
         "evidence_count": evidence_count,
-        "citation_supported": (not cited) or supported,
-        "citation_unsupported": bool(cited) and not supported,
+        "citation_supported": (not cited and cited_wn == 0) or supported,
+        "citation_unsupported": (cited or cited_wn > 0) and not supported,
+        # v8.17.4: 失配判定——本地 [n] 数量 > 本地文献 + 容差时才提示；
+        # [Wn]/[Hn] 不计入失配（它们对应联网/历史来源，无需本地 chunk 校验）
         "citation_mismatch": bool(cited) and supported and len(cited) > unique_dois + 2,
     }
 
@@ -211,8 +220,34 @@ async def _execute_tool_call(tc: dict, tc_id: str = "", material_pack: list | No
     name = tc.get("name", "")
     args = tc.get("args", {})
 
+    # v9.1.1（用户真机日志）: 旧工具名防御——若模型（旧进程 schema 缓存/异常路径）仍发出
+    # call_retrieve_agent，返回明确废弃引导（不再返回空 result 让 supervisor 无感知）。
+    if name == "call_retrieve_agent":
+        logger.warning("[ExpertGraph] supervisor 尝试调用已废弃工具 call_retrieve_agent"
+                       "（v9.1 架构统一检索入口为 call_search_both）")
+        return {"agent": "call_retrieve_agent",
+                "result": ("[ERR_DEPRECATED] call_retrieve_agent 已废弃（v9.1 架构）。"
+                           "统一检索请使用 call_search_both(local_goal, web_goal)"
+                           "——本地与联网并行执行。请勿再调用本工具。"),
+                "artifacts": {"main_results": [], "web_results": [], "web_summaries": []},
+                "tools_called": 0, "status": "error"}
+
+    # v9.1（用户决策）: 统一检索入口——本地 + 联网并行，互不阻塞；
+    # Retrieve-Agent 只做本地（无联网工具）；Web-Agent 无 LLM 决策单次联网。
+    if name == "call_search_both":
+        try:
+            from src.core.search_both import call_search_both
+            return await call_search_both(
+                args.get("local_goal", ""), args.get("web_goal", ""),
+                session_id=session_id, seen_queries=seen_queries)
+        except Exception as e:
+            logger.error(f"[ExpertGraph] call_search_both failed: {e}")
+            return {"agent": "call_search_both",
+                    "result": f"[Error: {e}]",
+                    "artifacts": {"main_results": [], "web_results": [], "web_summaries": []},
+                    "tools_called": 0, "status": "error"}
+
     agent_map = {
-        "call_retrieve_agent": "retrieve-agent",
         "call_write_agent": "write-agent",
         "call_analyze_agent": "analyze-agent",
     }
@@ -401,16 +436,8 @@ async def expert_load_node(state: AgentState) -> dict:
         except Exception:
             pass
 
-        # v8.16.3: 草稿先行启动提前到 load 开头（草稿不依赖 load 结果）——
-        # 此前在 load 结束后 create_task，load 被 hints 卡住（实测 38.6s）时草稿
-        # 等 46s 才上屏；提前后与 load 并行，草稿延迟 = max(自身调用, load)。
-        # create_task 继承当前请求上下文（进度队列 contextvar），fail-soft 零阻塞。
-        try:
-            from src.tools.deepseek_web import draft_worker
-            asyncio.create_task(draft_worker(query, session_id))
-        except Exception as _e:
-            logger.warning(f"[ExpertGraph:load] 草稿先行启动失败（跳过）: {_e}")
-
+        # v8.17.15: 草稿全链删除（用户决策）——原生联网回归 retrieve-agent
+        # 工具链（每轮 goal 驱动、每 turn ≤1 次），此处不再启动 draft_worker。
         ctx = await ctx_mgr.load(session_id, query, mode)
         # v8.4: 收尾装配收敛至 context_manager.finalize_load_result
         # （与 light 图共用，消除双实现漂移）
@@ -481,7 +508,7 @@ def _build_status_content(
     todo: list[str] = []
     if tool_call_count > 0:
         todo.append("[✓] 评估需求")
-        has_retrieve = "call_retrieve_agent" in tool_names_called
+        has_retrieve = "call_search_both" in tool_names_called
         todo.append("[✓] 检索文献" if has_retrieve else "[ ] 检索文献（如需）")
         if any(n in tool_names_called for n in ("call_write_agent", "write_local_file")):
             todo.append("[✓] 撰写/保存内容")
@@ -613,6 +640,7 @@ def _guard_supervisor_budget(supervisor_budget, messages, *, turn, max_turns,
     返回 (call_messages, force_reason)：force_reason 为 "budget" 时调用方须就地
     强制收尾；否则 call_messages（含预算占用率 + 软阈值收敛提示）可直接供 LLM。
     """
+    from src.core.context_manager import budget_usage_ratio  # v9.2 P6 共享占用率
     status_msg = _build_status_message(
         turn=turn, max_turns=max_turns, tool_call_count=tool_call_count,
         max_tools_per_turn=max_tools_per_turn, all_main_results=all_main_results,
@@ -620,36 +648,34 @@ def _guard_supervisor_budget(supervisor_budget, messages, *, turn, max_turns,
         tool_names_called=tool_names_called, format_hint=format_hint,
     )
     call_messages = list(messages) + [status_msg]
-    if supervisor_budget is None:
+    # v9.2 P6: 占用率判定收敛共享 budget_usage_ratio（None = budget 缺失/估算异常，
+    # 与原 try/except 吞错返回 call_messages, None 语义一致）
+    ratio = budget_usage_ratio(supervisor_budget, call_messages)
+    if ratio is None:
         return call_messages, None
-    try:
-        est = supervisor_budget.estimate_tokens(call_messages)
-        ratio = est / supervisor_budget.config.max_tokens
-        if ratio >= supervisor_budget.config.hard_threshold:
-            logger.warning(
-                f"[ExpertGraph:supervisor] 上下文占用 {ratio:.1%} ≥ "
-                f"硬阈值 {supervisor_budget.config.hard_threshold:.0%}，强制收尾")
-            return call_messages, "budget"
-        status_msg = _build_status_message(
-            turn=turn, max_turns=max_turns, tool_call_count=tool_call_count,
-            max_tools_per_turn=max_tools_per_turn, all_main_results=all_main_results,
-            used_queries=used_queries, consecutive_failures=consecutive_failures,
-            tool_names_called=tool_names_called, format_hint=format_hint, ratio=ratio,
-        )
+    if ratio >= supervisor_budget.config.hard_threshold:
+        logger.warning(
+            f"[ExpertGraph:supervisor] 上下文占用 {ratio:.1%} ≥ "
+            f"硬阈值 {supervisor_budget.config.hard_threshold:.0%}，强制收尾")
+        return call_messages, "budget"
+    status_msg = _build_status_message(
+        turn=turn, max_turns=max_turns, tool_call_count=tool_call_count,
+        max_tools_per_turn=max_tools_per_turn, all_main_results=all_main_results,
+        used_queries=used_queries, consecutive_failures=consecutive_failures,
+        tool_names_called=tool_names_called, format_hint=format_hint, ratio=ratio,
+    )
+    call_messages = list(messages) + [status_msg]
+    if ratio >= supervisor_budget.config.soft_threshold:
+        logger.warning(
+            f"[ExpertGraph:supervisor] 上下文占用 {ratio:.1%} ≥ "
+            f"软阈值 {supervisor_budget.config.soft_threshold:.0%}")
+        status_msg = HumanMessage(content=(
+            f"{status_msg.content}\n"
+            f"[budget] 上下文占用 {ratio:.1%}（软阈值 "
+            f"{supervisor_budget.config.soft_threshold:.0%}），"
+            f"请尽快收敛输出。"))
         call_messages = list(messages) + [status_msg]
-        if ratio >= supervisor_budget.config.soft_threshold:
-            logger.warning(
-                f"[ExpertGraph:supervisor] 上下文占用 {ratio:.1%} ≥ "
-                f"软阈值 {supervisor_budget.config.soft_threshold:.0%}")
-            status_msg = HumanMessage(content=(
-                f"{status_msg.content}\n"
-                f"[budget] 上下文占用 {ratio:.1%}（软阈值 "
-                f"{supervisor_budget.config.soft_threshold:.0%}），"
-                f"请尽快收敛输出。"))
-            call_messages = list(messages) + [status_msg]
-        return call_messages, None
-    except Exception:
-        return call_messages, None
+    return call_messages, None
 
 
 # v8.13-b5a: expert supervisor 循环骨架·本轮工具轮（预算跳过/检索去重/写序并行/装配截断/熔断）
@@ -669,11 +695,11 @@ async def _execute_supervisor_tools(*, turn, response, messages,
     pending_calls = pending_calls[:max_tools_per_turn]
     extra_retrieves = []
     if sum(1 for tc in pending_calls
-           if _make_tool_call(tc)["name"] == "call_retrieve_agent") > 1:
+           if _make_tool_call(tc)["name"] == "call_search_both") > 1:
         seen_retrieve = False
         kept = []
         for tc in pending_calls:
-            if _make_tool_call(tc)["name"] == "call_retrieve_agent":
+            if _make_tool_call(tc)["name"] == "call_search_both":
                 if not seen_retrieve:
                     seen_retrieve = True
                     kept.append(tc)
@@ -728,9 +754,9 @@ async def _execute_supervisor_tools(*, turn, response, messages,
         try:
             emit_tool_call_start(tc_dict["name"], tc_dict.get("args", {}), tc_id)
             emit_tool_executing(f"正在执行 {tc_dict['name']}...", tc_dict["name"], tc_id)
-            if tc_dict["name"] in ("call_retrieve_agent", "call_write_agent", "call_analyze_agent"):
+            if tc_dict["name"] in ("call_search_both", "call_write_agent", "call_analyze_agent"):
                 agent_map_short = {
-                    "call_retrieve_agent": "retrieve-agent",
+                    "call_search_both": "search-both",
                     "call_write_agent": "write-agent",
                     "call_analyze_agent": "analyze-agent",
                 }
@@ -763,10 +789,14 @@ async def _execute_supervisor_tools(*, turn, response, messages,
                 mark_tool_start(tc_id, "pdf_read")
             except Exception:
                 pass
-            from src.tools.search import pdf_read as pdf_read_func
-            file_path = tc_dict["args"].get("file_path", "")
-            content, artifact = await asyncio.to_thread(pdf_read_func.func, file_path, False)
-            sub_result = {"agent": "pdf_read", "result": content or "", "artifacts": artifact or {}}
+            # v9.2: 统一工具出口（同 read_local_file/write_local_file）——原代码
+            # 直调 pdf_read_func.func(file_path, False) 多传一个位置参数，而现签名
+            # 仅 pdf_read(file_path)，恒 TypeError 被外层吞成整答失败；且绕过
+            # 沙箱/超时/offload。registry.run_tool_checked 已处理 content_and_artifact。
+            from src.tools.search import pdf_read as pdf_read_tool
+            from src.tools.registry import run_tool_checked
+            content = await run_tool_checked(pdf_read_tool, tc_dict["args"])
+            sub_result = {"agent": "pdf_read", "result": content or "", "artifacts": {}}
             try:
                 emit_tool_result("pdf_read", str(content)[:100000], tc_id,
                                  summary=f"文献提取完成 ({len(str(content))} 字符)")
@@ -876,8 +906,8 @@ async def _execute_supervisor_tools(*, turn, response, messages,
             except Exception:
                 pass
         # v8.3.5 状态栏: 已用检索关键词（模型可见，防重复检索）
-        if tc_dict["name"] == "call_retrieve_agent":
-            q = str((tc_dict.get("args") or {}).get("query", ""))
+        if tc_dict["name"] == "call_search_both":
+            q = str((tc_dict.get("args") or {}).get("local_goal", ""))
             if q:
                 used_queries.append(q[:80])
         # v8.3.5 轻量熔断: 连续工具失败 ≥3 → 强制收尾
@@ -924,49 +954,42 @@ def _assemble_supervisor_answer(*, answer, all_main_results, all_web_results,
 
     deduped_main = dedup_by_doi(all_main_results)
 
-    cited_refs = []
-    for i, r in enumerate(deduped_main[:20]):
-        cited_refs.append({
-            "ref_id": i + 1,
-            "type": "main",
-            "source": src_of(r),                       # v8.15: rag|ucr（前端徽标/手风琴分组）
-            "doi": r.get("doi", "N/A"),
-            "title": r.get("title", r.get("name", "Untitled")),
-            "section_name": r.get("section_name", ""),
-            "text_preview": (r.get("abstract") or r.get("snippet") or "")[:300],
-            "score": r.get("score", r.get("rerank_score", 0)) or 0,
-            "year": r.get("year", ""),
-            "authors": r.get("authors", ""),
-            # v8.15: UCR 品种条目专属字段（无 DOI 时前端显示登记号/品种名）
-            "variety_name": r.get("variety_name", ""),
-            "registry_id": r.get("registry_id", ""),
-        })
-    for i, wr in enumerate(all_web_results[:10]):
-        cited_refs.append({
-            "ref_id": f"W{i+1}",
-            "type": "web",
-            "source": "web",
-            "url": wr.get("url", wr.get("link", "")),
-            "title": wr.get("title", wr.get("name", "Untitled")),
-            "text_preview": (wr.get("snippet") or wr.get("content") or wr.get("abstract") or "")[:300],
-            "score": 0,
-        })
+    # v9.2: 引用回执装配 + 统一重排收敛共享原语（agent_loop.build_cited_refs /
+    # renumber_and_sync_trace——数字 1..k、W W1..Wm、H H1..Hp；remap 随
+    # references_data 下发前端重写正文；轨迹同步防 save 重复消息）
+    cited_refs = build_cited_refs(deduped_main, all_web_results, web_slot=10)
+    answer, cited_refs, ref_remap = renumber_and_sync_trace(
+        messages, answer, cited_refs)
 
-    # v8.15: 侧栏引用只显示回答真实引用的证据（严格过滤 + 按回答首次出现顺序重排；
-    # 未引用的检索文献舍弃，不再全部展示在 RAG/UCR/Web 组）
+    # v8.17.17（用户决策）：恢复历史引用进侧栏——与 web/rag/ucr 同级手风琴展示。
+    # v8.15.2 曾移除（防侧栏膨胀）；用户实测：历史引用被"踢出"侧栏，跨轮信息只能
+    # 经上下文传递、不可回溯 → 改回注入，来源按历史证据分组（historical 组）。
+    # 取最近 10 轮 session_evidence 条目（去重由前端按 ref_id 天然处理）。
+    historical_refs: list[dict] = []
     try:
-        cited_refs = filter_refs_by_answer(answer, cited_refs)
+        _hist = session_manager.get_evidence_refs(session_id, limit=10)
+        for _h in (_hist or []):
+            historical_refs.append({
+                "ref_id": str(_h.get("ref_id", "")),
+                "type": "historical",
+                "source": str(_h.get("source") or "rag"),
+                "doi": str(_h.get("doi") or "N/A"),
+                "url": str(_h.get("url") or ""),
+                "title": str(_h.get("title") or "")[:150],
+                "year": str(_h.get("year") or ""),
+                "text_preview": str(_h.get("snippet") or "")[:250],
+                "score": 0,
+            })
     except Exception as e:
-        logger.debug(f"[ExpertGraph] filter_refs_by_answer skipped: {e}")
+        logger.debug(f"[ExpertGraph] historical refs skipped: {e}")
 
     references_data = {
         "cited": cited_refs,
         "uncited": [],
+        "historical": historical_refs,
+        "remap": ref_remap,
         "total": len(cited_refs),
     }
-
-    # v8.15.2: 不再注入历史证据引用（H1..Hn）——侧栏只显示本轮回答真实引用的证据，
-    # 防止侧栏膨胀；历史跨轮信息仍经上下文/证据账本传递。（原 v8.4.6 F2 行为已移除）
 
     if answer:
         try:
@@ -998,13 +1021,11 @@ def _assemble_supervisor_answer(*, answer, all_main_results, all_web_results,
         _evidence_count = session_manager.count_evidence_items(session_id)
     except Exception:
         pass
-    try:
-        _ltm_chars = len(state.get("long_term_memory") or "")
-    except Exception:
-        pass
+    # v9.2: state 是普通 dict，.get 不可能抛异常——删除无意义 try/except 噪音
+    _ltm_chars = len(state.get("long_term_memory") or "")
     citation_info = check_citation_support(
         answer, all_main_results,
-        "call_retrieve_agent" in tool_names_called,
+        "call_search_both" in tool_names_called,
         evidence_count=_evidence_count,
         ltm_chars=_ltm_chars)
 
@@ -1075,29 +1096,17 @@ async def supervisor_node(state: AgentState) -> dict:
         query=query,
     )
 
-    from src.core.context_manager import LoadedContext, build_human_message
-    ctx = LoadedContext(
-        session_id=state.get("session_id", ""),
-        mode="expert",
-        query=query,
-        history_summary=state.get("history_summary"),
-        long_term_memory=state.get("long_term_memory"),
-        resident_cards=state.get("resident_cards"),
-        search_suggestions=state.get("search_suggestions", []),
-        format_hint=format_hint,
-    )
+    from src.core.context_manager import (build_loaded_context,
+                                          assemble_supervisor_messages,
+                                          build_human_message,
+                                          build_context_budget,
+                                          budget_usage_ratio)
+    # v9.2 P6: LoadedContext 构造收敛（expert/light 共用）
+    ctx = build_loaded_context(state, mode="expert", format_hint=format_hint)
     current_human = build_human_message(ctx)
-
-    messages: list = [SystemMessage(content=system_prompt)]
-    history_msgs = list(state.get("messages", []))
-    if history_msgs:
-        messages.extend(history_msgs)
-    # v8.3.8: 历史检索证据块（跨轮复用）——注入在系统与历史之后、本轮问题之前
-    if state.get("history_evidence_block"):
-        messages.append(HumanMessage(content=state["history_evidence_block"]))
-    messages.append(current_human)
-    # v8.3.8: 本轮轨迹起点（save 节点完整持久化含工具配对）
-    trace_start_index = len(messages) - 1
+    # v9.2 P6: 消息装配收敛（System + 历史 + [历史检索证据] + 本轮 human）
+    messages, trace_start_index = assemble_supervisor_messages(
+        system_prompt, state, current_human)
 
     # v8.4: 客户端进程级复用（llm_pool），避免每请求新建 ChatOpenAI/连接池
     from src.core.llm_pool import get_llm as _pool_get_llm
@@ -1122,15 +1131,8 @@ async def supervisor_node(state: AgentState) -> dict:
     consecutive_failures = 0
     max_tools_per_turn = getattr(settings, "SUPERVISOR_MAX_TOOLS_PER_TURN", 2) or 2
     # v8.3.6 预算前移 (规范 2.2.5): 每次模型调用前检查上下文占用（原仅 load 时检查一次）
-    try:
-        from src.core.context_budget import ContextBudget, ContextBudgetConfig
-        supervisor_budget = ContextBudget(ContextBudgetConfig(
-            max_tokens=settings.CONTEXT_BUDGET_MAX_TOKENS,
-            soft_threshold=settings.CONTEXT_BUDGET_SOFT_THRESHOLD,
-            hard_threshold=settings.CONTEXT_BUDGET_HARD_THRESHOLD,
-        ))
-    except Exception:
-        supervisor_budget = None
+    # v9.2 P6: 预算构造收敛共享 build_context_budget（构造失败 → None，语义不变）
+    supervisor_budget = build_context_budget()
 
     try:
         emit_status("step_done", step_id="load")
@@ -1225,100 +1227,15 @@ async def supervisor_node(state: AgentState) -> dict:
 
 
 async def expert_save_node(state: AgentState) -> dict:
-    query = state.get("query", "")
-    answer = state.get("answer", "")
-    session_id = state.get("session_id", "default")
-    if not answer:
-        return {"_trace": {"node": "save", "elapsed_ms": 0, "summary": "no answer"}}
+    """v9.2: save 核心收敛至 agent_loop.run_save_node（expert 差异：
+    web 证据并入账本 + LTM 结构化章节门槛；行为与 v9.2 前逐位一致）。"""
+    return await run_save_node(
+        state,
+        log_tag="ExpertGraph",
+        include_web=True,
+        ltm_gate=default_ltm_gate,
+    )
 
-    try:
-        from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
-        from src.session.manager import session_manager, _validate_trace
-        from src.core.background import spawn
-        # v8.3.8: 完整轨迹持久化（含 tool_calls/ToolMessage 配对），不再只存 Q/A
-        trace = list(state.get("turn_trace") or [])
-        # 过滤 system 与注入的证据块（它们不属于会话轨迹）
-        trace = [m for m in trace
-                 if not isinstance(m, type(None)) and getattr(m, "type", "") != "system"]
-        # 历史证据块是注入消息，不重复入历史（由 session_evidence 表承载）
-        trace = [m for m in trace
-                 if not str(getattr(m, "content", "")).startswith("[历史检索证据")]
-        trace = _validate_trace(trace)
-        # 最终回答保证在轨迹末尾
-        if not (trace and isinstance(trace[-1], AIMessage)
-                and not getattr(trace[-1], "tool_calls", None)
-                and trace[-1].content == answer):
-            trace.append(AIMessage(content=answer))
-        spawn(session_manager.save_messages(
-            session_id, trace, state.get("idempotency_key", "")))
-        # v8.3.8: 证据账本（检索报告 + 结构化清单，跨轮复用）
-        # v8.3.9: 合并全部检索报告（多轮检索不丢） + evidence 保留 chunk_id 可回查原文
-        report_parts = []
-        for m in trace:
-            if isinstance(m, ToolMessage) and getattr(m, "name", "") == "call_retrieve_agent":
-                report_parts.append(str(m.content))
-        report_text = "\n\n---\n\n".join(report_parts)
-        main_results = state.get("main_results") or []
-        if report_text or main_results:
-            evidence = [
-                {
-                    "doi": r.get("doi", ""),
-                    "chunk_id": f"{r.get('paper_id', '')}:{r.get('chunk_index', '')}",
-                    "title": str(r.get("title", ""))[:150],
-                    "score": r.get("score", r.get("rerank_score", 0)) or 0,
-                    "year": str(r.get("year", "")),
-                    # v8.15: 来源随账本持久化（历史证据 H1..Hn 保留来源徽标）
-                    "source": src_of(r),
-                    # v8.13-b4c: 账本片段经 render_evidence 单一渲染（2000 安全阀）
-                    "snippet": render_evidence(r, max_chars=EVIDENCE_SNIPPET_MAX_CHARS),
-                }
-                for r in main_results[:30]
-            ]
-            spawn(session_manager.save_evidence(
-                session_id, query, evidence, report_text))
-    except Exception as e:
-        logger.warning(f"[ExpertGraph:save] failed: {e}")
-
-    try:
-        # v8.4: LTM 提取转后台（spawn），不与响应抢时间；写入走 ADD-only + 置信度门槛
-        # （书 3.1 记忆生命周期: 后台提取候选 → 核验 → 更新；提取器不阻塞主链路）
-        from src.core.background import spawn as _spawn
-
-        def _extract_and_save_ltm(q: str, a: str, sid: str):
-            try:
-                from src.guardrails.memory import memory_store
-                facts = memory_store.extract_key_facts(q, a)
-                for f in facts:
-                    # v8.6 (书 §3.1 偏好追踪): type=preference 走 preference_memory
-                    # （消费点见 build_human_message 的 <user_preferences> 块）
-                    # v8.9: 偏好写入全局域（用户级偏好跨会话生效）
-                    if f.get("type") == "preference":
-                        memory_store.set_preference(
-                            memory_store.GLOBAL_PREF_DOMAIN,
-                            f.get("key", ""), f.get("value", ""))
-                        continue
-                    memory_store.save_long_term_fact(
-                        f.get("key", ""),
-                        f.get("value", ""),
-                        f.get("confidence", 0.5),
-                        owner_session=sid,
-                        source_query=q,
-                    )
-            except Exception as e:
-                logger.debug(f"[ExpertGraph:save] LTM background extract failed: {e}")
-
-        if len(answer) > 500:
-            is_substantial = any(
-                kw in answer
-                for kw in ("###", "结论", "摘要", "引言", "核心结论", "局限与边界")
-            )
-            if is_substantial:
-                _spawn(asyncio.to_thread(
-                    _extract_and_save_ltm, query, answer, session_id))
-    except Exception as e:
-        logger.debug(f"[ExpertGraph:save] LTM skip: {e}")
-
-    return {"_trace": {"node": "save", "elapsed_ms": 0, "summary": "saved"}}
 
 
 def build_expert_graph() -> StateGraph:

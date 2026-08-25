@@ -27,6 +27,8 @@ import requests
 from langchain_core.tools import tool
 
 from src.config import settings, PROJECT_ROOT
+# v8.17.19: 复用 llm_pool 的参数拒绝判定（HyDE extra_body 关闭字段 fail-soft）
+from src.core.llm_pool import is_thinking_rejected as _is_thinking_rejected_impl
 from src.core.evidence import (
     render_evidence, EVIDENCE_TOOL_MAX_CHARS,
     src_of, SOURCE_TAG, SOURCE_LABEL,
@@ -234,6 +236,24 @@ def _is_citrus_related(text: str) -> bool:
 
     return any(kw.lower() in text.lower() for kw in _CITRUS_KEYWORDS)
 
+
+# v8.17: 品种意图检测——品种/品系/品种库/种质/登记等词触发 UCR 品种库优先命中
+# （UCR 批次 batch_source=ucr，evidence 前缀 [UCR]）。误报（如"品种改良"）无害：
+# boost 只是把 UCR 命中前置加权，不改变全库召回。
+_VARIETY_INTENT_KEYWORDS = [
+    "品种", "品系", "栽培品种", "品种库", "品种特性", "品种资源",
+    "种质", "育种", "登记", "注册品种", "variet", "cultivar", "cultivars",
+    "ucr", "crc", "accession", "registry", "germplasm",
+]
+
+
+def _is_variety_intent(query: str) -> bool:
+    """品种类问题判定（纯函数可单测）——命中即对 UCR 来源加权。"""
+    if not query:
+        return False
+    q = str(query).lower()
+    return any(kw in q for kw in _VARIETY_INTENT_KEYWORDS)
+
 def _extract_doi(text: str) -> str | None:
 
     match = re.search(r'''(10\.\d{4,}/[^\s"'\]\)]+)''', text)
@@ -410,7 +430,7 @@ def citrus_rag_search(query: str) -> tuple[str, dict]:
                 queries.append(query)
                 logger.info(f"[HyDE] 结构化仅 HyDE 段，补充原始查询保底 → "
                             f"{len(queries)} 路查询")
-            results = rag.search_multi(queries)
+            results = rag.search_multi(queries, original_query=query)
         else:
             results = rag.search(query)
 
@@ -563,15 +583,18 @@ def _generate_hyde_structured(query: str) -> str | None:
             timeout=15,  # v8.3.1: 3s 太短导致 flash 生成假想答案频繁超时降级（每次检索白等+丢 hyde_dense 一路）
         )
         answer = ""
-        extra: dict = {}
+        # v8.17.19: HyDE 关思维链经 extra_body 原样透传网关（字段形态由
+        # config model.reasoning_off_body 控制，默认官方推荐 thinking 关闭；
+        # 网关不支持时改配置）；字段被网关拒绝（400/422）→ 去参重试一次
+        # （fail-soft，最差=现状行为）。v8.16.3c 真空输出（思维链吃光预算
+        # 致 content 空）防线。
+        off_body: dict = {}
         if getattr(settings, "HYDE_THINKING_OFF", True):
-            # v8.16.3c: 实测 22:02:33/44 连续两次真空输出（成功调用但 content 为空，
-            # "第 N 次返回为空"日志实证）——v4-flash 思维链吃光预算（draft call
-            # 1024→2048 同款事故）。DeepSeek chat 端点关闭思维链参数；不兼容时抛
-            # 异常 → 走下方 except fail-soft 回退基础检索（最差=现状 1 路查询）
-            extra["extra_body"] = {"thinking": {"type": "disabled"}}
+            _cfg = getattr(settings, "MODEL_REASONING_OFF_BODY", None) or {}
+            if isinstance(_cfg, dict) and _cfg:
+                off_body = dict(_cfg)
         for attempt in (1, 2):
-            resp = client.chat.completions.create(
+            kw: dict = dict(
                 model=settings.RESOLVED_FAST_MODEL,
                 messages=[
                     {"role": "system", "content": _HYDE_PROMPT},
@@ -579,8 +602,20 @@ def _generate_hyde_structured(query: str) -> str | None:
                 ],
                 temperature=0.2,
                 max_tokens=settings.HYDE_MAX_TOKENS,
-                **extra,
             )
+            if off_body:
+                kw["extra_body"] = off_body
+            try:
+                resp = client.chat.completions.create(**kw)
+            except Exception as e:
+                if off_body and _is_thinking_rejected_impl(e):
+                    logger.warning(
+                        f"[HyDE] thinking 关闭字段被网关拒绝，去参重试: {e}")
+                    off_body = {}
+                    kw.pop("extra_body", None)
+                    resp = client.chat.completions.create(**kw)
+                else:
+                    raise
             answer = (resp.choices[0].message.content or "").strip()
             if answer:
                 break

@@ -55,8 +55,8 @@ def test_retrieve_turns():
     cfg = yaml.safe_load(open(os.path.join(BASE, 'config.yaml'), encoding='utf-8'))
     check("config subagents.retrieve-agent.max_turns=3",
           cfg.get('subagents', {}).get('retrieve-agent', {}).get('max_turns') == 3)
-    prom = open(os.path.join(BASE, 'src', 'prompts', 'agents', 'retrieve-agent.md'), encoding='utf-8').read()
-    check("prompt 含轮次语义", "三阶段" in prom and "阶段 1" in prom and "阶段 3" in prom)
+    prom = open(os.path.join(BASE, 'src', 'prompts', 'source', '04_retrieve_agent_search.md'), encoding='utf-8').read()
+    check("prompt 含轮次语义", "最多 3 轮" in prom and "第 1 轮" in prom and "收尾" in prom)
 
 
 def test_light_read():
@@ -64,7 +64,7 @@ def test_light_read():
     light = open(os.path.join(BASE, 'src', 'graph', 'light_graph.py'), encoding='utf-8').read()
     check("LIGHT_TOOL_NAMES 含 read_local_file",
           'LIGHT_TOOL_NAMES = ("citrus_rag_search", "read_local_file")' in light)
-    rules = open(os.path.join(BASE, 'src', 'prompts', 'system', 'light_rules.md'), encoding='utf-8').read()
+    rules = open(os.path.join(BASE, 'src', 'prompts', 'source', '19_lite_mode.md'), encoding='utf-8').read()
     check("light_rules 边界更新", "读取单个本地文件" in rules)
 
 
@@ -80,10 +80,10 @@ def test_dead_code_removed():
 
 def test_prompt_boundaries():
     print("[职责] prompt 双向边界")
-    guide = open(os.path.join(BASE, 'src', 'prompts', 'system', 'decision_guide.md'), encoding='utf-8').read()
-    writer = open(os.path.join(BASE, 'src', 'prompts', 'agents', 'write-agent.md'), encoding='utf-8').read()
-    check("decision_guide 含 write_local_file 直写指引", "直接调 write_local_file" in guide)
-    check("decision_guide 含 call_write_agent 撰写指引", "调 **call_write_agent**" in guide)
+    guide = open(os.path.join(BASE, 'src', 'prompts', 'source', '16_tool_usage_file_rules.md'), encoding='utf-8').read()
+    writer = open(os.path.join(BASE, 'src', 'prompts', 'source', '05_academic_writing_common.md'), encoding='utf-8').read()
+    check("工具规则含 write_local_file 直写指引", "直接调用 `write_local_file`" in guide)
+    check("工具规则含 call_write_agent 撰写指引", "call_write_agent" in guide)
     check("write-agent 含原样保存指令", "原样写入" in writer and "不要改写" in writer)
     check("write-agent 自检含补写", "mode=\"append\"" in writer)
 

@@ -109,34 +109,28 @@ class Settings(BaseSettings):
     # 旧 30s 把本会成功的慢响应自掐成"伪失败"（7×30s 白等根因）
     WEB_SEARCH_TIMEOUT: int = Field(default_factory=lambda: _yaml_val("web_search", "timeout_sec", default=90))
 
-    # v8.16.1: 草稿先行——load 后后台 fast 调用一次性产出
-    # DRAFT_ZH（中文展示）/ DRAFT_EN（HyDE 复用）/ MULTI_QUERY / SUMMARY，
-    # 前端 3-5s 见「预检索草稿·验证中」；草稿衍生查询并入多路检索。
-    DRAFT_ENABLED: bool = Field(default_factory=lambda: _yaml_val("draft", "enabled", default=True))
-    DRAFT_LABEL: str = Field(default_factory=lambda: _yaml_val("draft", "label", default="预检索草稿·验证中"))
-    DRAFT_MAX_CHARS: int = Field(default_factory=lambda: _yaml_val("draft", "max_chars", default=800))
-    # v8.16.4: 草稿快调用关思维链（HyDE/hints 同款参数）——思维链吃预算→区块尾部
-    # 截断→解析失败→降级 200 字的根治开关；厂商参数不兼容时 fail-soft 退回默认重试
-    DRAFT_THINKING_OFF: bool = Field(default_factory=lambda: _yaml_val("draft", "thinking_off", default=True))
-    # 草稿 HTTP 超时（秒）——非联网调用 2-5s，留足余量防慢响应被自掐
-    DRAFT_TIMEOUT_SEC: int = Field(default_factory=lambda: _yaml_val("draft", "timeout_sec", default=15))
-    # v8.16.3: 草稿调用输出上限——真空输出根因（v4-flash 思维链吃光 max_tokens，
-    # v8.15.3c HyDE 同款事故）：1024→2048 给思维链留足余量（结构化区块实际 400-800 tokens）
-    DRAFT_MAX_TOKENS: int = Field(default_factory=lambda: _yaml_val("draft", "max_tokens", default=2048))
-    DRAFT_MAX_ANGLES: int = Field(default_factory=lambda: _yaml_val("draft", "max_angles", default=3))
-    # 已确认：SUMMARY 上限 3 条（不做 5-8），与草稿提示词「恰好 3 条」一致
-    DRAFT_SUMMARY_POINTS: int = Field(default_factory=lambda: _yaml_val("draft", "summary_points", default=3))
-    # 草稿衍生查询（DRAFT_EN + MULTI_QUERY + SUMMARY）是否并入 search_multi 多路检索
-    DRAFT_EXTRA_RETRIEVAL: bool = Field(default_factory=lambda: _yaml_val("draft", "extra_retrieval", default=True))
-
     # 4. Chat Parameters (centralized)
     TEMPERATURE_MAIN: float = Field(default_factory=lambda: _yaml_val("chat", "temperature_main", default=0.2))
     TEMPERATURE_FAST: float = Field(default_factory=lambda: _yaml_val("chat", "temperature_fast", default=0.0))
     MAX_TOKENS: int = Field(default_factory=lambda: _yaml_val("chat", "max_tokens", default=4096))
     # v8.15.3: 检索决策子代理思维链控制（"default"=不发送任何参数；"off"= 给
-    # retrieve-agent 下发 thinking:disabled 关闭推理——需先在真机确认 API 兼容后再
-    # 开启，默认不发送以避免未实测的 400/参数忽略风险）
+    # retrieve-agent 下发 thinking:disabled 关闭推理——v8.17.19 起经 extra_body
+    # 通道透传（SDK 合法参数、进请求体由网关裁决；v8.17.18 曾顶层下发致 TypeError
+    # 全挂）。fail-soft：网关拒绝（400/422）→ 自动去参重试一次，点位不挂。
     MODEL_REASONING_MODE: str = Field(default_factory=lambda: _yaml_val("model", "reasoning_mode", default="default"))
+    # v8.17.19: thinking_off 关闭思维链的请求体字段（extra_body 原样透传网关）。
+    # 官方 DeepSeek 推荐 {"thinking": {"type": "disabled"}}；第三方网关不支持时
+    # 替换为 {"reasoning": {"enabled": false}} / {"reasoning_effort": "none"} /
+    # {"enable_thinking": false}（config.yaml model.reasoning_off_body，真机验证哪个
+    # 有效——判断标准：响应无 reasoning_content 且耗时明显下降）。
+    MODEL_REASONING_OFF_BODY: dict = Field(default_factory=lambda: _yaml_val(
+        "model", "reasoning_off_body", default={"thinking": {"type": "disabled"}}))
+    # v9.1（真机实测 2026-08-24）: Responses 端点（/v1/responses——deepseek_web_search
+    # 内部联网调用）不接受 thinking:disabled（HTTP 200 但 reasoning 照出）；实测
+    # 有效字段为 {"reasoning": {"effort": "none"}}（输出无 reasoning 块）。
+    # 与 chat/completions 端点字段（MODEL_REASONING_OFF_BODY）不同，须分开配置。
+    WEB_REASONING_OFF_BODY: dict = Field(default_factory=lambda: _yaml_val(
+        "web_search", "reasoning_off_body", default={"reasoning": {"effort": "none"}}))
     # v8.4 清理: RECENT_CONTENT_MAX_CHARS / COMPACT_MAX_TOKENS / FALLBACK_CONTENT_MAX_CHARS
     # 死配置已删（对应旧 graph.py check_history/compact_history 节点，代码已无引用；
     # 压缩统一走 context_budget 段的 ContextBudgetConfig）

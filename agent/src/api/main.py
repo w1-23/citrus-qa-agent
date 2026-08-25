@@ -83,6 +83,29 @@ async def lifespan(app: FastAPI):
         logger.info("[Lifespan] RAG engine warmed up")
     except Exception as e:
         logger.error(f"[Lifespan] RAG warm-up failed: {e}")
+    # v9.0: 启动时一次性拼接固定 system prompt（Supervisor/Retrieve/Write/Lite/…）
+    # 之后每次请求复用同一字符串，不再拼接、不再动态选择格式模板（KV cache 最大化复用）
+    try:
+        from src.prompts.loader import ensure_fixed_prompts
+        _prompts = ensure_fixed_prompts()
+        logger.info("[Lifespan] fixed prompts warmed: "
+                    + ", ".join(f"{k}={len(v)}chars" for k, v in _prompts.items()))
+    except Exception as e:
+        logger.error(f"[Lifespan] fixed prompts build failed: {e}")
+    # v9.1.2（用户真机日志排查: Ruby 旧工具调用 vs 同 session 新路径矛盾）:
+    # 启动时打印 supervisor 工具 schema 快照——进程内 schema 单例在 import 时求值、
+    # 恒定不变（supervisor_tools → expert_graph._AGENT_TOOLS → bind_tools，无按会话
+    # 重建路径）。真机重启后第一眼即可从本行日志判定进程加载的代码版本：
+    #   含 call_search_both = 新代码；含 [LEGACY ... PRESENT] 标记 = 旧构建。
+    try:
+        from src.tools.supervisor_tools import get_supervisor_tool_names
+        _sup_names = get_supervisor_tool_names()
+        logger.info("[Lifespan] supervisor tools snapshot: "
+                    + ", ".join(_sup_names)
+                    + (" [LEGACY call_retrieve_agent PRESENT]" 
+                       if "call_retrieve_agent" in _sup_names else ""))
+    except Exception as e:
+        logger.warning(f"[Lifespan] supervisor tools snapshot failed: {e}")
     yield
     try:
         from src.retrieval.multi_retriever import MultiBatchRetriever
@@ -211,10 +234,14 @@ async def chat_v2(req: ChatRequest):
         "idempotency_key": idem_key,
         # v8.15: 联网搜索由前端开关逐请求决定（config web_search.enabled 仅作部署默认值，
         # 不设启用门槛）——前端开则本次可联网，关则工具执行层短路为 [DISABLED]
-        "web_search_enabled": bool(req.web_search_enabled),
+        # v9.2: 开关只经 tracing contextvar（下行 set_web_search_enabled）传递，
+        # state 键为写而不读死字段已于重构中删除
     }
-    from src.core.tracing import set_web_search_enabled, set_original_query
+    from src.core.tracing import set_web_search_enabled, set_original_query, reset_web_budget
     set_web_search_enabled(bool(req.web_search_enabled))
+    # v9.1（用户决策：每个用户请求最多一次联网）: 请求级联网预算重置——
+    # deepseek_web_search 入口消费，超预算返回 [WEB_BUDGET_EXHAUSTED]。
+    reset_web_budget(1)
     # v8.15.3d: 用户原始问题直传联网工具——deepseek_web_search 把原始问题原样交给
     # DeepSeek 原生联网（output_text 围绕原始问题作答），检索词仅作"搜索参考关键词"
     set_original_query(query)
@@ -222,10 +249,9 @@ async def chat_v2(req: ChatRequest):
 
     async def event_generator():
         from src.core.progress_bus import (
-            get_progress_queue,
             set_request_queue, clear_request_queue,
             _encode_event, log_sse_frame,
-            get_running_tools, get_tool_elapsed, clear_tool_timers,
+            get_running_tools, clear_tool_timers,
         )
 
         # v8.3.3: 每个请求独立队列（contextvars 绑定），并发会话互不串扰
@@ -235,12 +261,14 @@ async def chat_v2(req: ChatRequest):
         event_queue: asyncio.Queue = asyncio.Queue()
 
         async def bridge_progress():
+            # v9.2 P4 根治: 事件驱动桥——原 0.3s 轮询（wait_for(timeout=0.3)）带来
+            # 至多 300ms 转发延迟，且是后续 sleep(0.5)/轮询排空时序补丁的根因之一。
+            # 改阻塞 get()：事件即刻转发；任务取消经 CancelledError 传播（finally
+            # 统一 cancel，无泄漏）。
             while True:
                 try:
-                    evt = await asyncio.wait_for(request_queue.get(), timeout=0.3)
+                    evt = await request_queue.get()
                     await event_queue.put(evt)
-                except asyncio.TimeoutError:
-                    continue
                 except asyncio.CancelledError:
                     break
                 except Exception:
@@ -278,6 +306,17 @@ async def chat_v2(req: ChatRequest):
             if observer_connected:
                 await event_queue.put(evt)
 
+        async def flush_bridge() -> None:
+            # v9.2 P4 根治: 确定性排空替代时序补丁（原 done 前 sleep(0.5) 与
+            # finally 10×0.1s 轮询排空）。事件驱动桥下，工具线程返回前已入队的
+            # 事件即刻转发；此处显式把 request_queue 中仍在等待转发的事件一次
+            # 性搬入 event_queue，并让出数轮事件循环吸收并发入队，保证它们
+            # 先于 done / sentinel 到达（done 契约"事件顺序"不变量保持）。
+            for _ in range(3):
+                while not request_queue.empty():
+                    await event_queue.put(request_queue.get_nowait())
+                await asyncio.sleep(0)
+
         async def process_graph():
             # v8.4.11: 注册运行任务（cancel 端点按 job_id 定位取消）
             _running_graph_tasks[job_id] = asyncio.current_task()
@@ -302,10 +341,15 @@ async def chat_v2(req: ChatRequest):
                                 "main_count": len(output.get("main_results", [])),
                             }))
 
-                        if node_name in ("supervisor", "light_synthesize", "light_react"):
+                        # v9.2: 节点名改为真实值（原 "light_synthesize"/"light_react" 是
+                        # v8.3.0 前 light 老节点名→ light 恒落入兜底分支：丢 citation_info/
+                        # tools_called、job 永不 completed、request_done 日志缺失）
+                        if node_name in ("supervisor", "light_supervisor"):
                             ans = output.get("answer", "")
                             if ans:
-                                await asyncio.sleep(0.5)
+                                # v9.2 P4 根治: 排空桥替代原 sleep(0.5) 时序猜
+                                # 测——工具线程已入队的进度事件先于 done 到达
+                                await flush_bridge()
                                 done_payload = {
                                     "session_id": sid,
                                     "answer": ans,
@@ -323,10 +367,13 @@ async def chat_v2(req: ChatRequest):
                                 jobs_mod.update_job(job_id, status="completed",
                                                     progress_summary=ans[:200])
                                 # v8.4.1: 业务日志
+                                # v9.1.3: tools 口径与 supervisor_done 一致——tools_called
+                                # 为列表（AgentState 已声明，不再被 langgraph 丢弃），取长度
+                                _tools_n = len(output.get("tools_called") or [])
                                 try:
                                     from src.core.business_logger import blog
                                     blog("request_done", answer_chars=len(ans),
-                                         tools=output.get("tools_called", 0),
+                                         tools=_tools_n,
                                          ms=int((time.perf_counter() - t0) * 1000),
                                          job=job_id[:12])
                                 except Exception:
@@ -336,7 +383,7 @@ async def chat_v2(req: ChatRequest):
                                     from src.core.diag import diag
                                     diag("request_done", node=node_name,
                                          answer_chars=len(ans),
-                                         tools=output.get("tools_called", 0),
+                                         tools=_tools_n,
                                          ms=int((time.perf_counter() - t0) * 1000))
                                 except Exception:
                                     pass
@@ -381,11 +428,11 @@ async def chat_v2(req: ChatRequest):
             finally:
                 # v8.4.11: 注销运行任务（正常/取消/异常路径统一清理）
                 _running_graph_tasks.pop(job_id, None)
-                # Drain pending bridge events before sending sentinel
-                for _ in range(10):
-                    if request_queue.empty():
-                        break
-                    await asyncio.sleep(0.1)
+                # v8.17.15: 草稿任务注册表已删除（草稿全链移除，联网回归
+                # retrieve-agent 工具链），此处不再等待草稿——直接关闭连接。
+                # v9.2 P4 根治: 确定性排空替代原 10×0.1s 轮询排空——桥中遗留
+                # 事件全部先搬到 event_queue，再发 sentinel（事件顺序不变量）
+                await flush_bridge()
                 heartbeat_task.cancel()
                 if observer_connected:
                     await event_queue.put(None)
@@ -873,52 +920,86 @@ async def session_workspace_files(session_id: str):
 
 @app.get("/api/v2/session/{session_id}/citations")
 async def session_citations(session_id: str):
-    """v8.10k: 会话历史文献引用恢复（来自 session_evidence 每轮落库）。
+    """v9.2: 会话历史文献引用恢复——按来源 4 组合并（RAG/UCR/Web/历史）。
 
-    前端内存 roundHistory 在刷新/切换会话后丢失——文献引用栏为空；
-    本端点按轮次返回引用，前端恢复渲染（同一会话内跨轮累加）。
+    替代 v8.10k 每轮列表结构（ref_id=R{turn}-{i} 与正文 [n]/[Wn]/[Hn] 体系
+    不同源、点击不可追踪）：返回与 live 侧栏同构的 groups——
+      数字组（rag ∪ ucr，与 live [n] 共用编号池）连续 1..k；
+      web 组 W1..Wm；historical 组 H1..Hn（get_evidence_refs 同款跨轮去重）。
+    每组条目携带 round_seq（来源轮次）元数据。前端刷新/切换会话后按 4 组
+    手风琴渲染，正文历史引用编号可对应组内条目。
     """
     import sqlite3
-    rounds: list[dict] = []
+    import json as _json
+    groups: dict[str, list] = {"rag": [], "ucr": [], "web": [], "historical": []}
+    seen: dict[str, set] = {"rag": set(), "ucr": set(), "web": set()}
+    num_i = 0
+    web_i = 0
     try:
         with sqlite3.connect(str(PROJECT_ROOT / "state" / "sessions.db")) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                "SELECT turn_seq, query, evidence_json FROM session_evidence "
-                "WHERE session_id=? ORDER BY turn_seq ASC", (session_id,)).fetchall()
-        for r in rows:
-            items: list[dict] = []
-            try:
-                import json as _json
-                raw = _json.loads(r["evidence_json"] or "[]")
-            except Exception:
-                raw = []
-            for i, e in enumerate(raw):
-                if not isinstance(e, dict):
-                    continue
-                doi = str(e.get("doi") or "N/A")
-                items.append({
-                    "ref_id": f"R{r['turn_seq']}-{i + 1}",
-                    "type": "main",
-                    "source": str(e.get("source") or "rag"),   # v8.15: 历史引用保留来源徽标
-                    "doi": doi,
-                    "title": str(e.get("title") or "")[:200],
-                    "year": str(e.get("year") or ""),
-                    "score": float(e.get("score") or 0),
-                    "chunk_id": str(e.get("chunk_id") or ""),
-                    "text_preview": str(e.get("snippet") or "")[:250],
-                })
-            if items:
-                rounds.append({
-                    "round_id": f"hist-{r['turn_seq']}",
-                    "query": str(r["query"] or ""),
-                    "cited": items,
-                    "uncited": [],
-                    "historical": [],
-                })
+                "SELECT turn_seq, evidence_json FROM session_evidence "
+                "WHERE session_id=? ORDER BY id DESC LIMIT 10", (session_id,)).fetchall()
     except Exception as e:
         logger.warning(f"[API] session citations failed: {e}")
-    return {"session_id": session_id, "rounds": rounds, "count": len(rounds)}
+        return {"session_id": session_id, "groups": groups, "count": 0}
+    for r in reversed(rows):   # 旧 → 新：编号顺序与回答内首次出现一致
+        turn_seq = r["turn_seq"]
+        try:
+            raw = _json.loads(r["evidence_json"] or "[]")
+        except Exception:
+            raw = []
+        if not isinstance(raw, list):
+            continue
+        for e in raw:
+            if not isinstance(e, dict):
+                continue
+            src = str(e.get("source") or "").strip() or "rag"
+            group = src if src in ("rag", "ucr", "web") else "rag"
+            doi = str(e.get("doi") or "").strip()
+            title = str(e.get("title") or "").strip()[:150]
+            key = (doi or title or str(e.get("chunk_id") or "")).strip()
+            if not key or key in seen[group]:
+                continue
+            seen[group].add(key)
+            if group == "web":
+                web_i += 1
+                ref_id = f"W{web_i}"
+            else:
+                num_i += 1
+                ref_id = str(num_i)
+            groups[group].append({
+                "ref_id": ref_id,
+                "type": "main" if group != "web" else "web",
+                "source": group,
+                "doi": doi or "N/A",
+                "title": title,
+                "year": str(e.get("year") or ""),
+                "score": float(e.get("score") or 0),
+                "chunk_id": str(e.get("chunk_id") or ""),
+                "text_preview": str(e.get("snippet") or "")[:250],
+                "round_seq": turn_seq,   # 来源轮次元数据（前端可显示"第 N 轮"）
+            })
+    # 历史组 = 最近 10 轮证据去重（H1..Hn，与 live historical 组同口径）
+    try:
+        _hist = session_manager.get_evidence_refs(session_id, limit=10)
+        for i, _h in enumerate(_hist or [], 1):
+            groups["historical"].append({
+                "ref_id": f"H{i}",
+                "type": "historical",
+                "source": str(_h.get("source") or "rag"),
+                "doi": str(_h.get("doi") or "N/A"),
+                "url": str(_h.get("url") or ""),
+                "title": str(_h.get("title") or "")[:150],
+                "year": str(_h.get("year") or ""),
+                "text_preview": "",
+                "chunk_id": str(_h.get("chunk_id") or ""),
+            })
+    except Exception as e:
+        logger.debug(f"[API] session citations historical failed: {e}")
+    return {"session_id": session_id, "groups": groups,
+            "count": sum(len(v) for v in groups.values())}
 
 
 # ── v8.4.9 会话持久化：历史对话读取（前端刷新/关闭重开后恢复渲染）──

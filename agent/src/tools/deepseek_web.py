@@ -148,7 +148,7 @@ def deepseek_web_search(query: str) -> Tuple[str, dict]:
     empty = {"main_results": [], "web_results": []}
     # v8.15: 前端开关即总开关（config web_search.enabled 仅部署默认值，不作门槛）。
     # 每次请求由 chat_v2 写入 web_search_enabled contextvar，工具执行层据此强制短路——
-    # 开关关闭时即使模型误调也不会产生任何网络请求。
+    # 开关关闭时即使模型误调也不会产生任何网络请求（且不消耗联网预算）。
     from src.core.tracing import web_search_enabled as _req_web_on
     if not _req_web_on():
         logger.info("[deepseek_web_search] 本次请求未开启联网搜索，请求被短路")
@@ -156,33 +156,36 @@ def deepseek_web_search(query: str) -> Tuple[str, dict]:
                 "建议: 需要实时/最新信息时，点击输入框左下的「联网」开关后重新提问；"
                 "本地文献类问题直接使用 citrus_rag_search。",
                 empty)
+    # v9.1: 联网预算——每个用户请求最多调用一次（用户决策；chat_v2 每请求重置）。
+    # 开关开启且预算用尽 → [WEB_BUDGET_EXHAUSTED] 立即短路（不再产生任何联网调用）。
+    from src.core.tracing import consume_web_budget
+    if not consume_web_budget():
+        logger.info("[deepseek_web_search] 本次请求联网预算已用尽，请求被短路")
+        return ("[WEB_BUDGET_EXHAUSTED] 本次请求的联网检索预算已用尽（每个请求仅允许"
+                "一次联网）。请基于本地证据收尾，或在下一轮提问时重新发起。",
+                empty)
     query = (query or "").strip()
     if not query:
         return "[ERR_PARSE] 查询词不能为空", empty
     if len(query) > 500:
         return f"[ERR_PARSE] 查询词过长 ({len(query)}字符)，请精简至 500 字符以内", empty
 
-    # v8.15.3d: 输入构造——**用户原始问题优先**（chat_v2 经 contextvar 直传）：
-    # DeepSeek 原生联网围绕原始问题作答（output_text 即针对原始问题的综述回答）；
-    # 模型给的检索词降级为"搜索参考关键词"（双保险）。原始问题缺失时回退纯检索词。
-    # 同时附加"带网址引用"指令——DeepSeek 该版本 web_search_call 只回搜索动作、
+    # v8.17.15: 输入构造——**工具参数 query 即 web-agent 收到的 web_goal**（v9.1：
+    # Supervisor 构造完整联网目标原样下发，web-agent 无 LLM 决策、不改写）。
+    # 附带"带网址引用"指令——DeepSeek 该版本 web_search_call 只回搜索动作、
     # 不返回结构化来源，须让模型在回答里明确写出真实网址（[标题](URL)），
     # 才能被解析进「联网搜索」证据组并在侧栏点击。
-    _orig_q = ""
-    try:
-        from src.core.tracing import original_query as _orig_query
-        _orig_q = (_orig_query() or "").strip()
-    except Exception:
-        _orig_q = ""
     _ref_cmd = ("如果使用了联网搜索，请在回答中对引用的信息来源标注真实网址，"
                 "格式如：[来源标题](https://...)。只列你实际引用且真实存在的网页地址。")
-    if _orig_q and _orig_q != query:
-        _input_prompt = (f"{_orig_q}\n\n"
-                         f"（搜索参考关键词：{query}）\n\n{_ref_cmd}")
-        logger.info(f"[deepseek_web_search] 原始问题直传：{_orig_q[:80]}...")
-    else:
-        _input_prompt = f"{query}\n\n{_ref_cmd}"
+    _input_prompt = f"{query}\n\n{_ref_cmd}"
     t0 = time.perf_counter()
+    # v9.1（真机实测）: Responses 端点关思维链——thinking:disabled 无效（reasoning 块
+    # 照出），有效字段为 reasoning effort none。字段形态走 config web_search.
+    # reasoning_off_body；HTTP 400/422（参数被拒）→ 去参重试一次（fail-soft）。
+    off_body: dict = {}
+    _cfg = getattr(settings, "WEB_REASONING_OFF_BODY", None) or {}
+    if isinstance(_cfg, dict) and _cfg:
+        off_body = dict(_cfg)
     try:
         payload = {
             "model": get_deepseek_model(),
@@ -190,14 +193,24 @@ def deepseek_web_search(query: str) -> Tuple[str, dict]:
             "tools": [{"type": "web_search"}],   # 服务端内置 web_search：模型自主决定是否联网
             "stream": False,
         }
+        if off_body:
+            payload.update(off_body)
         headers = {
             "Authorization": f"Bearer {settings.RESOLVED_MAIN_API_KEY or settings.MAIN_API_KEY}",
             "Content-Type": "application/json",
         }
         url = _responses_endpoint()
         _to = _web_http_timeout()
-        logger.info(f"[deepseek_web_search] Responses 调用: {url} model={payload['model']} timeout={_to}s")
+        logger.info(f"[deepseek_web_search] Responses 调用: {url} model={payload['model']} "
+                    f"timeout={_to}s thinking_off={'on' if off_body else 'off'}")
         resp = requests.post(url, headers=headers, json=payload, timeout=_to)
+        if resp.status_code not in (200,) and off_body and resp.status_code in (400, 422):
+            logger.warning(
+                f"[deepseek_web_search] thinking 关闭字段被网关拒绝 HTTP {resp.status_code}"
+                f"，去参重试: {resp.text[:200]}")
+            for _k in list(off_body.keys()):
+                payload.pop(_k, None)
+            resp = requests.post(url, headers=headers, json=payload, timeout=_to)
         if resp.status_code != 200:
             # v8.15.3: 失败详情落日志（HTTP 状态码 + 响应体前 600 字）——
             # "7 次 30s 盲重试"的根因是失败原因全被吞（只看到 err=True）；
@@ -232,8 +245,20 @@ def deepseek_web_search(query: str) -> Tuple[str, dict]:
 
         _queries_line = ("\n\n本次模型联网检索了这些关键词:\n" + "、".join(
             f"「{q[:80]}」" for q in meta.get("queries", [])[:5])) if meta.get("queries") else ""
+        # v8.17.17: 摘要为空但引用存在（实测 0 字摘要 + 8 引用）——不再提示
+        # "模型判断无需联网"（误导），改为明示"返回引用但无正文"：web_items 照常
+        # 保留（侧栏 [Wn] 可用），正文缺口如实标注、不重试（预算仅 turn0 一次）。
+        if summary.strip():
+            _summary_part = f"联网检索摘要（DeepSeek 原生搜索返回）:\n{summary[:2000]}"
+        else:
+            _summary_part = ("[注意] 本次联网返回引用条目但无正文摘要（模型未生成综述）。"
+                             "请优先使用下方引用标题/URL 或结合本地证据作答；"
+                             "不要为获取正文重试联网（预算已用尽）。")
+            logger.info(
+                f"[deepseek_web_search] 摘要为空但含 {len(calls)} 条引用"
+                f"（web_items 保留，正文缺省，不重试）")
         text_result = (
-            f"联网检索摘要（DeepSeek 原生搜索返回）:\n{summary[:2000] or '(模型判断无需联网，未检索)'}"
+            _summary_part
             + _queries_line
             + ("\n\n引用:\n" + "\n".join(f"[W{i}] {c['title']} — {c['url']}"
                                           for i, c in enumerate(calls, 1)) if calls else "")
@@ -282,257 +307,3 @@ def _format_web_tool_result(tool_name, query, content, status="ok",
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# v8.16.1 草稿先行：分隔符结构化输出（非 JSON）
-#   DRAFT_ZH（中文展示） / DRAFT_EN（HyDE 复用） / MULTI_QUERY / SUMMARY
-# ═══════════════════════════════════════════════════════════════════════
-
-_STRUCTURED_START = "===STRUCTURED_START==="
-_STRUCTURED_END = "===STRUCTURED_END==="
-
-
-class StructuredParseError(ValueError):
-    """分隔符结构化区块解析失败（字段缺失/格式不符）。"""
-
-
-def _strip_code_fence(block: str) -> str:
-    """防御: 模型偶发包 ``` 围栏时剥离（提示词已约束，此仅为容错）。"""
-    s = block.strip()
-    if s.startswith("```"):
-        s = s[3:]
-        # 去掉语言标记行（如 ```text）
-        nl = s.find("\n")
-        if 0 < nl < 20:
-            s = s[nl + 1:]
-        if s.endswith("```"):
-            s = s[:-3]
-    return s.strip()
-
-
-def _parse_structured_response(raw_text: str) -> dict:
-    """从 DeepSeek 响应中提取结构化字段（分隔符定位，不依赖 JSON 解析）。
-
-    规划 v8.16.1 §5.2 实现：
-      - 联网回答正文 = 结构化区块之前的所有文本（草稿调用中通常为空）
-      - 区块内按行 "字段名: 值"，MULTI_QUERY/SUMMARY 为竖线分隔列表
-      - 必需字段缺失/为空 → 抛 StructuredParseError（调用方 fail-soft 跳过草稿）
-
-    Returns:
-        {"answer": str, "draft_zh": str, "draft_en": str,
-         "multi_query": list[str], "summary": list[str]}
-    """
-    if not raw_text or not raw_text.strip():
-        raise StructuredParseError("结构化区块未找到（空响应）")
-    start_idx = raw_text.find(_STRUCTURED_START)
-    end_idx = raw_text.find(_STRUCTURED_END)
-    if start_idx == -1 or end_idx == -1 or end_idx <= start_idx:
-        raise StructuredParseError("结构化区块未找到")
-    answer_text = raw_text[:start_idx].strip()
-    block = _strip_code_fence(
-        raw_text[start_idx + len(_STRUCTURED_START):end_idx].strip())
-
-    result: dict = {}
-    current_field: str | None = None
-    for line in block.split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-        known = False
-        key, value = "", ""
-        if ":" in line:
-            key, value = line.split(":", 1)
-            key = key.strip().upper()
-            value = value.strip()
-            if key in ("DRAFT_ZH", "DRAFT_EN", "MULTI_QUERY", "SUMMARY"):
-                known = True
-                current_field = key
-        if known:
-            if key in ("MULTI_QUERY", "SUMMARY"):
-                items = [v.strip() for v in value.split("|") if v.strip()]
-                if items:
-                    result[key] = items
-            else:
-                result[key] = value
-        elif current_field in ("DRAFT_ZH", "DRAFT_EN"):
-            # 续行容错：模型可能把 DRAFT_EN/DRAFT_ZH 段落折行
-            # （无已知字段前缀的行归属当前字段；提示词已约束单行，此为防御）
-            _prev = result.get(current_field, "")
-            result[current_field] = (_prev + "\n" + line).strip() if _prev else line
-
-    required = ("DRAFT_ZH",)
-    for field in required:
-        if field not in result:
-            raise StructuredParseError(f"缺少字段: {field}")
-        if not result[field]:
-            raise StructuredParseError(f"字段为空: {field}")
-
-    return {
-        "answer": answer_text,
-        "draft_zh": result.get("DRAFT_ZH", ""),
-        # v8.16.3: 草稿纯中文预览——DRAFT_EN/MULTI_QUERY/SUMMARY 已从模板移除
-        # （检索的 HyDE/多路查询由主检索独立结构化生成）；旧模板残留字段仍兼容解析
-        "draft_en": result.get("DRAFT_EN", ""),
-        "multi_query": result.get("MULTI_QUERY", []),
-        "summary": result.get("SUMMARY", []),
-    }
-
-
-def _call_structured_draft(query: str) -> str | None:
-    """非联网 fast 模型调用：一次性产出分隔符结构化区块（DRAFT_ZH/EN/MQ/SUMMARY）。
-
-    与 HyDE 同款防线（v8.15.3c）：v4-flash 思维链偶发吃光 max_tokens → content 为空，
-    自动重试一次；仍空返回 None（调用方记 call_empty）。
-    v8.16.3: **异常不再吞掉**——API/网络/认证错误向上抛出，由调用方记
-    call_exception（带真实异常文本）。此前宽 except→None 把"真空输出"与"API 异常"
-    混在同一个 call_empty 标签里，日志实证无法分辨真根因（用户报 call_empty，
-    实为第 1/2 次调用返回为空 → 真根因=思维链吃预算 → max_tokens 1024→2048）。
-    v8.16.4: 草稿调用关思维链（DRAFT_THINKING_OFF，默认开）；厂商参数被拒时
-    第 1 次自动退回默认参数重试（fail-soft，防"无草稿"）。
-    """
-    from src.prompts.loader import assemble_structured_output_prompt
-    prompt = assemble_structured_output_prompt()
-    if not prompt:
-        logger.warning("[draft] structured_output.md 模板缺失，草稿跳过")
-        return None
-    from openai import OpenAI
-    client = OpenAI(
-        api_key=settings.RESOLVED_FAST_API_KEY,
-        base_url=settings.RESOLVED_FAST_BASE_URL,
-        timeout=max(int(getattr(settings, "DRAFT_TIMEOUT_SEC", 15) or 15), 5),
-    )
-    max_tokens = max(int(getattr(settings, "DRAFT_MAX_TOKENS", 2048) or 2048), 256)
-    answer = ""
-    extra: dict = {}
-    if getattr(settings, "DRAFT_THINKING_OFF", True):
-        # v8.16.4: 草稿快调用关思维链（HyDE/hints 同款参数）——思维链挤占预算 →
-        # 区块尾部丢失 → 解析失败 → 降级 200 字，此开关是根治；厂商参数不兼容时
-        # fail-soft：第 1 次异常即放弃参数重试（防"参数被拒→无草稿"）
-        extra["extra_body"] = {"thinking": {"type": "disabled"}}
-    for attempt in (1, 2):
-        try:
-            resp = client.chat.completions.create(
-                model=settings.RESOLVED_FAST_MODEL,
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": f"用户问题：\n{query}"},
-                ],
-                temperature=0.2,
-                # v8.16.3: 1024→2048——结构化区块实际 400-800 tokens；v8.16.4 关思维链后 2048 充裕
-                max_tokens=max_tokens,
-                **extra,
-            )
-        except Exception as e:
-            if extra and attempt == 1:
-                logger.warning(
-                    f"[draft] thinking:disabled 参数被拒（{type(e).__name__}: {e}），"
-                    f"退回默认参数重试一次")
-                extra = {}
-                continue
-            raise
-        answer = (resp.choices[0].message.content or "").strip()
-        if answer:
-            break
-        logger.warning(f"[draft] 第 {attempt} 次调用返回为空，重试一次")
-    return answer or None
-
-
-def _fallback_draft_zh(raw: str) -> str:
-    """v8.16.3: 结构化解析失败时的降级草稿文本（纯函数,worker 侧调用）。
-
-    模板保持严格不弱化——降级只发生在解析层:优先取 STRUCTURED_START 之前
-    的正文（模型偶发输出"开头回答+区块"的形态）,再去噪取前 200 字。
-    """
-    if not raw:
-        return ""
-    text = raw
-    idx = text.find("===STRUCTURED_START===")
-    if idx > 0:
-        text = text[:idx]
-    for pat in ("===STRUCTURED_END===", "DRAFT_ZH:"):
-        text = text.replace(pat, "")
-    # 按行过滤代码围栏（首字符 ``` 的整行），避免 replace("```") 破坏围栏后文本
-    lines = [ln.strip() for ln in text.splitlines()
-             if ln.strip() and not ln.lstrip().startswith("```")]
-    return re.sub(r"[ \t]+", " ", "\n".join(lines)).strip()[:200]
-
-
-async def draft_worker(query: str, session_id: str) -> None:
-    """v8.16.1 草稿先行后台任务（load 节点 create_task 启动，fire-and-forget）。
-
-    与 supervisor/检索并行：fast 非联网调用 → 解析 → emit draft 事件（前端
-    「预检索草稿·验证中」3-5s 上屏）→ 草稿衍生查询（DRAFT_EN + MULTI_QUERY +
-    SUMMARY）search_multi 多路检索 → 结果暂存 draft_store，retrieve-agent 的
-    run_agent 在组装确定性回执前 pop 并入证据（best-effort，失败零阻塞）。
-
-    注意: 本任务执行严格 fail-soft——任何异常只记日志，绝不阻塞主链路。
-    v8.16.2: 业务日志 draft_done / draft_skipped——"草稿未显示"类问题的
-    第一现场（business.log 可见 推送/跳过原因/检索并入量）。
-    """
-    if not getattr(settings, "DRAFT_ENABLED", True):
-        return
-    query = (query or "").strip()
-    if not query:
-        return
-    try:
-        raw = await asyncio.to_thread(_call_structured_draft, query)
-    except Exception as e:
-        # v8.16.3: 异常与空输出分开标记（call_exception 带真实异常文本，
-        # 不再与真空输出共用 call_empty 标签）
-        logger.warning(f"[draft] 结构化草稿调用异常（跳过）: {e}")
-        _draft_blog("draft_skipped",
-                    reason=f"call_exception:{type(e).__name__}:{str(e)[:120]}")
-        return
-    if not raw:
-        # v8.16.3: max_tokens 1024→2048 已针对"思维链吃光预算"根因（v8.15.3c 同款）
-        logger.info("[draft] 两次调用均返回空（fast 模型无 content）")
-        _draft_blog("draft_skipped", reason="call_empty")
-        return
-    try:
-        parsed = _parse_structured_response(raw)
-    except StructuredParseError as e:
-        # v8.16.3 降级：非空但格式断裂 → raw 前 200 字作草稿展示；检索并入跳过
-        # （检索必须与结构化产出绑定——无 DRAFT_EN/MULTI_QUERY/SUMMARY 可喂 search_multi。
-        #  模板保持严格不弱化，降级只发生在 worker 侧）
-        fallback = _fallback_draft_zh(raw)
-        if len(fallback) >= 10:
-            label = str(getattr(settings, "DRAFT_LABEL", "预检索草稿·验证中") or "预检索草稿·验证中")
-            max_chars = max(int(getattr(settings, "DRAFT_MAX_CHARS", 300) or 300), 20)
-            draft_zh = fallback[:max_chars]
-            try:
-                from src.core.progress_bus import emit_draft
-                emit_draft(draft_zh, label)
-                logger.info(f"[draft] 降级草稿已推送前端 ({len(draft_zh)} 字, q={query[:40]!r})")
-            except Exception as _e2:
-                logger.debug(f"[draft] emit_draft 失败: {_e2}")
-            _draft_blog("draft_fallback", zh_len=len(draft_zh),
-                        parse_error=str(e)[:120], raw_preview=raw[:200])
-        else:
-            _draft_blog("draft_skipped", reason=f"parse_error:{e}", raw_preview=raw[:200])
-        return
-    except Exception as e:
-        logger.warning(f"[draft] 草稿解析异常（跳过）: {e}")
-        _draft_blog("draft_skipped", reason=f"parse_exception:{str(e)[:120]}")
-        return
-
-    label = str(getattr(settings, "DRAFT_LABEL", "预检索草稿·验证中") or "预检索草稿·验证中")
-    max_chars = max(int(getattr(settings, "DRAFT_MAX_CHARS", 800) or 800), 20)
-    draft_zh = parsed["draft_zh"][:max_chars]
-    try:
-        from src.core.progress_bus import emit_draft
-        emit_draft(draft_zh, label)
-        logger.info(f"[draft] 草稿已推送前端 ({len(draft_zh)} 字, q={query[:40]!r})")
-    except Exception as e:
-        logger.debug(f"[draft] emit_draft 失败: {e}")
-
-    # v8.16.3: 草稿纯前端展示——不再并入多路检索（检索的 HyDE/Multi-Query/Summary
-    # 由 citrus_rag_search 独立结构化生成，草稿与检索彻底解耦）。
-    # 此前草稿通道的 search_multi(7 路) 已移除（省约 4s/请求；draft_store 保留兼容）。
-    _draft_blog("draft_done", zh_len=len(draft_zh))
-
-
-def _draft_blog(event: str, **fields) -> None:
-    """v8.16.2: 草稿业务日志（fail-soft：日志失败绝不影响草稿链路）。"""
-    try:
-        from src.core.business_logger import blog
-        blog(event, **fields)
-    except Exception:
-        pass

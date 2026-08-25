@@ -111,14 +111,11 @@ def emit_usage_delta(session_id: str, source: str, input_tokens: int = 0,
 # SSE Raw-Frame Debug Logger (prints every outgoing SSE chunk)
 # ═══════════════════════════════════════════════════════════════════════
 
-_sse_debug_enabled: bool = True
-
-
+# v9.2: 删除恒 True 的开关 _sse_debug_enabled——守卫分支永不生效，
+# log_sse_frame 随时可调用（debug 级别输出本身已是可关的开关）
 
 def log_sse_frame(event_dict: dict) -> None:
     """Print an outgoing SSE frame for debugging purposes."""
-    if not _sse_debug_enabled:
-        return
     event_type = event_dict.get("event", "?")
     data_str = event_dict.get("data", "")
     preview = data_str[:200] if len(data_str) > 200 else data_str
@@ -140,12 +137,8 @@ def mark_tool_end(tool_call_id: str) -> None:
     _tool_start_times.pop(tool_call_id, None)
 
 
-def get_tool_elapsed(tool_call_id: str) -> float:
-    entry = _tool_start_times.get(tool_call_id)
-    if entry is None:
-        return 0.0
-    return time.perf_counter() - entry[0]
-
+# v9.2: 删除 get_tool_elapsed——grep 证实全仓库无调用方（get_running_tools
+# 已提供聚合视图，单个工具耗时可直接从 get_running_tools 结果推导）
 
 
 def get_running_tools() -> list[tuple[str, str, float]]:
@@ -211,15 +204,6 @@ def emit_tool_result(tool_name: str, output: str, tool_call_id: str = "",
 def emit_text(content: str) -> None:
     """Emit a FINAL_ANSWER text chunk."""
     emit_encoded("text", {"content": content})
-
-
-def emit_draft(content: str, label: str = "预检索草稿·验证中") -> None:
-    """v8.16.1: Emit a DRAFT event（草稿先行·预检索草稿）。
-
-    草稿 worker 产出 DRAFT_ZH 后立即推送；前端以灰底面板展示，
-    收到首个 text 事件时清空替换为正式回答。
-    """
-    emit_encoded("draft", {"content": str(content or ""), "label": label})
 
 
 def emit_status(stage: str, **kwargs) -> None:

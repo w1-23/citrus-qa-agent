@@ -56,9 +56,12 @@ def test_ag16_cards():
 def test_n2_tools():
     print("[N2] 工具 description 评审")
     # v8.4: supervisor 工具 schema 单一来源已迁至 tools/supervisor_tools.py
+    # v9.1: 检索工具改为 call_search_both（统一并行入口）
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'tools', 'supervisor_tools.py'),
                encoding='utf-8').read()
-    check("retrieve 含同义词重试指引", "synonyms" in src)
+    check("call_search_both 含并行/不预判描述", "call_search_both" in src
+          and "IN PARALLEL" in src and "do NOT skip" in src)
+    check("call_search_both 双 goal 必填描述", "local_goal" in src and "web_goal" in src)
     check("write 含成文/素材说明", "finished document" in src and "raw material" in src)
 
 

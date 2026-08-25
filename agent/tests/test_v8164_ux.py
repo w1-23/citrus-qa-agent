@@ -31,25 +31,26 @@ def check(name, cond, detail=""):
     print(f"  {'PASS' if cond else 'FAIL'}  {name}  {detail}")
 
 
-# ── VF-36 草稿关思维链 + fail-soft + 超时有界 ─────────────────────
+# ── VF-36 v8.17.15 草稿配置/调用删除 + 联网工具超时保留 ──────────
 def test_v8164_draft_nothink():
-    print("[VF-36] 草稿关思维链(fail-soft) + timeout 25")
+    print("[VF-36] 草稿全删 + 联网工具保留")
     import src.tools.deepseek_web as dw
+    from src.tools.registry import _tool_exec_timeout
 
-    src = inspect.getsource(dw._call_structured_draft)
-    check("草稿调用携带 thinking:disabled",
-          '"thinking": {"type": "disabled"}' in src)
-    check("参数被拒 → 第 1 次退回默认参数重试（防无草稿）",
-          "退回默认参数重试一次" in src)
-    check("DRAFT_THINKING_OFF 配置默认开",
-          settings.DRAFT_THINKING_OFF is True, str(settings.DRAFT_THINKING_OFF))
-    check("DRAFT_TIMEOUT_SEC = 25（有界余量，不归零）",
-          settings.DRAFT_TIMEOUT_SEC == 25, str(settings.DRAFT_TIMEOUT_SEC))
+    dw_src = inspect.getsource(dw)
+    check("草稿调用函数已删除（_fast_llm_call/_call_structured_draft）",
+          "def _fast_llm_call" not in dw_src
+          and "def _call_structured_draft" not in dw_src)
+    check("联网工具保留（deepseek_web_search）",
+          "def deepseek_web_search" in dw_src)
+    check("网络超时 90s 保留（_web_http_timeout）", "def _web_http_timeout" in dw_src)
+    check("工具执行超时 120s 保留", _tool_exec_timeout("deepseek_web_search") == 120,
+          str(_tool_exec_timeout("deepseek_web_search")))
+
     yaml = (ROOT / "config.yaml").read_text(encoding="utf-8")
-    check("yaml: thinking_off: true + timeout_sec: 25",
-          "thinking_off: true" in yaml and "timeout_sec: 25" in yaml)
+    check("yaml 无 draft 配置块", "draft:" not in yaml)
     cfg = (ROOT / "src/config.py").read_text(encoding="utf-8")
-    check("config.py: DRAFT_THINKING_OFF 字段存在", "DRAFT_THINKING_OFF" in cfg)
+    check("config.py 无 DRAFT_ 字段", "DRAFT_" not in cfg)
 
 
 # ── VF-37 context-detail 端点降级信封 ─────────────────────────────
@@ -86,9 +87,9 @@ def test_v8164_context_detail():
     check("假 DB 异常 → 200 信封（error 标记，无抛错）", ok, str(r)[:80])
 
 
-# ── VF-38 LTM ∥ hints 并行 + 前端 3 态文案 ────────────────────────
+# ── VF-38 LTM ∥ hints 并行 + 前端草稿 UI 删除 ────────────────────
 def test_v8164_parallel_and_ux():
-    print("[VF-38] hints∥LTM 并行 + 前端 3 态")
+    print("[VF-38] hints∥LTM 并行 + 前端无反草稿 UI")
     cm = (ROOT / "src/core/context_manager.py").read_text(encoding="utf-8")
     check("hints 提前调度（create_task 与 LTM 并行）",
           "hints_task = asyncio.create_task(self._generate_hints(query, session_id, mode))" in cm)
@@ -96,14 +97,11 @@ def test_v8164_parallel_and_ux():
     check("旧串行调用已移除",
           "suggestions, format_hint = await self._generate_hints(query, session_id, mode)" not in cm)
     html = (ROOT / "index.html").read_text(encoding="utf-8")
-    check("3 态①占位「正在生成预览…」", "正在生成预览…" in html)
-    check("3 态②「草稿已生成 · 正在扩展检索证据…」",
-          "草稿已生成 · 正在扩展检索证据…" in html)
-    check("3 态②展检索「正在扩展检索证据…」（agent_switch 钩子）",
-          "正在扩展检索证据…" in html)
-    check("3 态③「正在整合证据、生成最终回答…」（step_done retrieve 钩子）",
-          "正在整合证据、生成最终回答…" in html)
-    check("占位原位升级草稿（draft-phase 元素）", "draft-phase" in html)
+    # v8.17.15: 草稿三态 UI 全删（无占位/面板/阶段文案）
+    check("无「草稿生成中…」占位", "草稿生成中" not in html)
+    check("无「正在生成预览…」占位", "正在生成预览" not in html)
+    check("无「草稿已生成 · 正在扩展检索证据…」", "正在扩展检索证据" not in html)
+    check("无「正在整合证据、生成最终回答…」草稿钩子", "draft-phase" not in html)
     check("细分失败温和提示（catch + error 信封双路）",
           "⚠ 细分加载失败，请稍后重试（异常已记录）" in html)
 

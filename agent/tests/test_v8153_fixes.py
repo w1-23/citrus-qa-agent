@@ -10,6 +10,7 @@
 """
 import sys
 import os
+import inspect as _inspect
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -68,32 +69,42 @@ def test_v8153_evidence_report_web_unavailable():
     check("熔断提示下证据完整", "[1]" in broke and "[RAG]" in broke, broke)
 
 
-# ── F-15.3-3 推理控制（配置默认不发送参数，off 时接线 thinking:disabled）──
+# ── F-15.3-3 推理控制（v8.17.17: reasoning_mode=off；v8.17.19: extra_body 下发关闭字段）──
 def test_v8153_reasoning_mode():
-    print("[VF-11] model.reasoning_mode 接线")
-    check("默认值 = default（不发送任何参数）",
-          getattr(settings, "MODEL_REASONING_MODE", "default") == "default")
+    print("[VF-11] model.reasoning_mode 接线（v8.17.19 = off，extra_body 通道）")
+    check("默认值 = off（用户决策：检索决策关思维链）",
+          getattr(settings, "MODEL_REASONING_MODE", "default") == "off")
     from src.core.llm_pool import get_llm
+    off_body = dict(getattr(settings, "MODEL_REASONING_OFF_BODY", None) or {})
 
     llm_off = get_llm("t-model", "k-1", "https://x", max_tokens=64, thinking_off=True)
-    check("thinking_off → model_kwargs.thinking.type=disabled",
-          llm_off.model_kwargs.get("thinking", {}).get("type") == "disabled",
-          str(llm_off.model_kwargs))
+    check("thinking_off → extra_body 下发关闭字段（v8.17.19 通道）",
+          getattr(llm_off, "extra_body", None) == off_body,
+          str(getattr(llm_off, "extra_body", None)))
     llm_on = get_llm("t-model", "k-1", "https://x", max_tokens=64, thinking_off=False)
-    check("默认 → 不发送 thinking 参数", llm_on.model_kwargs == {}, str(llm_on.model_kwargs))
+    check("默认 → 不发送任何参数（思维链保持开启）",
+          llm_on.model_kwargs == {}, str(llm_on.model_kwargs))
     check("缓存键区分 thinking_off", llm_off is not llm_on)
-    # 同参数复用同一实例（进程级复用不回退）
+    # 同参数复用：wrapper 每次新建，但底层 primary 客户端进程级复用
     llm_off2 = get_llm("t-model", "k-1", "https://x", max_tokens=64, thinking_off=True)
-    check("同参数复用实例", llm_off2 is llm_off)
+    check("primary 客户端复用（进程级缓存不回退）",
+          getattr(llm_off, "primary", None) is getattr(llm_off2, "primary", None))
+    # v8.15.3: retrieve-agent 接线（agent_runner thinking_off=...=="off"）
+    from src.core import agent_runner as ar
+    ar_src = _inspect.getsource(ar)
+    check("retrieve-agent 接线 reasoning_mode==off → thinking_off",
+          'agent_name in ("retrieve-agent",)' in ar_src
+          and 'MODEL_REASONING_MODE' in ar_src)
 
 
 # ── F-15.3-4 联网失败详情（HTTP 状态码 / 超时分支）─────────────────
 def test_v8153_web_failure_details():
     print("[VF-12] deepseek_web_search 失败详情")
     import src.tools.deepseek_web as dw
-    from src.core.tracing import set_web_search_enabled
+    from src.core.tracing import set_web_search_enabled, reset_web_budget
 
     set_web_search_enabled(True)
+    reset_web_budget(1)
 
     class _FakeResp:
         status_code = 503
@@ -119,6 +130,7 @@ def test_v8153_web_failure_details():
               c.startswith("[ERR_NETWORK]") and "HTTP 503" in c, c[:80])
         check("HTTP 失败 artifact 双键空", a == {"main_results": [], "web_results": []}, str(a))
         dw.requests = _FakeRequestsTimeout()
+        reset_web_budget(1)
         c2, _a2 = dw.deepseek_web_search.func("最新柑橘行情")
         check("超时 → 单独分支含超时提示", c2.startswith("[ERR_NETWORK]") and "超时" in c2, c2[:80])
     finally:
@@ -142,25 +154,31 @@ def test_v8153_web_streak_state_machine():
 # ── F-15.3-6 提示词机制回归（防未来清理误删 v8.15.3 机制标记）──────
 def test_v8153_prompt_mechanisms():
     print("[VF-14] 提示词机制标记存在性")
-    from pathlib import Path
-    root = Path(__file__).resolve().parents[1]  # agent/
-    ra = (root / "src/prompts/agents/retrieve-agent.md").read_text(encoding="utf-8")
-    dg = (root / "src/prompts/system/decision_guide.md").read_text(encoding="utf-8")
+    import sys as _sys
+    _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    # v9.0: 提示词改为"启动时固定拼接"——直接断言最终装配出的固定提示词内容
+    from src.prompts.loader import assemble_agent_prompt, assemble_system_prompt
+    ra = assemble_agent_prompt("retrieve-agent")
+    dg = assemble_system_prompt(mode="expert", format_hint=None, query=None)
 
     check("retrieve-agent 含数据源覆盖边界", "数据源覆盖边界" in ra)
     check("retrieve-agent 覆盖表(政策/新闻=本地不覆盖)",
           "政府工作报告" in ra and "最新新闻" in ra)
     check("retrieve-agent 早停阈值规则(通过≤2/过滤≥50%)",
           "通过 ≤2 条" in ra and "过滤占比 ≥50%" in ra)
-    check("retrieve-agent 联网失败禁再调", "[ERR_NETWORK]" in ra and "禁止再次调用" in ra)
-    # v8.15.3d: 原始问题直传 + 仲裁规则标记
-    check("retrieve-agent 联网原始问题直传说明",
-          "自动直传" in ra and "搜索参考关键词" in ra)
-    check("decision_guide 含覆盖表+自审", "数据源覆盖边界与检索前自审" in dg)
-    check("decision_guide 含回答前自审(引用对齐)", "回答前自审" in dg and "引用对齐" in dg)
-    check("decision_guide 含证据来源仲裁规则", "证据来源仲裁规则" in dg)
-    check("decision_guide 仲裁: 时效优先联网", "时效信息优先联网" in dg)
-    check("decision_guide 仲裁: 冲突并列禁止折中",
+    # v9.1: 联网移出 retrieve-agent（架构变更）；本地拆解唯一层语义
+    check("retrieve-agent 无联网工具（v9.1 架构）",
+          "deepseek_web_search" not in ra and "citrus_rag_search" in ra)
+    check("retrieve-agent 唯一拆解层（2~4 角度防膨胀）",
+          "唯一允许的拆解层" in ra and "2~4 个" in ra)
+    check("supervisor 统一入口 call_search_both（不预判不跳过）",
+          "call_search_both" in dg and "不预先跳过任何一方" in dg
+          and "禁止传空字符串" in dg)
+    check("supervisor 含覆盖表+自审", "数据源覆盖边界与检索前自审" in dg)
+    check("supervisor 含检索后自审(引用对齐)", "检索后自审" in dg and "引用对齐" in dg)
+    check("supervisor 含证据来源仲裁规则", "证据来源仲裁与引用规则" in dg)
+    check("supervisor 仲裁: 时效优先联网", "时效信息优先联网" in dg)
+    check("supervisor 仲裁: 冲突并列禁止折中",
           "并列展示" in dg and "禁止捏造折中值" in dg)
 
 
@@ -186,16 +204,11 @@ def test_v8153_tool_timeout_override():
         settings.TOOL_TIMEOUTS = old
 
 
-# ── F-15.3-8 原始问题直传联网工具（input 以原始问题开头，检索词作参考）──
+# ── F-15.3-8 联网工具 goal 驱动（v8.17.15：input 以工具参数 query 开头）──
 def test_v8153d_original_query_direct():
-    print("[VF-16] 原始问题直传联网工具")
+    print("[VF-16] 联网工具 goal 驱动（input=工具参数 query）")
     import src.tools.deepseek_web as dw
-    from src.core.tracing import set_original_query, original_query
-    from src.core.tracing import set_web_search_enabled
-
-    set_original_query("2026年柑橘产业政府工作报告有哪些政策？")
-    check("contextvar 写入/读取",
-          original_query() == "2026年柑橘产业政府工作报告有哪些政策？")
+    from src.core.tracing import set_web_search_enabled, reset_web_budget
 
     captured: dict = {}
 
@@ -215,19 +228,18 @@ def test_v8153d_original_query_direct():
 
     old = dw.requests
     set_web_search_enabled(True)
+    reset_web_budget(1)
     try:
         dw.requests = _FakeRequests()
-        c, a = dw.deepseek_web_search.func("citrus policy report 2026")
+        c, a = dw.deepseek_web_search.func("2025年以来HLB田间种群感染密度")
     finally:
         dw.requests = old
-        set_original_query("")
         set_web_search_enabled(False)
 
     inp = str(captured.get("payload", {}).get("input", ""))
-    check("input 以原始问题开头",
-          inp.startswith("2026年柑橘产业政府工作报告有哪些政策？"), inp[:80])
-    check("检索词作为搜索参考关键词",
-          "搜索参考关键词" in inp and "citrus policy report 2026" in inp, inp)
+    check("input 以工具参数 query（goal）开头",
+          inp.startswith("2025年以来HLB田间种群感染密度"), inp[:80])
+    check("不再引用用户原始问题 contextvar", "原始问题直传" not in inp)
     check("仍要求标注真实网址", "真实网址" in inp)
     check("返回内容含 [W1] 引用", "[W1]" in c, c[:120])
     ok_url = (a.get("web_results") or [{}])[0].get("url") == "https://gov.example.com/report"

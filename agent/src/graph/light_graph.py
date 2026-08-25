@@ -7,16 +7,16 @@ import asyncio
 import logging
 import time
 
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END
 
 from src.graph.state import AgentState
 from src.config import settings, get_deepseek_model
-from src.core.evidence import (render_evidence, EVIDENCE_SNIPPET_MAX_CHARS,
-                               src_of, filter_refs_by_answer)
 from src.core.agent_loop import (
     dedup_by_doi, emit_llm_usage, FINAL_ANSWER_PROMPT,
     invoke_llm_with_retry, force_final_answer,
+    build_cited_refs, renumber_and_sync_trace,
+    run_save_node,
 )
 from src.prompts.loader import assemble_system_prompt
 
@@ -101,15 +101,8 @@ async def load_context_node(state: AgentState) -> dict:
                 "tool_call_id": ""})
         except Exception:
             pass
-        # v8.16.1: 草稿先行（全场景覆盖）——与 expert 图同机制：后台 fast 调用
-        # 产出 DRAFT_ZH 上屏；light 不走 retrieve-agent，草稿衍生多路检索结果
-        # 不入证据回执（light 保持"本地基础检索+速度优先"，见 AGENT_CHANGES v8.16.1）
-        try:
-            from src.tools.deepseek_web import draft_worker
-            import asyncio as _asyncio
-            _asyncio.create_task(draft_worker(query, session_id))
-        except Exception as _e:
-            logger.warning(f"[LightGraph:load] 草稿先行启动失败（跳过）: {_e}")
+        # v8.17.15: 草稿全链删除（用户决策）——light 模式不再有草稿先行；
+        # 联网（若开启）由 light_retrieve_node 后的 supervisor 工具链承担。
         return result
 
     except Exception as e:
@@ -185,31 +178,19 @@ async def light_supervisor_node(state: AgentState) -> dict:
         mode="light", format_hint=format_hint, query=query,
     )
 
-    from src.core.context_manager import LoadedContext, build_human_message
-    ctx = LoadedContext(
-        session_id=state.get("session_id", ""),
-        mode="light",
-        query=query,
-        history_summary=state.get("history_summary"),
-        long_term_memory=state.get("long_term_memory"),
-        resident_cards=state.get("resident_cards"),
-        search_suggestions=state.get("search_suggestions", []),
-        format_hint=format_hint,
-    )
+    from src.core.context_manager import (build_loaded_context,
+                                          assemble_supervisor_messages,
+                                          build_human_message,
+                                          build_context_budget,
+                                          budget_usage_ratio)
+    # v9.2 P6: LoadedContext 构造收敛（expert/light 共用）
+    ctx = build_loaded_context(state, mode="light", format_hint=format_hint)
     # v8.4.6 F1: 代码级预检索结果注入 <retrieval_context>（light_rules 的既定通道）
     human_msg = build_human_message(
         ctx, retrieval_context=state.get("retrieval_context") or "")
-
-    messages: list = [SystemMessage(content=system_prompt)]
-    history_msgs = list(state.get("messages", []))
-    if history_msgs:
-        messages.extend(history_msgs)
-    # v8.3.8: 历史检索证据块
-    if state.get("history_evidence_block"):
-        messages.append(HumanMessage(content=state["history_evidence_block"]))
-    messages.append(human_msg)
-    # v8.3.8: 本轮轨迹起点
-    trace_start_index = len(messages) - 1
+    # v9.2 P6: 消息装配收敛（System + 历史 + [历史检索证据] + 本轮 human）
+    messages, trace_start_index = assemble_supervisor_messages(
+        system_prompt, state, human_msg)
 
     from src.tools import _TOOL_REGISTRY_BY_NAME
     tools = [t for t_name in LIGHT_TOOL_NAMES
@@ -224,28 +205,25 @@ async def light_supervisor_node(state: AgentState) -> dict:
     all_main_results = list(state.get("main_results") or [])
     all_web_results = list(state.get("web_results") or [])
     tool_call_count = 0
+    tool_names_called: list[str] = []   # v9.2: 已调用工具名（main.py done 分支消费）
     t0 = time.perf_counter()
+
+    # v9.2 P6: 预算一次构造（原每轮循环内重建 ContextBudget；构造确定性无状态，
+    # 一次复用后判定语义与重建逐次一致）
+    _budget = build_context_budget()
 
     try:
         for turn in range(LIGHT_MAX_TURNS):
             # v8.4.6 B1: 预算前移（与 expert 一致）——每次模型调用前检查上下文占用，
             # 超硬阈值直接统一收尾（light 无独立熔断，窗口 1M 下风险低但须兜底）
-            try:
-                from src.core.context_budget import ContextBudget, ContextBudgetConfig
-                _budget = ContextBudget(ContextBudgetConfig(
-                    max_tokens=settings.CONTEXT_BUDGET_MAX_TOKENS,
-                    soft_threshold=settings.CONTEXT_BUDGET_SOFT_THRESHOLD,
-                    hard_threshold=settings.CONTEXT_BUDGET_HARD_THRESHOLD,
-                ))
-                _est = _budget.estimate_tokens(messages)
-                if _est / _budget.config.max_tokens >= _budget.config.hard_threshold:
-                    logger.warning(
-                        f"[LightGraph:supervisor] 上下文占用 "
-                        f"{_est / _budget.config.max_tokens:.1%} ≥ 硬阈值，强制收尾")
-                    answer = await _light_force_final(messages)
-                    break
-            except Exception:
-                pass
+            # v9.2 P6: 占用率判定收敛共享 budget_usage_ratio（None = 预算缺失/异常）
+            _ratio = budget_usage_ratio(_budget, messages)
+            if _ratio is not None and _ratio >= _budget.config.hard_threshold:
+                logger.warning(
+                    f"[LightGraph:supervisor] 上下文占用 "
+                    f"{_ratio:.1%} ≥ 硬阈值，强制收尾")
+                answer = await _light_force_final(messages)
+                break
             t_llm = time.perf_counter()
             # v8.13-b5a: LLM 重试收敛至 invoke_llm_with_retry（3 次/3s/失败上抛）
             response, _, _ = await invoke_llm_with_retry(
@@ -277,6 +255,8 @@ async def light_supervisor_node(state: AgentState) -> dict:
                     tc_name = getattr(tc, "name", "?")
                     tc_args = dict(getattr(tc, "args", None) or {})
                 logger.info(f"[LightGraph:supervisor] turn{turn}: call {tc_name}({str(tc_args)[:80]})")
+                if tc_name and tc_name not in tool_names_called:
+                    tool_names_called.append(tc_name)
                 try:
                     emit_tool_call_start(tc_name[:30], tc_args, tc_id)
                     emit_tool_executing(f"调用 {tc_name}...", tc_name[:30], tc_id)
@@ -351,40 +331,13 @@ async def light_supervisor_node(state: AgentState) -> dict:
 
     deduped_main = dedup_by_doi(all_main_results)
 
-    cited_refs = []
-    for i, r in enumerate(deduped_main[:20]):
-        cited_refs.append({
-            "ref_id": i + 1,
-            "type": "main",
-            "source": src_of(r),                       # v8.15: rag|ucr
-            "doi": r.get("doi", "N/A"),
-            "title": r.get("title", r.get("name", "Untitled")),
-            "section_name": r.get("section_name", ""),
-            "text_preview": (r.get("abstract") or r.get("snippet") or "")[:300],
-            "score": r.get("score", r.get("rerank_score", 0)) or 0,
-            "year": r.get("year", ""),
-            "authors": r.get("authors", ""),
-            "variety_name": r.get("variety_name", ""),
-            "registry_id": r.get("registry_id", ""),
-        })
-    for i, wr in enumerate(all_web_results[:5]):
-        cited_refs.append({
-            "ref_id": f"W{i+1}",
-            "type": "web",
-            "source": "web",
-            "url": wr.get("url", wr.get("link", "")),
-            "title": wr.get("title", wr.get("name", "Untitled")),
-            "text_preview": (wr.get("snippet") or wr.get("content") or wr.get("abstract") or "")[:300],
-            "score": 0,
-        })
+    # v9.2: 引用回执装配 + 统一重排收敛共享原语（agent_loop，web 槽位 light=5）
+    cited_refs = build_cited_refs(deduped_main, all_web_results, web_slot=5)
+    answer, cited_refs, ref_remap = renumber_and_sync_trace(
+        messages, answer, cited_refs)
 
-    # v8.15: 侧栏引用只显示回答真实引用的证据（严格过滤 + 按回答首次出现顺序重排）
-    try:
-        cited_refs = filter_refs_by_answer(answer, cited_refs)
-    except Exception as e:
-        logger.debug(f"[LightGraph] filter_refs_by_answer skipped: {e}")
-
-    references_data = {"cited": cited_refs, "uncited": [], "total": len(cited_refs)}
+    references_data = {"cited": cited_refs, "uncited": [],
+                       "remap": ref_remap, "total": len(cited_refs)}
 
     # v8.15.2: 不再注入历史证据引用（H1..Hn）——侧栏只显示本轮回答真实引用的证据，
     # 防止侧栏膨胀。（原 v8.4.6 F2 行为已移除）
@@ -403,6 +356,8 @@ async def light_supervisor_node(state: AgentState) -> dict:
         "main_results": deduped_main[:20],
         "web_results": all_web_results[:5],
         "references_data": references_data,
+        # v9.2: 工具名列表（main.py done 分支对齐 expert——request_done 日志真实计数）
+        "tools_called": tool_names_called,
         # v8.3.8: 本轮完整轨迹（save 节点持久化）
         "turn_trace": messages[trace_start_index:],
         "_trace": {"node": "light_supervisor", "elapsed_ms": elapsed,
@@ -411,82 +366,10 @@ async def light_supervisor_node(state: AgentState) -> dict:
 
 
 async def save_context_node(state: AgentState) -> dict:
-    query = state.get("query", "")
-    answer = state.get("answer", "")
-    session_id = state.get("session_id", "default")
-    if not answer:
-        return {"_trace": {"node": "save", "elapsed_ms": 0, "summary": "no answer"}}
+    """v9.2: save 核心收敛至 agent_loop.run_save_node（light 差异：
+    无 web 账本并入、LTM 仅长度门槛；行为与 v9.2 前逐位一致）。"""
+    return await run_save_node(state, log_tag="LightGraph", include_web=False)
 
-    try:
-        from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
-        from src.session.manager import session_manager, _validate_trace
-        from src.core.background import spawn
-        # v8.3.8: 完整轨迹持久化（含 tool_calls/ToolMessage 配对）
-        trace = list(state.get("turn_trace") or [])
-        trace = [m for m in trace if getattr(m, "type", "") != "system"]
-        trace = [m for m in trace
-                 if not str(getattr(m, "content", "")).startswith("[历史检索证据]")]
-        trace = _validate_trace(trace)
-        if not (trace and isinstance(trace[-1], AIMessage)
-                and not getattr(trace[-1], "tool_calls", None)
-                and trace[-1].content == answer):
-            trace.append(AIMessage(content=answer))
-        spawn(session_manager.save_messages(
-            session_id, trace, state.get("idempotency_key", "")))
-        # v8.3.8: 证据账本（v8.3.9: 合并全部报告 + chunk_id 可回查）
-        report_parts = []
-        for m in trace:
-            if isinstance(m, ToolMessage) and getattr(m, "name", "") == "call_retrieve_agent":
-                report_parts.append(str(m.content))
-        report_text = "\n\n---\n\n".join(report_parts)
-        main_results = state.get("main_results") or []
-        if report_text or main_results:
-            evidence = [
-                {"doi": r.get("doi", ""),
-                 "chunk_id": f"{r.get('paper_id', '')}:{r.get('chunk_index', '')}",
-                 "title": str(r.get("title", ""))[:150],
-                 "score": r.get("score", r.get("rerank_score", 0)) or 0,
-                 "year": str(r.get("year", "")),
-                 # v8.15: 来源随账本持久化（历史证据保留 RAG/UCR 徽标）
-                 "source": src_of(r),
-                 "snippet": render_evidence(r, max_chars=EVIDENCE_SNIPPET_MAX_CHARS)}
-                for r in main_results[:30]
-            ]
-            spawn(session_manager.save_evidence(
-                session_id, query, evidence, report_text))
-    except Exception as e:
-        logger.warning(f"[LightGraph:save] failed: {e}")
-
-    try:
-        # v8.4: LTM 提取转后台 + ADD-only 写入（与 expert 图一致）
-        def _extract_and_save_ltm(q: str, a: str, sid: str):
-            try:
-                from src.guardrails.memory import memory_store
-                facts = memory_store.extract_key_facts(q, a)
-                for f in facts:
-                    # v8.6 (书 §3.1 偏好追踪): type=preference 走 preference_memory
-                    # v8.9: 偏好写入全局域（用户级偏好跨会话生效）
-                    if f.get("type") == "preference":
-                        memory_store.set_preference(
-                            memory_store.GLOBAL_PREF_DOMAIN,
-                            f.get("key", ""), f.get("value", ""))
-                        continue
-                    memory_store.save_long_term_fact(
-                        f.get("key", ""),
-                        f.get("value", ""),
-                        f.get("confidence", 0.5),
-                        owner_session=sid,
-                        source_query=q,
-                    )
-            except Exception as e:
-                logger.debug(f"[LightGraph:save] LTM background extract failed: {e}")
-
-        if len(answer) > 500:
-            spawn(asyncio.to_thread(_extract_and_save_ltm, query, answer, session_id))
-    except Exception as e:
-        logger.debug(f"[LightGraph:save] LTM skip: {e}")
-
-    return {"_trace": {"node": "save", "elapsed_ms": 0, "summary": "saved"}}
 
 
 def build_light_graph() -> StateGraph:

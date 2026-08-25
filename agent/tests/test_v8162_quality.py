@@ -82,9 +82,10 @@ def test_v8162_cap_and_wiring():
     with open(os.path.join(src, "src", "tools", "deepseek_web.py"),
               encoding="utf-8") as f:
         dw = f.read()
-    check("draft_worker 有 draft_done/draft_skipped 业务日志",
-          'blog("draft_done"' in dw and 'blog("draft_skipped"' in dw)
-    check("_draft_blog fail-soft 封装存在", "def _draft_blog" in dw)
+    check("草稿业务日志已删（v8.17.15 草稿全链删除）",
+          'blog("draft_done"' not in dw and 'blog("draft_skipped"' not in dw
+          and "def _draft_blog" not in dw)
+    check("联网工具保留（deepseek_web_search）", "def deepseek_web_search" in dw)
 
     with open(os.path.join(src, "src", "core", "context_manager.py"),
               encoding="utf-8") as f:
@@ -95,13 +96,13 @@ def test_v8162_cap_and_wiring():
 
 # ── VF-27 数字与专名保真规则 ─────────────────────────────────────
 def test_v8162_prompt_rule():
-    print("[VF-27] decision_guide 数字与专名保真")
+    print("[VF-27] 全局数据保真含数字与专名保真")
     src = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    with open(os.path.join(src, "src", "prompts", "system", "decision_guide.md"),
+    with open(os.path.join(src, "src", "prompts", "source", "02_global_data_fidelity_citation.md"),
               encoding="utf-8") as f:
         txt = f.read()
     check("含数字与专名保真规则（v8.16.2）",
-          "数字与专名保真（v8.16.2）" in txt
+          "数字与专名保真" in txt
           and "禁止把具体数字概括为" in txt
           and "保留原始数值" in txt)
 

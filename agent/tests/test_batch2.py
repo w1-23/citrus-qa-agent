@@ -257,12 +257,13 @@ def test_ag5_ltm():
     check("recall 含衰减", "0.95" in src)
     check("recall 输出含来源标注", "来源" in src)
     check("recall 含 max_chars 截断", "max_chars" in src)
-    g1 = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'graph', 'expert_graph.py'),
+    al = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'core', 'agent_loop.py'),
               encoding='utf-8').read()
     # v8.4: LTM 提取转后台 spawn（不阻塞响应），原 to_thread 内联断言更新
-    check("save 节点 LTM 提取后台化", "_extract_and_save_ltm" in g1
-          and "spawn(asyncio.to_thread(" in g1)
-    c = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'prompts', 'system', 'constraints.md'),
+    # v9.2: save 节点收敛共享核心（agent_loop.run_save_node），锚点随迁
+    check("save 节点 LTM 提取后台化", "_extract_and_save_ltm" in al
+          and "spawn(asyncio.to_thread(" in al)
+    c = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'prompts', 'source', '20_terminology_domain.md'),
              encoding='utf-8').read()
     check("constraints 含冲突规则", "跨会话记忆规则" in c)
 
@@ -379,16 +380,26 @@ def test_ag21_timer_pairing():
 def test_ag22_output_routing():
     print("[AG-22] 输出路由与证据保真（INV-05）")
     prom = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                             'src', 'prompts', 'agents', 'retrieve-agent.md'), encoding='utf-8').read()
-    check("retrieve 无需报告（v8.10m 消除矛盾）",
-          "无需撰写检索报告" in prom and "系统代码确定性组装" in prom
-          and "核心结论与证据点" not in prom)
-    # v8.4.3 指令A: 收敛由模型自然判断（不再按文献数代码强制），保留三阶段与轮次上限
-    check("retrieve 三阶段工作流", "阶段 1" in prom and "阶段 3" in prom
-          and "轮次上限 3 轮" in prom)
+                             'src', 'prompts', 'source', '04_retrieve_agent_search.md'), encoding='utf-8').read()
+    check("retrieve 无需报告（v8.17.4 收尾一句结论）",
+          "不写报告" in prom and "撰写检索报告" in prom
+          and "核心结论与证据点" not in prom
+          and "一句话总结论" in prom and "停止检索，输出" in prom)
+    # v8.4.3 指令A: 收敛由模型自然判断（不再按文献数代码强制），保留多轮与轮次上限
+    # v9.1: 第 1 轮=多角度并行检索（本地唯一拆解层）；第 2 轮起=定向补检
+    check("retrieve 多轮工作流", "第 1 轮：多角度并行检索" in prom
+          and "第 2 轮起：定向补检" in prom
+          and "收尾（第 3 轮后或判断已充分）" in prom
+          and "最多 3 轮" in prom and "唯一允许的拆解层" in prom)
     guide = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                              'src', 'prompts', 'system', 'decision_guide.md'), encoding='utf-8').read()
-    check("决策指南深度规则", "逐证据引用" in guide and "深度问题生成策略" in guide)
+                              'src', 'prompts', 'source', '03_supervisor_routing_fusion.md'), encoding='utf-8').read()
+    check("决策指南深度规则", "要点先行" in guide and "证据说明" in guide)
+    import yaml
+    cfg = yaml.safe_load(open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                           'config.yaml'), encoding='utf-8'))
+    # v8.16.2: 40000→60000（rich 场景回执 47.6K 旧 cap 截掉文末 [Wn] 清单，实证根因）
+    check("retrieve-agent cap=60000",
+          cfg['agent']['tool_result_caps']['retrieve-agent'] == 60000)
     import yaml
     cfg = yaml.safe_load(open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                            'config.yaml'), encoding='utf-8'))
@@ -401,7 +412,12 @@ def test_ag26_budget_forward():
     print("[AG-26] 预算检查前移（规范 2.2.5，每次调用前）")
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             'src', 'graph', 'expert_graph.py'), encoding='utf-8').read()
-    check("每轮调用前估算", "estimate_tokens(call_messages)" in src)
+    cm = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           'src', 'core', 'context_manager.py'), encoding='utf-8').read()
+    # v9.2 P6: 占用率估算收敛至共享 budget_usage_ratio（原逐字 estimate_tokens(call_messages)）
+    check("每轮调用前估算（共享占用率）",
+          "budget_usage_ratio(supervisor_budget, call_messages)" in src
+          and "estimate_tokens" in cm)
     check("硬阈值强制收尾", "硬阈值" in src and "强制收尾" in src)
     check("软阈值状态栏提示", "软阈值" in src and "尽快收敛" in src)
     from src.core.context_budget import ContextBudget, ContextBudgetConfig
@@ -589,6 +605,16 @@ def test_ag29_citation_support():
     r4 = check_citation_support("无引用回答。", [], False)
     check("无引用 → 不告警", r4["citation_unsupported"] is False
           and r4["citation_supported"] is True, str(r4))
+    # v8.17.4: 双轨引用——[Wn]/[Hn] 计为引用且视为有支撑（联网/历史来源默认可信）
+    r5 = check_citation_support("2025 年加州田间检测数据显示 HLB 扩散 [W1]，历史基线见 [8]。",
+                                docs, False)
+    check("[Wn] 引用计为引用且有支撑（无本地检索不告警）",
+          r5["citation_unsupported"] is False and r5["citation_supported"] is True
+          and r5["web_citation_count"] == 1 and r5["citation_count"] == 2, str(r5))
+    r6 = check_citation_support("纯联网引用 [W1][W2][W5]。", [], False)
+    check("纯 [Wn] 引用 → supported 且不误报 mismatch",
+          r6["citation_supported"] is True and r6["citation_unsupported"] is False
+          and r6["citation_mismatch"] is False, str(r6))
     # done 事件附元数据（源码断言）
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             'src', 'api', 'main.py'), encoding='utf-8').read()
@@ -646,11 +672,11 @@ def test_ag33_noise_trim():
     turns = [[
         HumanMessage(content="问"),
         AIMessage(content="", tool_calls=[
-            {"id": "c1", "name": "call_retrieve_agent", "args": {}},
+            {"id": "c1", "name": "call_search_both", "args": {}},
             {"id": "c2", "name": "budget_skip", "args": {}},
         ]),
         ToolMessage(content="[retrieve-agent result] 证据报告", tool_call_id="c1",
-                    name="call_retrieve_agent"),
+                    name="call_search_both"),
         ToolMessage(content="[budget] 未执行", tool_call_id="c2", name="budget_skip"),
         AIMessage(content="答"),
     ]]
@@ -706,10 +732,10 @@ def test_ag36_compression_pairing():
     for i in range(6):
         msgs.append(HumanMessage(content="q%d" % i + "长" * 200))
         msgs.append(AIMessage(content="", tool_calls=[
-            {"id": "c%d" % i, "name": "call_retrieve_agent", "args": {}}]))
+            {"id": "c%d" % i, "name": "call_search_both", "args": {}}]))
         msgs.append(ToolMessage(
             content="[retrieve-agent result] report %d " % i + "证据" * 300,
-            tool_call_id="c%d" % i, name="call_retrieve_agent"))
+            tool_call_id="c%d" % i, name="call_search_both"))
         msgs.append(AIMessage(content="answer %d" % i + "回" * 200))
 
     def check_pairing(r, label):
@@ -753,14 +779,12 @@ def test_ag37_chunk_id_traceable():
     check("证据块含 chunk_id", "chunk: P1:3" in block, block[:200])
     loop.run_until_complete(session_manager.clear_session(sid))
     loop.close()
-    # 源码断言: save 节点构建 evidence 含 chunk_id
-    eg = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                           'src', 'graph', 'expert_graph.py'), encoding='utf-8').read()
-    check("save 节点保留 chunk_id", "chunk_id" in eg and "paper_id" in eg)
-    # 报告合并（多轮检索不丢）
-    lg = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                           'src', 'graph', 'light_graph.py'), encoding='utf-8').read()
-    check("报告合并逻辑", "report_parts" in eg and "report_parts" in lg)
+    # 源码断言: save 节点构建 evidence 含 chunk_id（v9.2 收敛共享核心后锚点随迁）
+    al = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           'src', 'core', 'agent_loop.py'), encoding='utf-8').read()
+    check("save 节点保留 chunk_id", "chunk_id" in al and "paper_id" in al)
+    # 报告合并（多轮检索不丢），共享核心单份实现
+    check("报告合并逻辑", "report_parts" in al)
 
 
 if __name__ == "__main__":
