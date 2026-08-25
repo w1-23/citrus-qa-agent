@@ -79,7 +79,7 @@
 ## 3. 变更日志
 
 ### 批次 9（P4：SSE 双队列桥竞态根治，2026-08-25）
-- 提交：`<BATCH9_HASH>`（待填；回滚点 `ea3e241`）。
+- 提交：`d49c199`（feature/v8.17-draft-native-ucr；回滚点 `ea3e241`）。
 - **根因**：bridge_progress 用 0.3s 轮询（wait_for(timeout=0.3)）转发工具事件
   → 事件在桥内滞留至 300ms；done 前用 sleep(0.5) 猜测"桥已转发完"、finally
   用 10×0.1s 轮询"排空"——全是时序猜，无法证明事件顺序，且每请求固定 +500ms。
