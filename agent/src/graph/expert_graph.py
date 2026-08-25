@@ -17,11 +17,11 @@ from langgraph.graph import StateGraph, END
 
 from src.graph.state import AgentState
 from src.config import settings, get_deepseek_model, PROJECT_ROOT
-from src.core.evidence import (render_evidence, EVIDENCE_SNIPPET_MAX_CHARS, src_of)
 from src.core.agent_loop import (
     tc_id as extract_tc_id, count_unique_docs, dedup_by_doi, emit_llm_usage,
     FINAL_ANSWER_PROMPT, invoke_llm_with_retry, force_final_answer,
     build_cited_refs, renumber_and_sync_trace,
+    run_save_node, default_ltm_gate,
 )
 from src.prompts.loader import assemble_system_prompt
 
@@ -1248,116 +1248,15 @@ async def supervisor_node(state: AgentState) -> dict:
 
 
 async def expert_save_node(state: AgentState) -> dict:
-    query = state.get("query", "")
-    answer = state.get("answer", "")
-    session_id = state.get("session_id", "default")
-    if not answer:
-        return {"_trace": {"node": "save", "elapsed_ms": 0, "summary": "no answer"}}
+    """v9.2: save 核心收敛至 agent_loop.run_save_node（expert 差异：
+    web 证据并入账本 + LTM 结构化章节门槛；行为与 v9.2 前逐位一致）。"""
+    return await run_save_node(
+        state,
+        log_tag="ExpertGraph",
+        include_web=True,
+        ltm_gate=default_ltm_gate,
+    )
 
-    try:
-        from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
-        from src.session.manager import session_manager, _validate_trace
-        from src.core.background import spawn
-        # v8.3.8: 完整轨迹持久化（含 tool_calls/ToolMessage 配对），不再只存 Q/A
-        trace = list(state.get("turn_trace") or [])
-        # 过滤 system 与注入的证据块（它们不属于会话轨迹）
-        trace = [m for m in trace
-                 if not isinstance(m, type(None)) and getattr(m, "type", "") != "system"]
-        # 历史证据块是注入消息，不重复入历史（由 session_evidence 表承载）
-        trace = [m for m in trace
-                 if not str(getattr(m, "content", "")).startswith("[历史检索证据")]
-        trace = _validate_trace(trace)
-        # 最终回答保证在轨迹末尾
-        if not (trace and isinstance(trace[-1], AIMessage)
-                and not getattr(trace[-1], "tool_calls", None)
-                and trace[-1].content == answer):
-            trace.append(AIMessage(content=answer))
-        spawn(session_manager.save_messages(
-            session_id, trace, state.get("idempotency_key", "")))
-        # v8.3.8: 证据账本（检索报告 + 结构化清单，跨轮复用）
-        # v8.3.9: 合并全部检索报告（多轮检索不丢） + evidence 保留 chunk_id 可回查原文
-        report_parts = []
-        for m in trace:
-            if isinstance(m, ToolMessage) and getattr(m, "name", "") == "call_search_both":
-                report_parts.append(str(m.content))
-        report_text = "\n\n---\n\n".join(report_parts)
-        main_results = state.get("main_results") or []
-        # v8.17.17: 纯联网轮（0 main_results + N web_results）不再存 0 items——
-        # 用户日志实测证据账本 0 items（纯联网轮 main_results 为空）；
-        # web_results [Wn] 条目按联网来源并入 evidence（doi 空/url 带完整地址）。
-        web_results = state.get("web_results") or []
-        if report_text or main_results or web_results:
-            evidence = [
-                {
-                    "doi": r.get("doi", ""),
-                    "chunk_id": f"{r.get('paper_id', '')}:{r.get('chunk_index', '')}",
-                    "title": str(r.get("title", ""))[:150],
-                    "score": r.get("score", r.get("rerank_score", 0)) or 0,
-                    "year": str(r.get("year", "")),
-                    # v8.15: 来源随账本持久化（历史证据 H1..Hn 保留来源徽标）
-                    "source": src_of(r),
-                    # v8.13-b4c: 账本片段经 render_evidence 单一渲染（2000 安全阀）
-                    "snippet": render_evidence(r, max_chars=EVIDENCE_SNIPPET_MAX_CHARS),
-                }
-                for r in main_results[:30]
-            ] + [
-                {
-                    "doi": "",
-                    "chunk_id": str(w.get("url", ""))[:200],
-                    "title": str(w.get("title", ""))[:150],
-                    "score": float(w.get("score", 0) or 0),
-                    "year": "",
-                    "source": "web",
-                    "snippet": str(w.get("abstract", w.get("snippet", "")))[:500],
-                    "url": str(w.get("url", "")),
-                }
-                for w in web_results[:30]
-            ]
-            spawn(session_manager.save_evidence(
-                session_id, query, evidence, report_text))
-    except Exception as e:
-        logger.warning(f"[ExpertGraph:save] failed: {e}")
-
-    try:
-        # v8.4: LTM 提取转后台（spawn），不与响应抢时间；写入走 ADD-only + 置信度门槛
-        # （书 3.1 记忆生命周期: 后台提取候选 → 核验 → 更新；提取器不阻塞主链路）
-        from src.core.background import spawn as _spawn
-
-        def _extract_and_save_ltm(q: str, a: str, sid: str):
-            try:
-                from src.guardrails.memory import memory_store
-                facts = memory_store.extract_key_facts(q, a)
-                for f in facts:
-                    # v8.6 (书 §3.1 偏好追踪): type=preference 走 preference_memory
-                    # （消费点见 build_human_message 的 <user_preferences> 块）
-                    # v8.9: 偏好写入全局域（用户级偏好跨会话生效）
-                    if f.get("type") == "preference":
-                        memory_store.set_preference(
-                            memory_store.GLOBAL_PREF_DOMAIN,
-                            f.get("key", ""), f.get("value", ""))
-                        continue
-                    memory_store.save_long_term_fact(
-                        f.get("key", ""),
-                        f.get("value", ""),
-                        f.get("confidence", 0.5),
-                        owner_session=sid,
-                        source_query=q,
-                    )
-            except Exception as e:
-                logger.debug(f"[ExpertGraph:save] LTM background extract failed: {e}")
-
-        if len(answer) > 500:
-            is_substantial = any(
-                kw in answer
-                for kw in ("###", "结论", "摘要", "引言", "核心结论", "局限与边界")
-            )
-            if is_substantial:
-                _spawn(asyncio.to_thread(
-                    _extract_and_save_ltm, query, answer, session_id))
-    except Exception as e:
-        logger.debug(f"[ExpertGraph:save] LTM skip: {e}")
-
-    return {"_trace": {"node": "save", "elapsed_ms": 0, "summary": "saved"}}
 
 
 def build_expert_graph() -> StateGraph:

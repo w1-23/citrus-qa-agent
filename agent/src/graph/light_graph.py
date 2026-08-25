@@ -12,11 +12,11 @@ from langgraph.graph import StateGraph, END
 
 from src.graph.state import AgentState
 from src.config import settings, get_deepseek_model
-from src.core.evidence import (render_evidence, EVIDENCE_SNIPPET_MAX_CHARS, src_of)
 from src.core.agent_loop import (
     dedup_by_doi, emit_llm_usage, FINAL_ANSWER_PROMPT,
     invoke_llm_with_retry, force_final_answer,
     build_cited_refs, renumber_and_sync_trace,
+    run_save_node,
 )
 from src.prompts.loader import assemble_system_prompt
 
@@ -382,82 +382,10 @@ async def light_supervisor_node(state: AgentState) -> dict:
 
 
 async def save_context_node(state: AgentState) -> dict:
-    query = state.get("query", "")
-    answer = state.get("answer", "")
-    session_id = state.get("session_id", "default")
-    if not answer:
-        return {"_trace": {"node": "save", "elapsed_ms": 0, "summary": "no answer"}}
+    """v9.2: save 核心收敛至 agent_loop.run_save_node（light 差异：
+    无 web 账本并入、LTM 仅长度门槛；行为与 v9.2 前逐位一致）。"""
+    return await run_save_node(state, log_tag="LightGraph", include_web=False)
 
-    try:
-        from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
-        from src.session.manager import session_manager, _validate_trace
-        from src.core.background import spawn
-        # v8.3.8: 完整轨迹持久化（含 tool_calls/ToolMessage 配对）
-        trace = list(state.get("turn_trace") or [])
-        trace = [m for m in trace if getattr(m, "type", "") != "system"]
-        trace = [m for m in trace
-                 if not str(getattr(m, "content", "")).startswith("[历史检索证据]")]
-        trace = _validate_trace(trace)
-        if not (trace and isinstance(trace[-1], AIMessage)
-                and not getattr(trace[-1], "tool_calls", None)
-                and trace[-1].content == answer):
-            trace.append(AIMessage(content=answer))
-        spawn(session_manager.save_messages(
-            session_id, trace, state.get("idempotency_key", "")))
-        # v8.3.8: 证据账本（v8.3.9: 合并全部报告 + chunk_id 可回查）
-        report_parts = []
-        for m in trace:
-            if isinstance(m, ToolMessage) and getattr(m, "name", "") == "call_search_both":
-                report_parts.append(str(m.content))
-        report_text = "\n\n---\n\n".join(report_parts)
-        main_results = state.get("main_results") or []
-        if report_text or main_results:
-            evidence = [
-                {"doi": r.get("doi", ""),
-                 "chunk_id": f"{r.get('paper_id', '')}:{r.get('chunk_index', '')}",
-                 "title": str(r.get("title", ""))[:150],
-                 "score": r.get("score", r.get("rerank_score", 0)) or 0,
-                 "year": str(r.get("year", "")),
-                 # v8.15: 来源随账本持久化（历史证据保留 RAG/UCR 徽标）
-                 "source": src_of(r),
-                 "snippet": render_evidence(r, max_chars=EVIDENCE_SNIPPET_MAX_CHARS)}
-                for r in main_results[:30]
-            ]
-            spawn(session_manager.save_evidence(
-                session_id, query, evidence, report_text))
-    except Exception as e:
-        logger.warning(f"[LightGraph:save] failed: {e}")
-
-    try:
-        # v8.4: LTM 提取转后台 + ADD-only 写入（与 expert 图一致）
-        def _extract_and_save_ltm(q: str, a: str, sid: str):
-            try:
-                from src.guardrails.memory import memory_store
-                facts = memory_store.extract_key_facts(q, a)
-                for f in facts:
-                    # v8.6 (书 §3.1 偏好追踪): type=preference 走 preference_memory
-                    # v8.9: 偏好写入全局域（用户级偏好跨会话生效）
-                    if f.get("type") == "preference":
-                        memory_store.set_preference(
-                            memory_store.GLOBAL_PREF_DOMAIN,
-                            f.get("key", ""), f.get("value", ""))
-                        continue
-                    memory_store.save_long_term_fact(
-                        f.get("key", ""),
-                        f.get("value", ""),
-                        f.get("confidence", 0.5),
-                        owner_session=sid,
-                        source_query=q,
-                    )
-            except Exception as e:
-                logger.debug(f"[LightGraph:save] LTM background extract failed: {e}")
-
-        if len(answer) > 500:
-            spawn(asyncio.to_thread(_extract_and_save_ltm, query, answer, session_id))
-    except Exception as e:
-        logger.debug(f"[LightGraph:save] LTM skip: {e}")
-
-    return {"_trace": {"node": "save", "elapsed_ms": 0, "summary": "saved"}}
 
 
 def build_light_graph() -> StateGraph:

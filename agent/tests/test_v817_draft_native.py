@@ -241,15 +241,18 @@ def test_v81717_evidence_web_and_historical():
     print("[VF-53] evidence 保存 web 条目 + historical 侧栏恢复")
     from src.graph import expert_graph as eg
     from src.session import manager as sm
-    # agent 模块（保持与 project 一致的 src 引用路径兼容）
-    import src.graph.expert_graph as _eg2
+    import src.core.agent_loop as al   # v9.2: save 核心收敛于此
 
     eg_src = _inspect.getsource(eg)
+    al_src = _inspect.getsource(al)
+    # v9.2 重构：web 账本逻辑迁至 agent_loop.run_save_node，锚点随迁
     check("evidence 保存含 web_results（0 items 修复）",
-          "web_results = state.get(\"web_results\") or []" in eg_src
-          or "for w in web_results[:30]" in eg_src)
+          "web_results = state.get(\"web_results\") or []" in al_src
+          or "for w in web_results[:30]" in al_src)
     check("web 条目带 url/source=web 入账本",
-          '"source": "web"' in eg_src and '"url": str(w.get("url", ""))' in eg_src)
+          '"source": "web"' in al_src and '"url": str(w.get("url", ""))' in al_src)
+    check("expert save 委托共享核心并开启 web 账本",
+          "run_save_node(" in eg_src and 'include_web=True' in eg_src)
 
     # historical 恢复接线（references_data.historical 不再为空数组）
     check("references_data 含 historical 注入（v8.17.17 恢复）",

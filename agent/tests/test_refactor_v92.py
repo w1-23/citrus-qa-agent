@@ -203,6 +203,35 @@ def test_v92_evidence_readers_converged():
     check("block 保留四列渲染", "turn_seq, query, evidence_json, report_text" in block_seg)
 
 
+# ── VF-107 save 节点二合一（P5：只抽核心，两图行为不变）────────────
+def test_v92_save_node_shared_core():
+    print("[VF-107] save 节点二合一参数化")
+    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    al_src = open(os.path.join(base, "src/core/agent_loop.py"), encoding="utf-8").read()
+    check("共享核心存在", "async def run_save_node(state: dict" in al_src)
+    for inv in ["trace[-1].content == answer", "startswith(\"[历史检索证据]\")",
+                "no answer", "idempotency_key", "[{log_tag}:save] failed"]:
+        check(f"共享核心保留不变量标记: {inv}", inv in al_src)
+
+    eg_src = open(os.path.join(base, "src/graph/expert_graph.py"), encoding="utf-8").read()
+    lg_src = open(os.path.join(base, "src/graph/light_graph.py"), encoding="utf-8").read()
+
+    eg_seg = eg_src.split("def expert_save_node(")[1].split("\n    def ")[0]
+    lg_seg = lg_src.split("def save_context_node(")[1].split("\n    def ")[0]
+    eg_norm, lg_norm = "".join(eg_seg.split()), "".join(lg_seg.split())
+
+    check("expert 包装: log_tag/IncludeWeb/ltm 门槛",
+          'run_save_node(' in eg_norm and 'log_tag="ExpertGraph"' in eg_norm
+          and "include_web=True" in eg_norm and "default_ltm_gate" in eg_norm)
+    check("light 包装: 无 web 账本、无 LTM 额外门槛（行为不变）",
+          'run_save_node' in lg_norm and 'log_tag="LightGraph"' in lg_norm
+          and "include_web=False" in lg_norm and "ltm_gate" not in lg_norm)
+    # 关键不变量仍在共享核心而非两图各自为政：两图包装不再含证据账本字面拼装
+    check("两图包装已无账本字段拼装",
+          '"chunk_id"' not in eg_norm and '"chunk_id"' not in lg_norm)
+
+
 # ── 汇总 ──────────────────────────────────────────────────────────
 def _summary():
     print(f"\n[VF-9.2] PASS {len(passed)} / FAIL {len(failed)}"

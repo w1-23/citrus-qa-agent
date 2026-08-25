@@ -18,7 +18,8 @@ import uuid
 
 from langchain_core.messages import AIMessage, SystemMessage
 
-from src.core.evidence import src_of, renumber_refs
+from src.core.evidence import (src_of, renumber_refs,
+                               render_evidence, EVIDENCE_SNIPPET_MAX_CHARS)
 
 logger = logging.getLogger(__name__)
 
@@ -216,3 +217,147 @@ def emit_llm_usage(session_id: str, source: str, response) -> None:
         emit_usage_from_response(session_id, source, response)
     except Exception:
         pass
+
+
+_LTM_SUBSTANTIAL_KWS = ("###", "结论", "摘要", "引言", "核心结论", "局限与边界")
+
+
+def default_ltm_gate(answer: str) -> bool:
+    """expert 原 LTM 提取门槛：回答含结构化章节关键词（v9.2 常量化）。"""
+    return any(kw in answer for kw in _LTM_SUBSTANTIAL_KWS)
+
+
+async def run_save_node(state: dict, *, log_tag: str,
+                        include_web: bool = False,
+                        ltm_gate=None) -> dict:
+    """save 节点二合一（v9.2，expert/light 共用——消除 85% 同构双实现）。
+
+    原 expert_graph.expert_save_node 与 light_graph.save_context_node 约 85%
+    相同（轨迹过滤 → _validate_trace → answer 末尾判重 → save_messages →
+    报告拼装 → 证据账本 → save_evidence → 后台 LTM 提取），且已漂移过：
+    v8.17.17 web 证据并入账本只改了 expert。此处收敛为单实现，差异显式参数化：
+
+      - log_tag      失败日志标签（"ExpertGraph"/"LightGraph"）
+      - include_web  是否把 web_results 并入证据账本（expert=True / light=False）
+      - ltm_gate     额外 LTM 门槛函数（入参 answer → bool；expert 默认结构化
+                     章节关键词门，light 传 None 仅保留长度 >500 门槛）
+
+    行为不变量逐条保留：无 answer 早退、[历史检索证据] 注入消息不入历史、
+    trace[-1].content == answer 判重（防重复消息）、幂等键透传、后台 spawn
+    不阻塞主链路、save 失败不抛（仅 warning 日志）。
+    """
+    query = state.get("query", "")
+    answer = state.get("answer", "")
+    session_id = state.get("session_id", "default")
+    if not answer:
+        return {"_trace": {"node": "save", "elapsed_ms": 0, "summary": "no answer"}}
+
+    try:
+        from langchain_core.messages import AIMessage, ToolMessage
+        from src.session.manager import session_manager, _validate_trace
+        from src.core.background import spawn
+        # v8.3.8: 完整轨迹持久化（含 tool_calls/ToolMessage 配对）
+        trace = list(state.get("turn_trace") or [])
+        # 过滤 system 与注入的证据块（它们不属于会话轨迹）；expert 原实现
+        # 额外排除 None 元素——保留逐图原行为
+        if log_tag == "ExpertGraph":
+            trace = [m for m in trace
+                     if not isinstance(m, type(None))
+                     and getattr(m, "type", "") != "system"]
+        else:
+            trace = [m for m in trace if getattr(m, "type", "") != "system"]
+        # 历史证据块是注入消息，不重复入历史（由 session_evidence 表承载）
+        trace = [m for m in trace
+                 if not str(getattr(m, "content", "")).startswith("[历史检索证据]")]
+        trace = _validate_trace(trace)
+        # 最终回答保证在轨迹末尾（v9.2 重排后轨迹同步正为此服务）
+        if not (trace and isinstance(trace[-1], AIMessage)
+                and not getattr(trace[-1], "tool_calls", None)
+                and trace[-1].content == answer):
+            trace.append(AIMessage(content=answer))
+        spawn(session_manager.save_messages(
+            session_id, trace, state.get("idempotency_key", "")))
+        # v8.3.8: 证据账本（检索报告 + 结构化清单，跨轮复用）
+        # v8.3.9: 合并全部检索报告（多轮检索不丢） + evidence 保留 chunk_id 可回查原文
+        report_parts = []
+        for m in trace:
+            if isinstance(m, ToolMessage) and getattr(m, "name", "") == "call_search_both":
+                report_parts.append(str(m.content))
+        report_text = "\n\n---\n\n".join(report_parts)
+        main_results = state.get("main_results") or []
+        web_results = state.get("web_results") or []
+        # v8.17.17: 纯联网轮（0 main_results + N web_results）不再存 0 items——
+        # web_results [Wn] 条目按联网来源并入 evidence（doi 空/url 带完整地址）；
+        # 该并入仅 expert 开启（light 保持原行为：仅 report/main 触发账本）
+        if report_text or main_results or (include_web and web_results):
+            evidence = [
+                {
+                    "doi": r.get("doi", ""),
+                    "chunk_id": f"{r.get('paper_id', '')}:{r.get('chunk_index', '')}",
+                    "title": str(r.get("title", ""))[:150],
+                    "score": r.get("score", r.get("rerank_score", 0)) or 0,
+                    "year": str(r.get("year", "")),
+                    # v8.15: 来源随账本持久化（历史证据 H1..Hn 保留来源徽标）
+                    "source": src_of(r),
+                    # v8.13-b4c: 账本片段经 render_evidence 单一渲染（2000 安全阀）
+                    "snippet": render_evidence(r, max_chars=EVIDENCE_SNIPPET_MAX_CHARS),
+                }
+                for r in main_results[:30]
+            ]
+            if include_web:
+                evidence += [
+                    {
+                        "doi": "",
+                        "chunk_id": str(w.get("url", ""))[:200],
+                        "title": str(w.get("title", ""))[:150],
+                        "score": float(w.get("score", 0) or 0),
+                        "year": "",
+                        "source": "web",
+                        "snippet": str(w.get("abstract", w.get("snippet", "")))[:500],
+                        "url": str(w.get("url", "")),
+                    }
+                    for w in web_results[:30]
+                ]
+            spawn(session_manager.save_evidence(
+                session_id, query, evidence, report_text))
+    except Exception as e:
+        logger.warning(f"[{log_tag}:save] failed: {e}")
+
+    try:
+        # v8.4: LTM 提取转后台（spawn），不与响应抢时间；写入走 ADD-only + 置信度门槛
+        # （书 3.1 记忆生命周期: 后台提取候选 → 核验 → 更新；提取器不阻塞主链路）
+        from src.core.background import spawn as _spawn
+
+        def _extract_and_save_ltm(q: str, a: str, sid: str):
+            try:
+                from src.guardrails.memory import memory_store
+                facts = memory_store.extract_key_facts(q, a)
+                for f in facts:
+                    # v8.6 (书 §3.1 偏好追踪): type=preference 走 preference_memory
+                    # （消费点见 build_human_message 的 <user_preferences> 块）
+                    # v8.9: 偏好写入全局域（用户级偏好跨会话生效）
+                    if f.get("type") == "preference":
+                        memory_store.set_preference(
+                            memory_store.GLOBAL_PREF_DOMAIN,
+                            f.get("key", ""), f.get("value", ""))
+                        continue
+                    memory_store.save_long_term_fact(
+                        f.get("key", ""),
+                        f.get("value", ""),
+                        f.get("confidence", 0.5),
+                        owner_session=sid,
+                        source_query=q,
+                    )
+            except Exception as e:
+                logger.debug(f"[{log_tag}:save] LTM background extract failed: {e}")
+
+        ltm_ok = len(answer) > 500
+        if ltm_gate is not None:
+            ltm_ok = ltm_ok and ltm_gate(answer)
+        if ltm_ok:
+            _spawn(asyncio.to_thread(
+                _extract_and_save_ltm, query, answer, session_id))
+    except Exception as e:
+        logger.debug(f"[{log_tag}:save] LTM skip: {e}")
+
+    return {"_trace": {"node": "save", "elapsed_ms": 0, "summary": "saved"}}

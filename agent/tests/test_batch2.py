@@ -257,11 +257,12 @@ def test_ag5_ltm():
     check("recall 含衰减", "0.95" in src)
     check("recall 输出含来源标注", "来源" in src)
     check("recall 含 max_chars 截断", "max_chars" in src)
-    g1 = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'graph', 'expert_graph.py'),
+    al = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'core', 'agent_loop.py'),
               encoding='utf-8').read()
     # v8.4: LTM 提取转后台 spawn（不阻塞响应），原 to_thread 内联断言更新
-    check("save 节点 LTM 提取后台化", "_extract_and_save_ltm" in g1
-          and "spawn(asyncio.to_thread(" in g1)
+    # v9.2: save 节点收敛共享核心（agent_loop.run_save_node），锚点随迁
+    check("save 节点 LTM 提取后台化", "_extract_and_save_ltm" in al
+          and "spawn(asyncio.to_thread(" in al)
     c = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'prompts', 'source', '20_terminology_domain.md'),
              encoding='utf-8').read()
     check("constraints 含冲突规则", "跨会话记忆规则" in c)
@@ -773,14 +774,12 @@ def test_ag37_chunk_id_traceable():
     check("证据块含 chunk_id", "chunk: P1:3" in block, block[:200])
     loop.run_until_complete(session_manager.clear_session(sid))
     loop.close()
-    # 源码断言: save 节点构建 evidence 含 chunk_id
-    eg = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                           'src', 'graph', 'expert_graph.py'), encoding='utf-8').read()
-    check("save 节点保留 chunk_id", "chunk_id" in eg and "paper_id" in eg)
-    # 报告合并（多轮检索不丢）
-    lg = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                           'src', 'graph', 'light_graph.py'), encoding='utf-8').read()
-    check("报告合并逻辑", "report_parts" in eg and "report_parts" in lg)
+    # 源码断言: save 节点构建 evidence 含 chunk_id（v9.2 收敛共享核心后锚点随迁）
+    al = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           'src', 'core', 'agent_loop.py'), encoding='utf-8').read()
+    check("save 节点保留 chunk_id", "chunk_id" in al and "paper_id" in al)
+    # 报告合并（多轮检索不丢），共享核心单份实现
+    check("报告合并逻辑", "report_parts" in al)
 
 
 if __name__ == "__main__":

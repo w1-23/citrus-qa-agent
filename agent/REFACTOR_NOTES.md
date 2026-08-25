@@ -61,7 +61,7 @@
 | P2 | 高 | expert/light_graph | cited_refs 装配 40 行双实现（web 槽位已漂移 10/5） | ✅ 批次2已修 |
 | P3 | 高 | main.py:331 | light 节点名 "light_synthesize"/"light_react" 过期 → light done 落入兜底分支：丢 citation_info/tools_called、job 永不 completed、request_done 缺失 | ✅ 批次2已修 |
 | P4 | 中 | main.py:334/416-419 | done 前 sleep(0.5) + 10×0.1 轮询排空——双队列桥竞态的补丁式掩蔽 | 待修（根因：await 桥排空） |
-| P5 | 高 | expert/light save 节点 | save 节点双图 ~85% 重复（证据账本 light 缺 web 条目、LTM 门槛已漂移） | 待修（共享 persist_turn） |
+| P5 | 高 | expert/light save 节点 | save 节点双图 ~85% 重复（证据账本 light 缺 web 条目、LTM 门槛已漂移） | ✅ 批次5已修（run_save_node 参数化；用户决策：只抽核心，两图行为不变） |
 | P6 | 中 | expert/light supervisor | 消息装配 + LoadedContext 重建 + LLM 客户端装配 + 逐轮预算守卫重复（light 每轮重建 ContextBudget） | 待修 |
 | P7 | 中 | manager.py:794-944 | 证据账本读取器 ×4（build_evidence_block/count_evidence_items/get_evidence_refs/get_evidence_materials）同一模板 | ✅ 批次4已修（_load_evidence_rows 统一读取器） |
 | P8 | 中 | manager.py:53-79 / memory.py:21-41 | _connect_db 逐字重复两份；memory_store DDL ×4 处 | 待修 |
@@ -77,6 +77,25 @@
 | P18 | 中 | 各层 | 4 组审计确认的次级项：save 节点二合一、消息装配/预算守卫共享、证据账本读取器×4、_connect_db 双份、压缩熔断永久降级 | 待修 |
 
 ## 3. 变更日志
+
+### 批次 5（P5：save 节点二合一，2026-08-25）
+- 提交：`<BATCH5_HASH>`（待填；回滚点 `373b6b6`）。
+- **改动**：
+  - `src/core/agent_loop.py`：新增 `run_save_node(state, *, log_tag, include_web,
+    ltm_gate)`——原 expert_save_node / save_context_node 双图 ~85% 同构收敛为
+    单实现；差异显式参数化：**用户决策「只抽公共核心，两图行为保持不变」**：
+      - expert：`include_web=True`（v8.17.17 web 证据并入账本保留）+ `ltm_gate=
+        default_ltm_gate`（结构化章节关键词门，常量 `_LTM_SUBSTANTIAL_KWS`）；
+      - light：`include_web=False`（无 web 账本）+ 无额外门槛（仅长度 >500）；
+      - trace None 元素守卫按图保留（expert 有 / light 无）。
+  - `src/graph/expert_graph.py` / `light_graph.py`：save 节点改薄包装（各 ~6 行）；
+    删除迁移后已无引用面的 evidence import（render_evidence/src_of/... 移共享核心）。
+  - 锚点随迁：`tests/test_batch2.py`（AG-5 LTM 后台化、AG-37 chunk_id/report_parts）、
+    `tests/test_v817_draft_native.py`（VF-53 web 账本字段）；新增
+    `tests/test_refactor_v92.py` VF-107 锁定参数化（expert include_web=True +
+    default_ltm_gate；light include_web=False 无 ltm_gate；两图包装已无账本字段拼装）。
+- **验证**：tests 全量 = 229 passed。
+- **回滚点**：单 commit revert 可回 `373b6b6`；两图行为与重构前逐位一致。
 
 ### 批次 4（P7：证据账本读取器 ×4 收敛，2026-08-25）
 - 提交：`22ed7d6`（feature/v8.17-draft-native-ucr；回滚点 `4b945a4`）。
