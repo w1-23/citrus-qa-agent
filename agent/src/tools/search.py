@@ -294,7 +294,11 @@ def _corpus_fingerprint(rag) -> str:
         raise ValueError(f"corpus fingerprint unavailable: {e}") from e
 
 def _rag_cache_key(query: str, hyde: bool, rag) -> str:
-    raw = f"{_norm_cache_query(query)}|hyde={int(hyde)}|{_corpus_fingerprint(rag)}"
+    # v9.4 (P0#5): 缓存键纳入 query_mode——不同消融模式的检索结果不同，
+    # 必须隔离缓存避免模式间串用（默认 full 键含 mode=full，与旧键物理不同
+    # → 升级后前 300 个请求冷缓存重建，属预期一次性代价）
+    _mode = getattr(settings, "QUERY_MODE", "full")
+    raw = f"{_norm_cache_query(query)}|hyde={int(hyde)}|mode={_mode}|{_corpus_fingerprint(rag)}"
     return hashlib_md5(raw)
 
 def hashlib_md5(s: str) -> str:
@@ -373,7 +377,12 @@ def citrus_rag_search(query: str) -> tuple[str, dict]:
     except Exception:
         cache_key = None
 
-    if getattr(settings, 'RAG_HYDE_ENABLED', True):
+    # v9.4 (P0#5): 查询消融模式路由（内联，见下方组装处）。settings.QUERY_MODE 取值：
+    # full=HyDE+MQ+SUM 全路（默认，行为不变）；raw=仅原始查询 1 路（跳过 HyDE 生成）；
+    # hyde_only/mq_only/sum_only=仅单类路；hyde_mq/hyde_sum=两类组合——论文实验2 变体。
+    hyde_parsed = None
+    if getattr(settings, 'RAG_HYDE_ENABLED', True) \
+            and getattr(settings, 'QUERY_MODE', 'full') != 'raw':
         try:
             from src.core.progress_bus import emit_progress
             emit_progress("tool_progress", {"message": "正在构建语义假设 (HyDE)...", "tool_call_id": ""})
@@ -406,16 +415,12 @@ def citrus_rag_search(query: str) -> tuple[str, dict]:
         t0 = time.perf_counter()
 
         if hyde_parsed:
-            # 结构化 HyDE 全路并发；queries[0]=HyDE 段作为 rerank 锚（语义≈原始问题）
-            queries = [hyde_parsed["hyde"]] \
-                + hyde_parsed.get("multi_query", [])[:3] \
-                + hyde_parsed.get("summary", [])[:5]
-            if len(queries) < 2:
-                # v8.16.3c: 结构化仅剩 HyDE 段（多路/要点缺失）→ 补原始查询保底多路
-                queries.append(query)
-                logger.info(f"[HyDE] 结构化仅 HyDE 段，补充原始查询保底 → "
-                            f"{len(queries)} 路查询")
-            results = rag.search_multi(queries, original_query=query)
+            _mode = getattr(settings, 'QUERY_MODE', 'full')
+            queries = _compose_queries(query, hyde_parsed, _mode)
+            if queries is None:
+                results = rag.search(query)
+            else:
+                results = rag.search_multi(queries, original_query=query)
         else:
             results = rag.search(query)
 
@@ -640,6 +645,48 @@ def _cached_hyde_parsed(query: str) -> dict | None:
     if _is_english_answer(raw):
         return {"hyde": raw, "multi_query": [], "summary": []}
     return None
+
+# v9.4 (P0#5): query_mode 查询组装纯函数（论文实验2 变体——长度适配假说验证）。
+# 返回 None = 无多路可用（调方走单路 rag.search）；否则返回待检索 queries 列表。
+# mq_sum = MQ×3 + SUM×5（无 HyDE 首批）——实验1 -HyDE 变体专用。
+_VALID_QUERY_MODES = (
+    "full", "raw", "hyde_only", "mq_only", "sum_only", "hyde_mq",
+    "hyde_sum", "mq_sum")
+
+def _compose_queries(query: str, hyde_parsed: dict | None, mode: str,
+                     need_basic_fallback: bool = True) -> list[str] | None:
+    if mode not in _VALID_QUERY_MODES:
+        logger.warning(f"[HyDE] 未知 query_mode={mode!r}，降级 full（行为不变）")
+        mode = "full"
+    if hyde_parsed is None:
+        return None
+    _hyde = hyde_parsed.get("hyde")
+    _mq = hyde_parsed.get("multi_query", [])[:3]
+    _sum = hyde_parsed.get("summary", [])[:5]
+    if mode == "hyde_only":
+        queries = [_hyde] if _hyde else []
+    elif mode == "mq_only":
+        queries = list(_mq)
+    elif mode == "sum_only":
+        queries = list(_sum)
+    elif mode == "hyde_mq":
+        queries = ([_hyde] if _hyde else []) + list(_mq)
+    elif mode == "hyde_sum":
+        queries = ([_hyde] if _hyde else []) + list(_sum)
+    elif mode == "mq_sum":
+        queries = list(_mq) + list(_sum)
+    else:  # full（默认，行为不变：HyDE+MQ×3+SUM×3~5 = 7~9 路）
+        queries = ([_hyde] if _hyde else []) + list(_mq) + list(_sum)
+    if not queries:
+        # 全部路源为空（极端防御）→ 原始查询保底 1 路
+        queries = [query]
+        logger.info(f"[HyDE] mode={mode} 无可用路源，原始查询保底 → 1 路查询")
+    elif len(queries) < 2 and mode == "full" and need_basic_fallback:
+        # v8.16.3c: 结构化仅剩 HyDE 段（多路/要点缺失）→ 补原始查询保底多路
+        queries.append(query)
+        logger.info(f"[HyDE] 结构化仅 HyDE 段，补充原始查询保底 → "
+                    f"{len(queries)} 路查询")
+    return queries
 
 # 2. Web search provider
 

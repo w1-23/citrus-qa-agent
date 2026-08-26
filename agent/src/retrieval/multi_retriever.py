@@ -596,8 +596,10 @@ class MultiBatchRetriever:
             ])
 
         fused = rrf_fuse(*deduped, k=settings.RRF_K, weights=weights)
+        # v9.4 (P0#1): 候选窗口参数化——原 top_k_final*2 隐式硬编码，现由
+        # config.yaml retrieval.candidate_window 控制（默认 20 = 10*2，行为不变）
         candidates = [self._chunk_full(idx)
-                      for idx, _ in fused[:settings.TOP_K_FINAL * 2]]
+                      for idx, _ in fused[:settings.CANDIDATE_WINDOW]]
 
         t_rerank = time.time()
         reranked = self.reranker.rerank(rerank_query, candidates,
@@ -667,7 +669,8 @@ class MultiBatchRetriever:
         return passed
 
     def search_multi(self, queries: List[str],
-                     original_query: str = "") -> List[Dict]:
+                     original_query: str = "",
+                     rerank_query: str | None = None) -> List[Dict]:
         """多路并发检索。
 
         v8.17 修订：不做检索层来源路由/加权（数据库混合存储无物理分区，两阶段
@@ -677,6 +680,10 @@ class MultiBatchRetriever:
 
         v9.2: 新增 original_query 入参（用户原文）——统计归属按用户查询记录，
         修复默认 HyDE 主路径上检索早停统计被防串号校验误杀的问题。
+
+        v9.4b (#2 端到端 C 组)：新增 rerank_query 入参（可选）——None 时沿用
+        queries[0]（生产行为不变）；显式传入时覆盖精排查询（论文实验 1b 揭示
+        rerank_query 用 HyDE 段为主性能损失源，C 组=多路召回面 + 原始查询精排）。
         """
         if not queries:
             return []
@@ -723,7 +730,7 @@ class MultiBatchRetriever:
                 getattr(settings, 'RRF_WEIGHT_BM25', 1.0),
             ],
             stream_labels=["unique_v", "unique_b"],
-            rerank_query=queries[0],
+            rerank_query=rerank_query or original_query or queries[0],
             mode="search_multi",
             t0=_t0,
             stage_ms={"embed": dt_embed, "vector": dt_vector, "bm25": dt_bm25},

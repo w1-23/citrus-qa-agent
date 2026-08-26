@@ -590,7 +590,10 @@ async def run_agent(
             _uniq_now = len(_dedup_evidence_items(
                 list(collected_artifacts.get("main_results") or [])))
             _new_ratio = (_uniq_now - _prev_unique) / max(_uniq_now, 1)
-            if _prev_unique >= 6 and _new_ratio < 0.25:
+            # v9.4 (P0#2): 早停参数化——原硬编码 6 / 0.25，现由 config.yaml
+            # retrieval.early_stop_min_evidence / early_stop_new_ratio 控制（默认不变）
+            if (_prev_unique >= settings.EARLY_STOP_MIN_EVIDENCE
+                    and _new_ratio < settings.EARLY_STOP_NEW_RATIO):
                 logger.info(
                     f"[AgentRunner] retrieve-agent 边际收益过低 "
                     f"(新增 {_uniq_now - _prev_unique}/{_uniq_now})，代码收敛提前结束")

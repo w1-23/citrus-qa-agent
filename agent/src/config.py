@@ -73,11 +73,23 @@ class Settings(BaseSettings):
     TOP_K_VECTOR: int = Field(default_factory=lambda: _yaml_val("retrieval", "top_k_vector", default=40))
     TOP_K_BM25: int = Field(default_factory=lambda: _yaml_val("retrieval", "top_k_bm25", default=40))
     TOP_K_FINAL: int = Field(default_factory=lambda: _yaml_val("retrieval", "top_k_final", default=10))
+    # v9.4 (P0#1 论文参数化): RRF 融合后精排候选窗口（原 multi_retriever.py _fuse_rerank_select
+    # 隐式 top_k_final*2=20 硬编码）。行为不变：config.yaml candidate_window: 20。
+    CANDIDATE_WINDOW: int = Field(default_factory=lambda: _yaml_val("retrieval", "candidate_window", default=20))
     RRF_K: int = Field(default_factory=lambda: _yaml_val("retrieval", "rrf_k", default=60))
     RERANK_THRESHOLD: float = Field(default_factory=lambda: _yaml_val("retrieval", "rerank_threshold", default=0.25))
     MAX_REACT_STEPS: int = Field(default_factory=lambda: _yaml_val("react", "max_steps", default=5))
     DYNAMIC_THRESHOLD_RATIO: float = Field(default_factory=lambda: _yaml_val("retrieval", "dynamic_threshold_ratio", default=0.60))
+    # v9.4 (P0#2 论文参数化): 代码级收敛早停参数（原 agent_runner.py:593 硬编码 6 / 0.25）
+    EARLY_STOP_MIN_EVIDENCE: int = Field(default_factory=lambda: _yaml_val("retrieval", "early_stop_min_evidence", default=6))
+    EARLY_STOP_NEW_RATIO: float = Field(default_factory=lambda: _yaml_val("retrieval", "early_stop_new_ratio", default=0.25))
     RAG_HYDE_ENABLED: bool = Field(default_factory=lambda: _yaml_val("retrieval", "rag_hyde_enabled", default=True))
+    # v9.4 (P0#5 论文参数化): 多粒度查询消融模式——full/raw/hyde_only/mq_only/sum_only/hyde_mq/hyde_sum。
+    # 默认 full 与旧行为一致（HyDE+MQ+SUM 全路）；消融变体供论文实验2扫描。
+    # v9.4b（2026-08-26，论文实证回写）：生产默认改 raw——exp1/1b/1c/2 四重互证
+    # full 多路（MRR 0.256）远劣于原始查询单路（0.557 生产实测/0.653 对齐上界），
+    # 与 config.yaml:29 保持一致（该字段始终被 YAML 覆盖，此处为无 YAML 时兜底）。
+    QUERY_MODE: str = Field(default_factory=lambda: _yaml_val("retrieval", "query_mode", default="raw"))
     # v8.4.3 指令A: RETRIEVE_CONVERGE_MIN_DOCS 已移除（动态阈值已过滤 chunk，
     # 全部证据应进入报告，代码级收敛不再需要）
     HYDE_MAX_TOKENS: int = Field(default_factory=lambda: _yaml_val("retrieval", "hyde_max_tokens", default=512))
