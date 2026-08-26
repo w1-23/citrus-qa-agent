@@ -1,46 +1,47 @@
-# 参考文献真实性核查清单（待联网确认）
+# 参考文献真实性核查清单（2026-08-26 联网核验完成，3 项待作者裁）
 
-> 状态：2026-08-26。本会话 web 工具不可用（DSH web_search 不可用、
-> PowerShell 出网超时），无法在线核验 DOI/arXiv 编号。以下为**待核查清单**，
-> 按风险分级。投稿前必须完成在线核验（Editorial Manager 常用 Crossref/arXiv
-> 校验），或由投稿人凭学识确认。
+> 状态：2026-08-26。本会话 **已恢复出网**（arxiv.org:443 TcpTestSucceeded=True），
+> 用 arXiv API（export.arxiv.org）+ Crossref API 完成在线核验。
+> 关键结论：**[3]/[11]/[12] 编号风险已解除（[3] 完全匹配）；[8]/[9]/[10]
+> Crossref 无法匹配到 CEA 精确文献 = 疑似占位/泛式引用，投稿前必须替换或改泛引。**
 
-## 高风险（编号必须核验，错一个审稿即败）
+## ✅ 已核验通过（arXiv API 精确验证）
 
-| 编号 | 引用 | 风险点 | 建议核验方式 |
+| 编号 | 引用 | 核验结果 |
+|---|---|---|
+| [2] | "Retrieval-augmented generation for large language models: A survey," arXiv:2312.10997, 2023 | ✅ 编号真实 = Yunfan Gao, et al.；**首作者拼写应为 Y. Gao（非 S. Gao）——需修正** |
+| [3] | "CaRT: Teaching LLM agents to know when they know enough," arXiv:2510.08517, 2025 | ✅ 编号真实 = Grace Liu, Yuxiao Qu, Jeff Schneider, Aarti Singh；**作者 G. Liu 正确** |
+| [5] | "AutoGen..." arXiv:2308.08155, 2023 | ✅ 编号真实 = Qingyun Wu, et al.（Q. Wu 正确） |
+| [11] | "Precise zero-shot dense retrieval without relevance labels," ACL 2023 | ✅ = arXiv:2212.10496（Luyu Gao 等）；**实为 Findings of ACL, 2023（pp.1762-1777）—— "in ACL" 建议改 "Findings of ACL" 并补编号** |
+
+## ⚠️ 高风险：Crossref 无法匹配（疑似占位/泛式引用，须作者裁）
+
+| 编号 | 论文现引用 | Crossref 结果 | 建议 |
 |---|---|---|---|
-| [3] | CaRT arXiv:2510.08517, 2025 | arXiv 编号是否真实存在并对应 CaRT 论文？ | arXiv abs 页 + 标题精确匹配 |
-| [11] | "Precise zero-shot dense retrieval without relevance labels" ACL 2023 | 真实作者 Gao 等（HyDE 原文应为 arXiv:2212.10496, NeurIPS 2022 更权威）；此处编号缺失 | 补 arXiv:2212.10496 |
-| [12] | "RAG-Fusion" arXiv preprint | RAG-Fusion 无正式 arXiv 编号（社区文章）；"arXiv preprint" 提法不规范 | 改引为可核实的 RAG-Fusion 来源或删 arXiv 字样 |
+| [8] | A. K. Singh, et al., "Deep learning for plant disease detection," Comput. Electron. Agric., 2022 | CEA 2022 无 Singh 此题匹配；最接近 = Singh 2021 椰子树（10.1016/j.compag.2021.105986，DE 但题不同）或 Ferentinos 2018（10.1016/j.compag.2018.01.009，知名） | 替换为真实文献或改泛引 |
+| [9] | L. Zhang, et al., "Machine learning for crop yield prediction," Comput. Electron. Agric., 2023 | CEA 2023 无 Zhang 此题匹配 | 同上（需作者提供原意文献） |
+| [10] | M. A. Alam, et al., "Precision irrigation using IoT and AI," Comput. Electron. Agric., 2023 | CEA 2023 无 Alam 此题匹配 | 同上 |
 
-## 中风险（内容准确建议，作者/年份为我记忆判断，须在线复核）
+## ⚠️ 中风险：规范性问题
 
-| 编号 | 引用 | 建议动作 |
+| 编号 | 问题 | 建议 |
 |---|---|---|
-| [4] | Anthropic "Introducing contextual retrieval" Blog 2024 | 博客确有此文；URL 需在 Editorial Manager 填 orcid/链接时核验 |
-| [8] | Singh et al., plant disease detection CEA 2022 | CEA 同名论文多，须匹配 DOI（可能不止一篇） |
-| [9] | Zhang et al., crop yield prediction CEA 2023 | 同上，多候选 |
-| [10] | Alam et al., precision irrigation IoT+AI CEA 2023 | 同上，多候选 |
-| [2] | Gao et al., "RAG survey" arXiv:2312.10997 | 该编号即 RAG survey，可核（arXiv 存在），作者名字母拼写复核 |
+| [12] | K. Raudaschl, "RAG-Fusion," arXiv preprint, 2023 —— **RAG-Fusion 无形式 arXiv 论文**（社区方法，GitHub 仓库） | 改引真实来源（GitHub: Raudaschl/RAG-Fusion）或删除 |
+| [4] | Anthropic "Introducing contextual retrieval" Blog 2024 —— 博客确实存在 | URL 在 Editorial Manager 填写时核验 |
+| [7] | J. Nie, "Cross-lingual information retrieval," Synthesis Lectures on HLT, 2012 | 文献真实（Synthesis Lectures 2010/2012 版）；年份/出版社回填 |
+| [1]/[6] | Lewis RAG NeurIPS 2020 / Guo multi-agents IJCAI 2024 | 已知权威文献，卷页可补全 |
 
-## 低风险（知名文献，基本可确认；仍建议顺带核验）
+## 投稿前 Checklist（更新）
 
-| 编号 | 引用 | 备注 |
-|---|---|---|
-| [1] | Lewis et al., RAG NeurIPS 2020 | 经典必引，卷页可补全 |
-| [5] | AutoGen arXiv:2308.08155, 2023 | 编号真实 |
-| [6] | Guo et al., multi-agents survey IJCAI 2024 | 卷页待补 |
-| [7] | Nie, Cross-lingual IR | 待补出版社/年份（Synthesis Lectures） |
-
-## 提交前 Checklist
-
-1. 对 [3]/[11]/[12] 用 arXiv API 精确核验编号与标题。
-2. [8]/[9]/[10] 用 Crossref DOI 精确匹配到唯一文献，补 DOI/卷页。
-3. 全文引用格式统一为 Elsevier numeric（作者, 年份, 期刊缩写, DOI）。
-4. 本清单与论文参考文献段（docx [380-382]）联动：核验后逐条回填。
+1. **[8]/[9]/[10] 三选一**：作者提供原意真实文献 / 替换为 Crossref 命中的
+   CEA 真实文献 / 改泛引（如 "recent deep-learning plant-disease studies ..."）。**待作者裁。**
+2. [2] 首作者 S. Gao → **Y. Gao**；[11] 补 arXiv:2212.10496 且 "in ACL" → "Findings of ACL"。
+3. [12] RAG-Fusion 改引 GitHub 仓库或删 arXiv 字样。
+4. 全文引用格式统一 Elsevier numeric（作者, 年份, 期刊缩写, DOI）。
+5. 回填本清单后与论文参考文献段（docx [392]）联动逐一修正。
 
 ## 附带：附录 B 状态
 
-- 附录 B（多粒度查询结构化输出模板）按执行计划"保持"——docx [386-402]
+- 附录 B（多粒度查询结构化输出模板）按执行计划"保持"——docx [398-414]
   内容与 `search.py:495-510 _HYDE_PROMPT` 及 `parse_hyde_structured`
   （search.py:520-554）一致，无需修改。已复核。
