@@ -127,11 +127,11 @@
 
 ## 9. 待用户确认
 
-- **query_mode 终值裁决（当前唯一阻塞 P5 收口）**：生产默认 full 实测
-  MRR=0.256 劣于 raw=0.653（实验 1/2 双脚本互证 + 1b 归因）。方案①默认改
-  raw（0.653，最优且省 LLM）；方案②multi_retriever rerank 改用
-  original_query（0.584）；方案②b="原始查询入池+原始查询 rerank"双修正
-  （exp1c 测量中）；方案③维持 full+论文如实声明。未裁决前不回写
-  config.yaml、不改生产代码。
+- ~~**query_mode 终值裁决**~~ **✅ 已裁决（2026-08-26，方案①已回写）**：生产默认
+  full 实测 MRR=0.256 劣于 raw（检索层四重互证 0.653 对齐上界 + #1 生产三对照
+  0.557 生产实测 + #2 端到端实验九显著验证）。回写：config.yaml:32 `query_mode: raw`、
+  multi_retriever.py:733 `rerank_query=rerank_query or original_query or queries[0]`
+  防御、config.py:92 兜底同步；231 tests 全绿；git 837ddb2。论文摘要/结论/§8.3/
+  §7.12 已按"0.557 生产实测 / 0.653 对齐上界"口径落笔。
 - stage1-5 其余决策点均已执行或由本计划覆盖（评测集整合✅、experiment/
   资产保持 ignore、跨域探针=模型知识+gold_note 标注）。

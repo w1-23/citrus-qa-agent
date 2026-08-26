@@ -59,16 +59,18 @@ Data and code used in this study are reproducible from the following locations:
   `experiment/data/eval120.jsonl` and `experiment/data/s5_bilingual_pairs.jsonl`
   (60 language-equivalent pairs).
 - Raw experimental results (read-only): `experiment/results/fig_data/*.csv`
-  (10 CSVs covering Section 7.4–7.10 main figures) plus per-experiment JSON
+  (12 CSVs covering Section 7.4–7.12 main figures) plus per-experiment JSON
   snapshots (`exp1_ablation.json`, `exp1b_rerank_attribution.json`,
-  `exp2_query_mode.json`, `exp4a_scan.json`, `exp4b_e2e.json`,
-  `exp7_threshold_grid.json`, `end2end_judge.json`,
-  `b3_temporal_judge.json`).
+  `exp1c_pool_orig.json`, `exp2_query_mode.json`, `exp4a_scan.json`,
+  `exp4b_e2e.json`, `exp7_threshold_grid.json`, `end2end_judge.json`,
+  `b3_temporal_judge.json`, `production_raw_trio.json`,
+  `e2e_three_groups/summary.json`).
 - Figure scripts: `experiment/scripts/plotting/*.py` (public style utilities
   in `plot_utils.py`); all plots are exported as vector PDF + 300-dpi PNG and
   read only from `fig_data/` CSV inputs (no hard-coded numbers).
 - Reproduction scripts for every experiment: `experiment/scripts/*.py`
-  (a1–a6, b1–b3, exp1/1b/2/4a/4b/7, S3–S5 builders).
+  (a1–a6, b1–b3, exp1/1b/1c/2/4a/4b/7, S3–S5 builders, production_raw_trio,
+  e2e_three_groups).
 
 Additional data (the 252,681-chunk citrus corpus and the deployed `agent/`
 codebase) are available from the corresponding author upon reasonable request,
@@ -88,12 +90,10 @@ in this paper.
 
 ---
 
-## 附：§8.3 / 摘要 / 结论 待裁决微调清单（裁决后执行）
+## 附：受体裁微调清单（2026-08-26 已执行）
 
-1. §8.3 若裁决①（query_mode→raw）：补充"生产默认修正"小节（MRR 0.256→0.653
-   实测 + config.yaml:29 回写记录）。
-2. 若裁决②（rerank 用 original_query）：改为"rerank query 选择修正"
-   （0.256→0.584，保留多路召回面）；须在摘要/结论同步改"0.653 vs 0.256"
-   的对照数字。
-3. 若裁决③（维持 full）：摘要/结论改回中性表述（不写"显著优于"），
-   论文如实声明"生产默认配置的非最优性已披露"。
+1. ✅ 裁决①（query_mode→raw）已回写：config.yaml:32 raw + multi_retriever.py:733
+   防御 + config.py:92 兜底同步 + 231 tests 全绿 + git 837ddb2。
+2. ✅ §8.3 补"检索配置修正"陈述（MRR 0.256→0.557 生产实测，+117%；0.653
+   为对齐英文上界）；摘要/结论同口径；§7.12（实验九）端到端显著验证已落笔。
+3. ✅ APPENDIX A query_mode 行终值 = raw（config.yaml:32 / config.py:92）。
