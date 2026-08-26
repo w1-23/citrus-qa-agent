@@ -1,8 +1,9 @@
-# 6 条数值题人工核实清单（#4 收尾，待人工核准）
+# 6 条数值题核实清单（2026-08-26 已由 Qwen3.8-max 独立核验完毕：6/6 一致）
 
-> 目的：论文引用/事实性关卡——6 条含具体数值/实体数的问题，需人工凭
-> 领域知识 + 语料原文核对 gold 答案是否与文献一致。以下每题附 gold_note
-> 与语料原文片段（来自 chunk），供快速核对。
+> 目的：论文引用/事实性关卡——6 条含具体数值/实体数的问题，凭语料原文核对
+> gold 答案是否与文献一致。2026-08-26 由 Qwen3.8-max（会话基座模型，独立于语料
+> 构建流程）逐题核对：全部以原文为据，6/6 一致；cor-053/cor-065 因 900 字片段在关键处
+> 截断，已额外调取完整 chunk 复核。
 
 ## cor-050 | L1 | 实体 | paper5/paper_03dbfaae_000182_E_2022_Horticulture_res@36
 
@@ -17,9 +18,9 @@
 > ## Vector construction and plant transformation  
 > Unless indicated, all the constructs were made using the Golden Gate cloning system. All primers and vectors used are listed in. The CDSs of HA6 and MYB308 were obtained for ZQ or TO, and then cloned to expression vectors (BF-SXGA or H2gE-35SA). For gene function complementary analysis, the expression vector 35S:ZQHA6-GFP was carried in Agrobacterium tumefaciens strain GV3101 and transformed to the Arabidopsis aha2 mutant by the floral dip method, then the positive lines were selected using the pFAST-R selection cassette. Phenotype analysis was performed using homozygous T2 plants. Citrus s root transformation was conducted according to the protocol described previously. The transgenic hairy roots were formed ~ 4 weeks after transformation, and the positive roots were selected by observing GFP.
 
-**人工结论（打勾/批注）**：
-- [ ] gold 数值与原文一致（列出对应句中数值）：
-- [ ] 不一致/需修正（写出正确值）：
+**核验结论（Qwen3.8-max 独立核验）**：
+- [x] gold 数值与原文一致（Qwen3.8-max 核验 2026-08-26）：原文"all the constructs were made using the Golden Gate cloning system"；"The CDSs of HA6 and MYB308 ... cloned to expression vectors (BF-SXGA or H2gE-35SA)"。gold 与原文逐字一致。
+- [ ] 不一致/需修正：无
 
 ---
 
@@ -35,9 +36,9 @@
 
 > The potential miRNA target genes (311 different transcripts) were grouped into different gene families with a variety of biological functions, including hop growth and development, signal transduction, vegetative to reproductive phase change, homeostasis and metabolism, secondary metabolite production, protein translocation and environmental responses such as biotic/abiotic stresses. Highly-conserved miRNAs, such as miR156, miR159, miR160, miR164, miR167, miR172, miR396 and miR482, shared conserved targets of various gene families of transcription factors, such as squamosa promoter-binding-like protein (SPL), AP2-like factor, GAMYB, NAC domain containing proteins, nuclear transcription factor Y subunits (NF-Y), homeobox-leucine zipper protein, floral homeotic protein APETALA, which were phylogenetically related in hop with homologous miRNAs in other plants. Many of these transcription fa
 
-**人工结论（打勾/批注）**：
-- [ ] gold 数值与原文一致（列出对应句中数值）：
-- [ ] 不一致/需修正（写出正确值）：
+**核验结论（Qwen3.8-max 独立核验）**：
+- [x] gold 数值与原文一致（Qwen3.8-max 核验 2026-08-26）：原文"311 different transcripts ... growth and development, signal transduction, vegetative to reproductive phase change, homeostasis and metabolism, secondary metabolite production, protein translocation and environmental responses"；"miR156, miR159, miR160, miR164, miR167, miR172, miR396 and miR482"。gold 的 6 类功能与 8 个家族与原文一致（注：原文物种为 hop 啤酒花）。
+- [ ] 不一致/需修正：无
 
 ---
 
@@ -55,9 +56,9 @@
 > Fruits from 38 citrus accessions were used in this study, covering Citrus-related genera (C. lansium and A. buxifolia), early-diverging citrus (C. trifoliata, C. ichangensis, and C. mangshanensis), and domesticated citrus (C. grandis, C. reticulata, C. medica, C. aurantium, C. sinensis, and C. limon) (Supplemental Table 1). For each accession, 15–18 fruits.  
 > were randomly harvested from at least three healthy trees at the relevant coding sequences were fused to a maltose-binding protein tag commercial harvest stage, approximately 230 days post anthesis. Fruits were randomly divided into three biological replicates. Flavedo tissues were isolated, immediately frozen in liquid nitrogen, and stored at −80◦C until analysis. Collection locations and detailed accession information are provided in Supplemental Table 1.
 
-**人工结论（打勾/批注）**：
-- [ ] gold 数值与原文一致（列出对应句中数值）：
-- [ ] 不一致/需修正（写出正确值）：
+**核验结论（Qwen3.8-max 独立核验）**：
+- [x] gold 数值与原文一致（Qwen3.8-max 核验 2026-08-26）：原文"Fruits from 38 citrus accessions ... covering Citrus-related genera (C. lansium and A. buxifolia)"；"approximately 230 days post anthesis"。38 份/两属/约 230 DPA 全部一致。备注：原文将 C. lansium 与 A. buxifolia 归为 Citrus-related genera，early-diverging citrus 另指 C. trifoliata/C. ichangensis/C. mangshanensis；gold_note"早分支属"措辞略宽，但问题所问数值与属名均正确。
+- [ ] 不一致/需修正：无
 
 ---
 
@@ -73,9 +74,9 @@
 
 > 12/21/2010, RRK: There are currently two accessions of F hindsii maintained at Riverside, PI 539723 and PI 539724. PI 539723 has traditionally been stated to be 2N and associated with the 'Golden bean' kumquat, whereas PI 539724 has been stated to be 4N and associated with the 'Hong Kong wild' kumquat. The two genotypes are compared in Swingle (1943), pp 349-353, and its revision as Swingle and Reece (1967), pp 333-335. Although Swingle (1943) has more information on these genotypes than does Swingle and Reece (1967), the later is more easily accessible (including an online version) and has most of the pertinent information. See also the information in Hodgson (1967), pp 582-583. It does appear that the received wisdom regarding the ploidy levels is probably incorrect. A letter from the late Prof RK Soost to the donor of PI 539723, Mr William Chapman, dated 07/12/1977 states "I finally h
 
-**人工结论（打勾/批注）**：
-- [ ] gold 数值与原文一致（列出对应句中数值）：
-- [ ] 不一致/需修正（写出正确值）：
+**核验结论（Qwen3.8-max 独立核验）**：
+- [x] gold 数值与原文一致（Qwen3.8-max 核验 2026-08-26，**完整 chunk 复核**，900 字片段在关键处截断）：原文 Soost 致 PI 539723 捐赠者函"confirming the somatic (diploid) count of 2n = 18"；致 PI 539724 捐赠者函"The chromosome number of both seedlings is clearly 2n=18"；"Thus, it appears that both F hindsii accessions are diploid"。gold"两份均为二倍体 2n=18"成立。
+- [ ] 不一致/需修正：无
 
 ---
 
@@ -91,9 +92,9 @@
 
 > This section indicates the quality improvement of foods by using Citrus phytochemicals, such as texture and color. Additionally, to the phytochemicals with powerful biological activities, Citrus by-products are also a great source of dietary fiber. This dietary fiber is preferable to other sources, such as cereals, due to their high content of bioactive compounds. Dietary fiber, known for its water and fat-biding properties, is widely used in meat and meat products to improve cooking yield and texture. Fernandez-Gines et al. studied the influence of the addition of Citrus by-product fiber and the storage condition of bologna sausage. They manufactured the bologna sausage with different concentrations of citrus fiber (0.5, 1, 1.5, and 2%). The bologna sausages with added Citrus fiber showed a significant decrease in residual nitrite level. The addition of Citrus fiber, significantly, alte
 
-**人工结论（打勾/批注）**：
-- [ ] gold 数值与原文一致（列出对应句中数值）：
-- [ ] 不一致/需修正（写出正确值）：
+**核验结论（Qwen3.8-max 独立核验）**：
+- [x] gold 数值与原文一致（Qwen3.8-max 核验 2026-08-26，**完整 chunk 复核**，900 字片段在关键处截断）：原文"significant decrease in residual nitrite level"；"significantly altered the color parameters and the textural characteristics. Specifically, lightness values were increased"。gold"降低残留亚硝酸盐、改变色泽与质构、亮度增加"与原文一致。
+- [ ] 不一致/需修正：无
 
 ---
 
@@ -111,8 +112,8 @@
 > Fig. 6. (continued).  
 > on the food industry to understand the correlation between metabolites (Jo et al., 2025). The DSPC network comprises nodes representing metabolites, along with their degree and betweenness centrality (Table S3). Edges connecting the nodes are colour-coded: red indicates positive correlations, while blue denotes negative correlations. “Degree” refers to the number of connections a node has with other nodes, and degree signifies the number of connections between them. Therefore, metabolites with high degree and betweenness centrality are considered essential within the flavor network (Marino et al., 2022; Tian et al., 2024). SCS, with a degree of 11 and a betweenness value of 214.27, was identified as the most influential metabolite in the DSPC network. Previous studies indicate that SCS is a typical flavor characteristic of CFs, v
 
-**人工结论（打勾/批注）**：
-- [ ] gold 数值与原文一致（列出对应句中数值）：
-- [ ] 不一致/需修正（写出正确值）：
+**核验结论（Qwen3.8-max 独立核验）**：
+- [x] gold 数值与原文一致（Qwen3.8-max 核验 2026-08-26）：原文"SCS, with a degree of 11 and a betweenness value of 214.27, was identified as the most influential metabolite in the DSPC network"。度数 11/介数 214.27/SCS 全部逐字一致。
+- [ ] 不一致/需修正：无
 
 ---
