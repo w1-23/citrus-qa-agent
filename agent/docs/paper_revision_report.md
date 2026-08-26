@@ -103,3 +103,53 @@
 - B3 20 题 κ 人工回填（b3_judge_e2e.py HUMAN_SUBSET）
 - 6 条数值题人工核实（cor-050/051/052/053/065/066）
 - 最终 docx 导出核对
+
+## G. 审阅反馈执行记录（2026-08-26，外部审阅一轮）
+
+> 审阅反馈逐条落实，全部落笔 docx 并验证通过（12/12 段落/表格 + 6/6 引用）。
+
+### G1. 叙事一致性（审阅 §3.1/3.2）
+| 位置 | 修改 |
+|---|---|
+| 段 35 贡献 1 | 改为"提出并实证其性能边界"叙事：多粒度管道设计 → 八路消融发现默认配置非最优 → 归因（精排 73% + 池稀释 27%）→ 修正为"改写前置+raw"（+117%）→ 完整闭环 |
+| 段 103 查询准备层① | 标题加"初始设计"状态标注 |
+| 段 105 长度适配假说 | 句末补"多粒度组合已移除出生产默认配置，作为消融变体保留于实验框架" |
+| 段 106 工程实现 | 补"生产默认采用原始查询单路（raw，见§8.3）" |
+
+### G2. 数字一致性（审阅 §3.3）
+| 位置 | 修改 |
+|---|---|
+| 段 242 §7.5 | "实测恰反"→"实测结果与预期相反"（去口语化） |
+| 段 356 §8.4 | "225项"→"231项"（与摘要[5]统一） |
+| 表 24 附录C 实验2 变体数 | "8"→"8（8种查询模式）" |
+
+### G3. 中文偏置表述与 A5 对齐（审阅 §3.5）
+| 位置 | 修改 |
+|---|---|
+| 段 167 §5.1 功能型偏置 | 加限定："在柑橘领域语料中…功能词对齐弱是显著因素之一；但跨域探针表明这并非唯一或普适的原因" |
+| 段 169 §5.1 跨域验证 | 原"复现同一模式/通用刻面"与 A5 矛盾 → 改为"跨域未复现柑橘式功能型特化塌陷；偏置为语言对齐、领域词分布与查询长度共同作用的多因素本质" |
+| 表 8 机制分解"功能词跨语言对齐弱" | 加限定："跨域探针（§7.6 A5）表明此非唯一或普适机制，偏置为多因素共同作用" |
+
+### G4. 参考文献（审阅 §3.4）——全部替换为联网核验真实文献
+| 编号 | 原（占位/不规范） | 替换为（docx [392] 已落笔，Crossref/arXiv 实查） |
+|---|---|---|
+| [8] | A. K. Singh…CEA 2022 | K. P. Ferentinos, "Deep learning models for plant disease detection and diagnosis," CEA 145:311-318, 2018, DOI 10.1016/j.compag.2018.01.009 |
+| [9] | L. Zhang…CEA 2023 | van Klompenburg, Kassahun, Catal, "Crop yield prediction using ML: systematic review," CEA 177:105709, 2020, DOI 10.1016/j.compag.2020.105709 |
+| [10] | M. A. Alam…CEA 2023 | Benzaouia et al., "Fuzzy-IoT smart irrigation system…," CEA 215:108407, 2023, DOI 10.1016/j.compag.2023.108407 |
+| [2] | S. Gao | Y. Gao（arXiv:2312.10997 实查 = Yunfan Gao） |
+| [11] | in ACL, 2023 | in Findings of ACL, 2023, arXiv:2212.10496（HyDE 实查） |
+| [12] | "arXiv preprint, 2023" | GitHub repository, 2023 + 仓库 URL（RAG-Fusion 无形式 arXiv 论文） |
+
+### G5. 本次新增图（§7.12 配图）
+| 图 | 内容 | 数据（fig_data 只读） | 脚本 |
+|---|---|---|---|
+| fig9 | 生产形态三对照（zh/rewrite/en × MRR/R@10/pool20；prod full=0.256 虚线） | fig9_production_trio.csv | plot_fig9_production_trio.py |
+| fig10 | 端到端四维 A/B/C（1-5；AvsB 显著 * 标注） | fig10_e2e_quality.csv | plot_fig10_e2e_quality.py |
+
+- docx 引用：段 327 目的段补"（检索侧三对照见 fig9）"；段 332 实测段补"（四维均值见 fig10）"
+
+### G6. 产出索引
+- 论文：`C:\Users\Administrator\Desktop\论文投稿.docx`（518 段 / 28 表）
+- 图：`experiment/results/figures/fig9*.{pdf,png}`、`fig10*.{pdf,png}`
+- 数据：`experiment/results/fig_data/fig9_production_trio.csv`、`fig10_e2e_quality.csv`
+- 总览：`agent/docs/execution_summary_v94.md`

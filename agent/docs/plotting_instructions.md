@@ -157,3 +157,10 @@ plt.savefig('../../results/figures/fig1_bias.png', bbox_inches='tight', dpi=300)
 | fig6 | 实验2 多粒度查询横向条形图 | §7.4 | exp2_query_mode.csv |
 | fig7 | 实验1 管道消融蝴蝶图 | §7.5 | exp1_ablation.csv |
 | fig8 | 实验5/6 帕累托 + 堆叠延迟 | §7.8/§7.9 | exp5_pareto.csv / exp6_latency.csv |
+| fig9 | 生产形态三对照（zh/rewrite/en × MRR/R@10/pool20；prod full=0.256 虚线） | §7.12/§8.3 | fig9_production_trio.csv |
+| fig10 | 端到端三组四维均值（A/B/C × 1-5；AvsB 显著 * 标注） | §7.12 | fig10_e2e_quality.csv |
+
+> **图9/10 数据铁律**：脚本**只读** `results/production_raw_trio.csv` 与
+> `results/e2e_three_groups/summary.json`；fig_data 快照（`fig9_production_trio.csv`、
+> `fig10_e2e_quality.csv`）为发布复现副本，生成后**不改**。绘图脚本：
+> `plot_fig9_production_trio.py` / `plot_fig10_e2e_quality.py`（2026-08-26 新增）。
