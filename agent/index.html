@@ -2731,13 +2731,29 @@ async function sendMsg(isFollowUp) {
   };
   function srcMeta(item) {
     var s = (item && (item.source || item._src)) || '';
-    return SOURCE_META[s] || { tag: s || 'rag', name: s || 'rag', cls: 'custom' };
+    var sm = SOURCE_META[s];
+    if (sm) return sm;
+    if (!s) return SOURCE_META['rag'];
+    var key = _normSourceKey(s);
+    return { tag: key, name: key, cls: 'custom' };
   }
-  // v9.2 (P0#4): 来源分组键——内置 4 组原样；未知来源按其原始 source 值成组，
-  // 使新来源（pipeline1 source_type）自动生成侧栏手风琴组（不再并入 RAG）。
+  // v9.4 (P0#4 增强): 来源分组键规范化——非内置来源去尾部数字
+  // （paper1→paper、Citrus varieties1→Citrus varieties），同名文件夹在前端
+  // 经代码提取自动收纳为同类型分组；内置 4 组（rag/ucr/web/historical）原样。
+  function _normSourceKey(s) {
+    s = String(s || '').trim();
+    if (s === 'rag' || s === 'ucr' || s === 'web' || s === 'historical') return s;
+    var norm = s.replace(/\d+$/, '').trim();
+    return norm || s;
+  }
+  // v9.2 (P0#4): 来源分组键——内置 4 组原样；未知来源（pipeline1 source_type）
+  // 经 _normSourceKey 归组，使新来源（paper1..8 → paper、Citrus varieties1..3 →
+  // Citrus varieties）自动生成侧栏手风琴组（不再并入 RAG）。
   function srcKey(item) {
     var s = (item && (item.source || item._src)) || '';
-    return SOURCE_META[s] ? s : (s || 'rag');
+    if (!s) return 'rag';
+    if (SOURCE_META[s]) return s;
+    return _normSourceKey(s);
   }
   // v8.15: 条目渲染——加来源徽标 + UCR 专属字段（无 DOI 时显示登记号/品种名）
   function renderCitationItem(item) {
@@ -2780,7 +2796,13 @@ async function sendMsg(isFollowUp) {
      src-group 结构与 renderCitationItem；条目携带来源轮次元数据） */
   function renderRestoredGroups() {
     if (!_restoredGroups) return false;
-    var order = ['rag', 'ucr', 'web', 'historical'];
+    // v9.4: 恢复视图同样支持动态来源组（与 live 侧栏同口径，未知组排在内置 4 组之后）
+    var dyn = [];
+    var gkeys = Object.keys(_restoredGroups || {});
+    for (var gk = 0; gk < gkeys.length; gk++) {
+      if (['rag', 'ucr', 'web', 'historical'].indexOf(gkeys[gk]) === -1) dyn.push(gkeys[gk]);
+    }
+    var order = ['rag', 'ucr', 'web', 'historical'].concat(dyn);
     var total = 0;
     for (var g = 0; g < order.length; g++) total += (_restoredGroups[order[g]] || []).length;
     citationCount.textContent = String(total);
@@ -2790,7 +2812,7 @@ async function sendMsg(isFollowUp) {
       var gk = order[gi];
       var items = _restoredGroups[gk] || [];
       if (items.length === 0) continue;
-      var sm2 = SOURCE_META[gk];
+      var sm2 = SOURCE_META[gk] || srcMeta({ source: gk });
       var gid = 'restore-' + gk;
       var gOpen = firstOpen;
       firstOpen = false;

@@ -341,19 +341,23 @@ class MultiBatchRetriever:
     def _detect_batch_source(batch_dir: Path) -> str:
         """v8.15: 批次证据来源判定（metadata.json → summary.source_type）。
 
-        规则：source_type 含 "UCR" → "ucr"（品种库）；否则 → "rag"（本地文献库）。
-        读取失败/元数据缺失 → "rag" 兜底。将来新增数据类型（web/patent 等）在此加规则。
+        v9.4 修订（来源按文件夹名透传）: metadata.json 存在且
+        summary.source_type 非空 → 原样返回（如 "paper1" / "Citrus varieties1"，
+        前端 srcKey 对非内置来源去尾部数字归组为 "paper" / "Citrus varieties"）；
+        无元数据 → 返回批次文件夹名（同口径）；读取失败 → 空串兜底（调用方回退 "rag"）。
+        旧格式批次（source_type="UCR citrus variety"）原样透传，兼容由
+        evidence.src_of 的 UCR 兜底判定与 is_variety_source 保持品种语义。
         """
         try:
             meta_path = batch_dir / "metadata.json"
             if meta_path.exists():
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                st = str((meta.get("summary") or {}).get("source_type") or "")
-                if st and "UCR" in st.upper():
-                    return "ucr"
+                st = str((meta.get("summary") or {}).get("source_type") or "").strip()
+                if st:
+                    return st
         except Exception as e:
             logger.debug(f"[Retriever] batch source detect failed for {batch_dir.name}: {e}")
-        return "rag"
+        return batch_dir.name
 
     def _verify_idx_map(self):
         """AG-11: 映射完整性自检 — 抽样 qdrant 点，按 payload (paper_id, chunk_index) 匹配率告警。"""
@@ -468,12 +472,28 @@ class MultiBatchRetriever:
         )
 
     def _load_lance_batch(self, batch_name: str) -> None:
-        """v8.9 LanceDB 后端：打开 data/lancedb 中该批次的表（表名=批次名）。"""
+        """v8.9 LanceDB 后端：打开 data/lancedb 中该批次的表（表名=批次名）。
+
+        v9.4: 兼容名含空格的用户批次——LanceDB 表名只允许字母数字/_/-/.，
+        空格批次按空格→下划线回退打开（表名 = sanitize(batch_name)）。
+        """
         try:
             if self.lance_db is None:
                 import lancedb
                 self.lance_db = lancedb.connect(str(self.data_dir / "lancedb"))
-            table = self.lance_db.open_table(batch_name)
+            candidates = [batch_name]
+            sanitized = re.sub(r"\s+", "_", batch_name).strip("_")
+            if sanitized and sanitized != batch_name:
+                candidates.append(sanitized)
+            table = None
+            for cand in candidates:
+                try:
+                    table = self.lance_db.open_table(cand)
+                    break
+                except Exception:
+                    table = None
+            if table is None:
+                raise FileNotFoundError(f"table not found: {batch_name}")
             self.lance_tables[batch_name] = table
             logger.info(f"[Retriever] LanceDB table loaded: {batch_name} "
                         f"({table.count_rows()} rows)")

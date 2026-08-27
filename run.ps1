@@ -1,5 +1,5 @@
-# ============================================================
-#  Citrus QA Agent 一键启动脚本（v9.3.0）
+﻿# ============================================================
+#  Citrus QA Agent 一键启动脚本（v9.4.0）
 #  ------------------------------------------------------------
 #  零门槛：下载解压后，右键 → 使用 PowerShell 运行（或: powershell -File run.ps1）
 #  自动完成: 语料下载 → Python 检测/安装 → 虚拟环境 → 依赖安装 → 模型下载 → 启动服务
@@ -73,16 +73,19 @@ Write-Host "  🍊 Citrus QA Agent 一键启动" -ForegroundColor Yellow
 Write-Host "  ============================" -ForegroundColor DarkGray
 
 # ── [1/6] 语料数据（首次从 GitHub Releases 自动下载，之后秒级跳过）──
-#  v8.13.0: 向量库已迁移至 LanceDB（data/lancedb），不再需要本地 Qdrant；
-#  语料作为 Releases 附件分发，首次运行自动下载约 1.2GB。
+#  v9.4.0: 全量 LanceDB 语料（paper1-8 + Citrus varieties1-2，去重后 166,055 片，
+#  全部带 IVF_HNSW 索引）；语料以分卷附件分发（corpus-v9.4.0-1.zip / -2.zip，
+#  共约 1.6GB），首次运行自动下载。
 #  国内加速: 设置环境变量 GH_MIRROR（例如 https://ghproxy.net/）即可自动加前缀。
 $Repo = 'w1-23/citrus-qa-agent'
-$ReleaseVersion = '9.3.0'                       # 主包版本（包自检以它为准）
-# v8.14.1: 语料附件统一挂在 v8.13.0 Release——旧卷 1-3 原地不动，仅增量上传卷 4；
-# 数据版本与主包版本解耦，本变量标识语料附件实际所在 Release。
-$CorpusReleaseVersion = '8.13.0'
-$NewLanceBatches = @('categories-cn')            # 增量批次清单（存量部署缺失时只补拉对应分卷）
-$IncrementalStartPart = 4                        # 增量分卷起始序号（全量卷数 3 + 1）
+$ReleaseVersion = '9.4.0'                       # 主包版本（包自检以它为准）
+# v9.4.0: 语料与主包同版本；语料含 agent/data/.corpus-version 标记——
+# 本地标记缺失或 != 当前版本 → 结构性更新（去重/更名/删除批次）必须全量重下并整体替换
+$CorpusReleaseVersion = '9.4.0'
+# 同版本内新增批次：pack_release -CorpusOnly -BatchOnly <批次> -PartNo <n> 打出
+# corpus-v<版本>-<n>.zip，上传后把 n 填到下面；存量部署按 .corpus-batches 清单
+# 只补拉缺失批次所属分卷（当前版本无增量分卷，起始序号 3 = 全量卷数 2 之后）
+$IncrementalStartPart = 3
 $CorpusZip = Join-Path $Root 'corpus.zip'
 $DataDir = Join-Path $AgentDir 'data'
 $LanceDir = Join-Path $DataDir 'lancedb'
@@ -116,36 +119,81 @@ foreach ($c in $checks) {
 }
 Write-Host ""
 
-$missingNew = @($NewLanceBatches | Where-Object { -not (Test-Path (Join-Path $LanceDir "$_.lance")) })
-if (-not (Test-Path $LanceDir)) {
-    Write-Host "[1/6] 未检测到本地语料库，正在从 GitHub Releases 自动下载语料分卷（约 2.3GB，首次约 20-40 分钟，取决于网络）..." -ForegroundColor Cyan
+# 语料版本标记 + 批次清单（.corpus-version / .corpus-batches 由 pack_release 写入每个分卷）
+$corpusMarker = ''
+$markerFile = Join-Path $DataDir '.corpus-version'
+if (Test-Path $markerFile) {
+    $corpusMarker = (((Get-Content $markerFile -Raw -ErrorAction SilentlyContinue) -split "`r?`n") | Select-Object -First 1).Trim()
+}
+$batchList = @()
+$batchListFile = Join-Path $DataDir '.corpus-batches'
+if (Test-Path $batchListFile) {
+    $batchList = @(Get-Content $batchListFile -ErrorAction SilentlyContinue | Where-Object { $_.Trim() })
+}
+$missingNew = @($batchList | Where-Object { -not (Test-Path (Join-Path $LanceDir "$_.lance")) })
+
+# v9.4.0: 全量下载（先落临时目录，按需整体替换 data 后统一解压合并）
+function Invoke-CorpusDownload {
+    param([switch]$ReplaceData)
     $ghBase = if ($env:GH_MIRROR) { $env:GH_MIRROR } else { 'https://github.com' }
-    $partNo = 1
+    $dlDir = Join-Path $env:TEMP 'citrus-corpus-dl'
+    New-Item -ItemType Directory -Force -Path $dlDir | Out-Null
+    $partNo = 1; $got = 0
     while ($true) {
         $url = "$ghBase/$Repo/releases/download/v$CorpusReleaseVersion/corpus-$CorpusReleaseVersion-$partNo.zip"
         Write-Host "      分卷 ${partNo}: $url" -ForegroundColor DarkGray
         try {
-            Invoke-WebRequest -Uri $url -OutFile $CorpusZip -UseBasicParsing
-            Write-Host "      分卷 $partNo 下载完成，解压合并中..." -ForegroundColor Cyan
-            Expand-Archive -Path $CorpusZip -DestinationPath $Root -Force
-            Remove-Item $CorpusZip -Force
+            Invoke-WebRequest -Uri $url -OutFile (Join-Path $dlDir "corpus-$partNo.zip") -UseBasicParsing
+            $got++; $partNo++
         } catch {
             if ($partNo -eq 1) {
                 Write-Host "    ⚠ 语料下载失败: $($_.Exception.Message)" -ForegroundColor Red
-                Write-Host "      可稍后重试；或手动下载 corpus-v$CorpusReleaseVersion-1.zip 解压到本目录后重新运行" -ForegroundColor Yellow
-                Read-Host "按回车键关闭窗口"; exit 1
+                return $false
             }
             break
         }
-        $partNo++
+    }
+    if ($got -eq 0) {
+        Write-Host "    ⚠ 未下载到任何语料分卷" -ForegroundColor Red
+        return $false
+    }
+    if ($ReplaceData -and (Test-Path $DataDir)) {
+        Write-Host "      语料结构更新（v$CorpusReleaseVersion），整体替换 data 目录（去重/删除的旧批次及旧表一并清理）..." -ForegroundColor Cyan
+        Remove-Item -LiteralPath $DataDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
+    foreach ($zp in (Get-ChildItem -LiteralPath $dlDir -Filter 'corpus-*.zip' | Sort-Object Name)) {
+        Write-Host "      解压合并: $($zp.Name) ..." -ForegroundColor Cyan
+        Expand-Archive -Path $zp.FullName -DestinationPath $Root -Force
+        Remove-Item -LiteralPath $zp.FullName -Force
+    }
+    Remove-Item -LiteralPath $dlDir -Recurse -Force -ErrorAction SilentlyContinue
+    return $true
+}
+
+if (-not (Test-Path $LanceDir)) {
+    Write-Host "[1/6] 未检测到本地语料库，正在从 GitHub Releases 自动下载语料分卷（约 1.6GB / 2 卷，首次约 15-30 分钟，取决于网络）..." -ForegroundColor Cyan
+    if (-not (Invoke-CorpusDownload)) {
+        Write-Host "      可稍后重试；或手动下载 corpus-v$CorpusReleaseVersion-1.zip 解压到本目录后重新运行" -ForegroundColor Yellow
+        Read-Host "按回车键关闭窗口"; exit 1
+    }
+    if (-not (Test-Path $LanceDir)) {
+        Write-Host "    ⚠ 分卷解压后未找到 agent/data/lancedb，请检查压缩包内容" -ForegroundColor Red
+        Read-Host "按回车键关闭窗口"; exit 1
+    }
+} elseif ($corpusMarker -ne $CorpusReleaseVersion) {
+    # v9.4.0: 语料结构性更新（本地标记缺失或旧版本）→ 全量重下并整体替换数据目录
+    Write-Host "[1/6] 检测到语料版本更新（本地=$corpusMarker / 期望=v$CorpusReleaseVersion），全量重下并整体替换..." -ForegroundColor Cyan
+    if (-not (Invoke-CorpusDownload -ReplaceData)) {
+        Write-Host "      下载失败，本地语料保持不变，可稍后重试（继续运行将使用旧语料）" -ForegroundColor Yellow
     }
     if (-not (Test-Path $LanceDir)) {
         Write-Host "    ⚠ 分卷解压后未找到 agent/data/lancedb，请检查压缩包内容" -ForegroundColor Red
         Read-Host "按回车键关闭窗口"; exit 1
     }
 } elseif ($missingNew.Count -gt 0) {
-    # v8.14.1 增量：已有语料的存量部署只补拉新批次分卷（旧卷 1-3 不重传）
-    Write-Host "[1/6] 检测到新增语料批次未本地化，增量下载（仅 $($missingNew -join '、') 所属分卷，约 76MB）..." -ForegroundColor Cyan
+    # 同版本增量：已有语料的存量部署只补拉新增批次所属分卷
+    Write-Host "[1/6] 检测到新增语料批次未本地化，增量下载（$($missingNew -join '、') 所属分卷）..." -ForegroundColor Cyan
     $ghBase = if ($env:GH_MIRROR) { $env:GH_MIRROR } else { 'https://github.com' }
     $partNo = $IncrementalStartPart
     while ($true) {
@@ -160,7 +208,7 @@ if (-not (Test-Path $LanceDir)) {
             break
         }
     }
-    $stillMissing = @($NewLanceBatches | Where-Object { -not (Test-Path (Join-Path $LanceDir "$_.lance")) })
+    $stillMissing = @($batchList | Where-Object { -not (Test-Path (Join-Path $LanceDir "$_.lance")) })
     if ($stillMissing.Count -gt 0) {
         Write-Host "    ⚠ 增量批次 $($stillMissing -join '、') 仍未就绪（附件未上传或网络失败）；可继续运行，但该库暂不可检索。也可手动下载 corpus-v$CorpusReleaseVersion-$($IncrementalStartPart).zip 解压到本目录后重跑" -ForegroundColor Yellow
     } else {

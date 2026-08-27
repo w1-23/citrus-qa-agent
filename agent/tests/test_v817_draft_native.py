@@ -44,14 +44,27 @@ def test_v81739_variety_intent_ucr():
     print("[VF-39] 品种意图检测 + UCR 聚拢置前（保留）")
     from src.tools.search import _is_variety_intent
     from src.core import agent_runner as ar
+    from src.core.evidence import src_of, is_variety_source
 
     check("品种意图命中（品种/UCR/CRC/cultivar）",
           _is_variety_intent("有哪些 UCR 品种库登记的宽皮柑橘") is True)
     check("非品种意图不误报", _is_variety_intent("柑橘黄龙病综合防治") is False)
-    # 回执聚拢置前接线仍在（ucr_first 参数 + src_of 过滤）
+    # 回执聚拢置前接线仍在（ucr_first 参数 + is_variety_source 判定）
     src = _inspect.getsource(ar.build_evidence_report)
-    check("ucr_first 聚拢逻辑保留",
-          'src_of(r) == "ucr"' in src and "ucr_first" in src)
+    check("ucr_first 聚拢逻辑保留（v9.4 品种族判定）",
+          "is_variety_source(src_of(r))" in src and "ucr_first" in src)
+    # v9.4: 品种来源判定覆盖建库口径（文件夹名 Citrus varietiesN）+ 旧 ucr 值
+    check("variety 判定覆盖 Citrus varietiesN 文件夹名",
+          is_variety_source("Citrus varieties1") is True
+          and is_variety_source("citrus_varieties1") is True
+          and is_variety_source("paper1") is False
+          and is_variety_source("ucr") is True)
+    check("src_of 透传批次原始来源（不再折叠 ucr）",
+          src_of({"_src": "paper2"}) == "paper2"
+          and src_of({"_src": "Citrus varieties1"}) == "Citrus varieties1")
+    # src_of 兜底保留：无 _src 的旧 UCR chunk 仍回退 ucr
+    check("src_of 兜底保留旧 UCR 判定",
+          src_of({"source_type": "UCR citrus variety"}) == "ucr")
 
 
 # ── VF-47 草稿全链删除 ──────────────────────────────────────────────

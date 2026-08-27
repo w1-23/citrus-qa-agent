@@ -919,17 +919,20 @@ async def session_workspace_files(session_id: str):
 
 @app.get("/api/v2/session/{session_id}/citations")
 async def session_citations(session_id: str):
-    """v9.2: 会话历史文献引用恢复——按来源 4 组合并（RAG/UCR/Web/历史）。
+    """v9.2: 会话历史文献引用恢复——按来源分组（RAG/UCR/Web/历史 + 动态批次组）。
 
     替代 v8.10k 每轮列表结构（ref_id=R{turn}-{i} 与正文 [n]/[Wn]/[Hn] 体系
     不同源、点击不可追踪）：返回与 live 侧栏同构的 groups——
       数字组（rag ∪ ucr，与 live [n] 共用编号池）连续 1..k；
-      web 组 W1..Wm；historical 组 H1..Hn（get_evidence_refs 同款跨轮去重）。
-    每组条目携带 round_seq（来源轮次）元数据。前端刷新/切换会话后按 4 组
+      web 组 W1..Wm；historical 组 H1..Hn（get_evidence_refs 同款跨轮去重）；
+      v9.4: 非内置来源（paper1/Citrus varieties1 等）按规范化分组键归组
+      （paper1→paper），与 live 侧栏 srcKey 同口径。
+    每组条目携带 round_seq（来源轮次）元数据。前端刷新/切换会话后按组
     手风琴渲染，正文历史引用编号可对应组内条目。
     """
     import sqlite3
     import json as _json
+    from src.core.evidence import normalize_source_key
     groups: dict[str, list] = {"rag": [], "ucr": [], "web": [], "historical": []}
     seen: dict[str, set] = {"rag": set(), "ucr": set(), "web": set()}
     num_i = 0
@@ -955,11 +958,13 @@ async def session_citations(session_id: str):
             if not isinstance(e, dict):
                 continue
             src = str(e.get("source") or "").strip() or "rag"
-            group = src if src in ("rag", "ucr", "web") else "rag"
+            # v9.4: 非内置来源（paper1/Citrus varieties1 等批次）按规范化分组键
+            # 归组（paper1→paper），与 live 侧栏 srcKey 同口径；旧历史条目 ucr/rag/web 原样
+            group = src if src in ("rag", "ucr", "web") else normalize_source_key(src)
             doi = str(e.get("doi") or "").strip()
             title = str(e.get("title") or "").strip()[:150]
             key = (doi or title or str(e.get("chunk_id") or "")).strip()
-            if not key or key in seen[group]:
+            if not key or key in seen.setdefault(group, set()):
                 continue
             seen[group].add(key)
             if group == "web":
@@ -968,7 +973,7 @@ async def session_citations(session_id: str):
             else:
                 num_i += 1
                 ref_id = str(num_i)
-            groups[group].append({
+            groups.setdefault(group, []).append({
                 "ref_id": ref_id,
                 "type": "main" if group != "web" else "web",
                 "source": group,

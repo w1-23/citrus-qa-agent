@@ -31,7 +31,7 @@ from src.config import settings, PROJECT_ROOT
 from src.core.llm_pool import is_thinking_rejected as _is_thinking_rejected_impl
 from src.core.evidence import (
     render_evidence, EVIDENCE_TOOL_MAX_CHARS,
-    src_of, SOURCE_TAG, SOURCE_LABEL,
+    src_of, source_tag, source_label,
 )
 
 logger = logging.getLogger(__name__)
@@ -144,10 +144,11 @@ def format_rag_context(results: list, source: str = "main") -> str:
     for r in results[:10]:
         text = render_evidence(r, max_chars=EVIDENCE_TOOL_MAX_CHARS)
         src = src_of(r)
-        src_tag = SOURCE_TAG.get(src, "RAG")
+        src_tag = source_tag(src)
+        src_label = source_label(src)
         item = (
             f"- 标题: {r.get('title', '?')}\n"
-            f"  来源: [{src_tag}] {SOURCE_LABEL.get(src, '本地文献库')}"
+            f"  来源: [{src_tag}] {src_label}"
             f"  作者: {r.get('authors', 'N/A')}  年份: {r.get('year', 'N/A')}\n"
             f"  DOI: {r.get('doi', 'N/A')}  信心度: {(r.get('score') or r.get('rerank_score') or 0):.2f}"
         )
