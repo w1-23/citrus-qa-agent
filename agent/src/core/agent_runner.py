@@ -19,7 +19,7 @@ from langchain_core.messages import (
 from langchain_openai import ChatOpenAI
 
 from src.config import settings, get_deepseek_model
-from src.core.evidence import render_evidence, EVIDENCE_RENDER_MAX_CHARS, src_of, SOURCE_TAG
+from src.core.evidence import render_evidence, EVIDENCE_RENDER_MAX_CHARS, src_of, source_tag, is_variety_source
 from src.core.agent_loop import tc_id as extract_tc_id, last_message_content, invoke_llm_with_retry, emit_llm_usage
 from src.prompts.loader import assemble_agent_prompt
 from src.tools import _TOOL_REGISTRY_BY_NAME
@@ -29,8 +29,9 @@ logger = logging.getLogger(__name__)
 
 
 def _src_tag(r) -> str:
-    """证据来源徽标（回执前缀用）：rag→RAG / ucr→UCR / web→Web。"""
-    return SOURCE_TAG.get(src_of(r), "RAG")
+    """证据来源徽标（回执前缀用）：内置来源原样；品种族（UCR/Citrus varieties）→UCR，
+    其余未知来源 →RAG（避免 [paper1] 噪音）。"""
+    return source_tag(src_of(r))
 
 from src.core.progress_bus import (
     emit_encoded, emit_thinking,
@@ -180,8 +181,10 @@ def build_evidence_report(collected_artifacts: dict, query: str,
     """
     main = _dedup_evidence_items(list(collected_artifacts.get("main_results") or []))
     if ucr_first:
-        main = ([r for r in main if src_of(r) == "ucr"]
-                + [r for r in main if src_of(r) != "ucr"])
+        # v9.4: 品种来源判定扩展——UCR 批次(batch_source=ucr 或 'UCR ...')与
+        # Citrus varietiesN 批次（来源=文件夹名）均属品种族，聚拢置前
+        main = ([r for r in main if is_variety_source(src_of(r))]
+                + [r for r in main if not is_variety_source(src_of(r))])
     web = list(collected_artifacts.get("web_results") or [])
     lines = [
         "## 检索回执（系统组装）",

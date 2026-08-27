@@ -1,15 +1,16 @@
 ﻿# ============================================================
-#  Citrus QA Agent 发布打包（v8.14.1）
+#  Citrus QA Agent 发布打包（v9.4.0）
 #  ------------------------------------------------------------
 #  用法:
 #    powershell -File pack_release.ps1                # 主包（代码，~2MB）
-#    powershell -File pack_release.ps1 -CorpusOnly    # 语料附件（~1.2GB，上传 GitHub Releases）
-#    powershell -File pack_release.ps1 -IncludeData   # 主包+语料（~1.2GB，可上传）
-#    powershell -File pack_release.ps1 -IncludeModels -IncludeData  # 本地完整包（~3.3GB，仅本地/其他渠道分发）
+#    powershell -File pack_release.ps1 -CorpusOnly    # 语料附件（~1.6GB，分 2 卷上传 GitHub Releases）
+#    powershell -File pack_release.ps1 -IncludeData   # 主包+语料（~1.6GB，可上传）
+#    powershell -File pack_release.ps1 -IncludeModels -IncludeData  # 本地完整包（~3.7GB，仅本地/其他渠道分发）
 #  说明: GitHub Releases 单文件上限 2GB——大模型（reranker 2.2GB）不走发布包，
 #        首次运行经 HF 镜像自动下载（run.ps1 / prepare_models.py 已内置）；
-#        语料（LanceDB 向量库）用 -CorpusOnly 单独打包，run.ps1 首次运行自动下载。
-#  输出: dist/citrus-qa-agent-v8.13.0[-full[-data]].zip / dist/corpus-v8.13.0.zip
+#        语料（LanceDB 向量库 + chunks.jsonl + metadata.json + _idx_map.json）
+#        用 -CorpusOnly 单独打包，run.ps1 按语料版本标记自动全量/增量下载。
+#  输出: dist/citrus-qa-agent-v9.4.0[-full[-data]].zip / dist/corpus-v9.4.0-#.zip
 #  用户拿到 zip → 解压 → 双击运行 run.ps1 → 浏览器打开即用
 # ============================================================
 param([switch]$IncludeModels, [switch]$IncludeData, [switch]$CorpusOnly,
@@ -17,13 +18,41 @@ param([switch]$IncludeModels, [switch]$IncludeData, [switch]$CorpusOnly,
 
 $ErrorActionPreference = 'Stop'
 $Root = $PSScriptRoot
-$Version = '8.14.1'
-$CorpusVersion = '8.13.0'   # 语料附件归属 Release（旧卷 1-3 原地不动，增量卷 4 挂此版本，文件名用此版本）
+$Version = '9.4.0'
+# v9.4.0: 语料与主包同版本（改为 9.4.0）；语料包含 agent/data/.corpus-version 标记，
+#          run.ps1 检测本地标记 != 当前版本时全量重下并整体替换（结构性变更：去重/更名/删除批次）
+$CorpusVersion = '9.4.0'
 $Dist = Join-Path $Root 'dist'
 $Suffix = $(if ($IncludeModels) { '-full' } else { '' }) + $(if ($IncludeData) { '-data' } else { '' })
 $ZipName = "citrus-qa-agent-v$Version$Suffix.zip"
 $ZipPath = Join-Path $Dist $ZipName
 $Stage = Join-Path $env:TEMP ("citrus-pack-" + [guid]::NewGuid().ToString('N'))
+
+# ── 语料批次清单（agent/data 顶层各批次目录 + 版本标记，写入每个分卷）──
+function Get-CorpusBatchNames {
+    param($DataDir)
+    return @(Get-ChildItem $DataDir -Directory | Where-Object {
+        $_.Name -ne 'lancedb' -and
+        ((Test-Path (Join-Path $_.FullName 'chunks.jsonl')) -or (Test-Path (Join-Path $_.FullName 'chunks\chunks.jsonl')))
+    } | ForEach-Object { $_.Name })
+}
+function Write-CorpusMarkers {
+    param($DataStage, $CorpusVersion, $BatchNames)
+    New-Item -ItemType Directory -Force -Path $DataStage | Out-Null
+    Set-Content -Path (Join-Path $DataStage '.corpus-version') -Value $CorpusVersion -Encoding UTF8
+    Set-Content -Path (Join-Path $DataStage '.corpus-batches') -Value ($BatchNames -join "`n") -Encoding UTF8
+}
+# 批次内容（chunks.jsonl + metadata.json + _idx_map.json）→ 目标批次目录
+function Copy-BatchContents {
+    param($SrcDir, $DstDir)
+    New-Item -ItemType Directory -Force -Path $DstDir | Out-Null
+    $cj = if (Test-Path (Join-Path $SrcDir 'chunks.jsonl')) { Join-Path $SrcDir 'chunks.jsonl' } else { Join-Path $SrcDir 'chunks\chunks.jsonl' }
+    Copy-Item -Force $cj (Join-Path $DstDir 'chunks.jsonl')
+    foreach ($extra in 'metadata.json', '_idx_map.json') {
+        $p = Join-Path $SrcDir $extra
+        if (Test-Path $p) { Copy-Item -Force $p (Join-Path $DstDir $extra) }
+    }
+}
 
 # ── 仅语料附件（zip 内路径 agent/data/...，解压到仓库根目录即得 agent/data）──
 #  v8.13.0: 只打包 LanceDB 向量库 + 各批次 chunks.jsonl（证据定位必需）；
@@ -40,9 +69,9 @@ if ($CorpusOnly) {
     # （默认 PartNo=1；运行 run.ps1 时自动按序号续接下载）。
     if ($BatchOnly) {
         $name = $BatchOnly
-        $j = if (Test-Path (Join-Path $DataDir "$name\chunks.jsonl")) { Join-Path $DataDir "$name\chunks.jsonl" } else { Join-Path $DataDir "$name\chunks\chunks.jsonl" }
+        $srcDir = Join-Path $DataDir $name
         $tbl = Join-Path $DataDir "lancedb\$name.lance"
-        if (-not (Test-Path $j) -or -not (Test-Path $tbl)) {
+        if (-not (Test-Path (Join-Path $srcDir 'chunks.jsonl')) -or -not (Test-Path $tbl)) {
             Write-Host "⚠ 批次 $name 缺少 chunks.jsonl 或 lancedb\$name.lance" -ForegroundColor Red
             exit 1
         }
@@ -52,11 +81,11 @@ if ($CorpusOnly) {
         New-Item -ItemType Directory -Force -Path $Dist | Out-Null
         $binRoot = Join-Path $Stage ("part" + $pn)
         $binData = Join-Path $binRoot 'agent\data'
-        $dst = Join-Path $binData $name
-        New-Item -ItemType Directory -Force -Path $dst | Out-Null
         New-Item -ItemType Directory -Force -Path (Join-Path $binData 'lancedb') | Out-Null
-        Copy-Item -Force $j (Join-Path $dst 'chunks.jsonl')
+        Copy-BatchContents -SrcDir $srcDir -DstDir (Join-Path $binData $name)
         robocopy $tbl (Join-Path $binData "lancedb\$name.lance") /E /XF *.lock /R:0 /W:0 /NFL /NDL /NJH /NJS | Out-Null
+        # v9.4.0: 每个分卷都带语料版本标记 + 完整批次清单（run.ps1 全量/增量判定依据）
+        Write-CorpusMarkers -DataStage $binData -CorpusVersion $CorpusVersion -BatchNames (Get-CorpusBatchNames $DataDir)
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         [System.IO.Compression.ZipFile]::CreateFromDirectory($binRoot, $zipPath, [System.IO.Compression.CompressionLevel]::NoCompression, $false)
         $mb = [Math]::Round((Get-Item $zipPath).Length / 1MB, 1)
@@ -93,7 +122,8 @@ if ($CorpusOnly) {
         if ($idx -ge 0) { $null = $bins[$idx].Add($b) }
         else { $nb = New-Object System.Collections.ArrayList; $null = $nb.Add($b); $null = $bins.Add($nb) }
     }
-    # 3) 每卷暂存并打包（NoCompression 秒级；内容 = agent/data/<批次>/chunks.jsonl + lancedb/<批次>.lance）
+    # 3) 每卷暂存并打包（NoCompression 秒级；内容 = agent/data/<批次>/chunks.jsonl + metadata.json +
+    #    _idx_map.json + lancedb/<批次>.lance + .corpus-version / .corpus-batches 标记）
     New-Item -ItemType Directory -Force -Path $Dist | Out-Null
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $partNo = 0; $totalMB = 0
@@ -104,12 +134,11 @@ if ($CorpusOnly) {
         $binRoot = Join-Path $Stage ("part" + $partNo)
         $binData = Join-Path $binRoot 'agent\data'
         foreach ($b in $bin) {
-            $dst = Join-Path $binData $b.Name
-            New-Item -ItemType Directory -Force -Path $dst | Out-Null
-            Copy-Item -Force $b.Json (Join-Path $dst 'chunks.jsonl')
+            Copy-BatchContents -SrcDir (Join-Path $DataDir $b.Name) -DstDir (Join-Path $binData $b.Name)
             $tbl = Join-Path $DataDir "lancedb\$($b.Name).lance"
             if (Test-Path $tbl) { robocopy $tbl (Join-Path $binData "lancedb\$($b.Name).lance") /E /XF *.lock /R:0 /W:0 /NFL /NDL /NJH /NJS | Out-Null }
         }
+        Write-CorpusMarkers -DataStage $binData -CorpusVersion $CorpusVersion -BatchNames (Get-CorpusBatchNames $DataDir)
         [System.IO.Compression.ZipFile]::CreateFromDirectory($binRoot, $zipPath, [System.IO.Compression.CompressionLevel]::NoCompression, $false)
         $mb = [Math]::Round((Get-Item $zipPath).Length / 1MB, 1); $totalMB += $mb
         Write-Host "  卷 $partNo/$($bins.Count): corpus-v$CorpusVersion-$partNo.zip  $mb MB  (批次: $(($bin | ForEach-Object Name) -join ', '))" -ForegroundColor Cyan
@@ -168,22 +197,20 @@ if ($IncludeModels) {
     }
 }
 
-# ── 完整包: 附带示例语料（LanceDB 向量库 + chunks.jsonl，开箱可测检索/引用/写作全链路）──
+# ── 完整包: 附带示例语料（LanceDB 向量库 + chunks.jsonl + metadata，开箱可测检索/引用/写作全链路）──
 if ($IncludeData) {
     if (Test-Path $DataDir) {
-        Write-Host "附带示例语料 (data/lancedb + chunks.jsonl) ..." -ForegroundColor Cyan
+        Write-Host "附带示例语料 (data/lancedb + chunks.jsonl + metadata.json) ..." -ForegroundColor Cyan
         $DataStage = Join-Path $StageAgent 'data'
         if (Test-Path $DataStage) { Remove-Item -Recurse -Force $DataStage }
         robocopy (Join-Path $DataDir 'lancedb') (Join-Path $DataStage 'lancedb') /E /XF *.lock /R:0 /W:0 /NFL /NDL /NJH /NJS | Out-Null
-        # v8.13.0: 双布局归一（同 CorpusOnly）
+        # 各批次：chunks.jsonl + metadata.json + _idx_map.json（与 CorpusOnly 同口径）
         Get-ChildItem $DataDir -Directory | Where-Object {
             (Test-Path (Join-Path $_.FullName 'chunks.jsonl')) -or (Test-Path (Join-Path $_.FullName 'chunks\chunks.jsonl'))
         } | ForEach-Object {
-            $src = if (Test-Path (Join-Path $_.FullName 'chunks.jsonl')) { Join-Path $_.FullName 'chunks.jsonl' } else { Join-Path $_.FullName 'chunks\chunks.jsonl' }
-            $dst = Join-Path $DataStage $_.Name
-            New-Item -ItemType Directory -Force -Path $dst | Out-Null
-            Copy-Item -Force $src (Join-Path $dst 'chunks.jsonl')
+            Copy-BatchContents -SrcDir $_.FullName -DstDir (Join-Path $DataStage $_.Name)
         }
+        Write-CorpusMarkers -DataStage $DataStage -CorpusVersion $CorpusVersion -BatchNames (Get-CorpusBatchNames $DataDir)
     } else {
         Write-Host "⚠ agent/data 不存在，跳过语料" -ForegroundColor Yellow
     }

@@ -36,43 +36,43 @@
 
 | 包 | 大小 | 说明 |
 |---|---|---|
-| `citrus-qa-agent-v8.14.1.zip` | 2.3 MB | **必下**：代码 + 一键脚本（挂 v8.14.1 Release） |
-| `corpus-v8.13.0-1.zip` | 939 MB | 语料分卷 1/4：xrz、dxy-1、1-50、51-101（挂 v8.13.0 Release，旧附件不动） |
-| `corpus-v8.13.0-2.zip` | 796 MB | 语料分卷 2/4：1-1200、7.20 |
-| `corpus-v8.13.0-3.zip` | 509 MB | 语料分卷 3/4：720600 |
-| `corpus-v8.13.0-4.zip` | 76 MB | 语料分卷 4/4：**categories-cn（UCR 柑橘品种库，v8.14.1 增量新增，仅此卷需上传）** |
+| `citrus-qa-agent-v9.4.0.zip` | 2.3 MB | **必下**：代码 + 一键脚本（挂 v9.4.0 Release） |
+| `corpus-v9.4.0-1.zip` | 1002 MB | 语料分卷 1/2（挂 v9.4.0 Release） |
+| `corpus-v9.4.0-2.zip` | 591 MB | 语料分卷 2/2 |
 
-> 语料 = **公开文献 7 批 + UCR 柑橘品种库 1 批 = 8 个批次**（LanceDB 向量库 + chunks.jsonl）。语料附件统一挂在 **v8.13.0 Release**，与主包版本解耦：v8.14.1 只增量补充第 4 分卷（76MB），旧分卷不重传。**无需手动下载**：`run.ps1` 全新安装按序号下载 1→4 全部分卷；**已跑过旧版的存量部署**检测到新品种库缺失时只增量拉第 4 卷。也可手动下载后全部解压到项目根目录（自动合并）直接运行。
+> 语料 = **公开文献 7 批 + 柑橘品种库 2 批 = 8 个批次**（全量 LanceDB 向量表，均带 IVF_HNSW 索引，共 166,055 片）：`paper1`~`paper8`（公开科研文献，paper3/paper4 与 paper1/paper5 内容 100% 重复已于 v9.4 去重归档）+ `Citrus varieties1`（UCR 柑橘品种库 1,067 个品种，原名 categories-cn）+ `Citrus varieties2`（中国柑橘品种历史文献）。每个批次含 `chunks.jsonl`（分块文本）+ `metadata.json`（含 `summary.source_type`=批次来源名，前端据此归组）+ `_idx_map.json` + `lancedb/<批次>.lance`（向量表）。
+>
+> **语料版本与主包同步（v9.4.0）**：每个分卷内带 `agent/data/.corpus-version` 与 `.corpus-batches` 标记。`run.ps1` 全新安装自动按序号下载 1→2 分卷；**存量部署**检测到本地语料版本标记缺失或不一致（结构性变更：去重/更名/删除批次）时**全量重下并整体替换** `agent/data`，确保不残留已删批次；同一版本内后续新增批次按 `.corpus-batches` 清单增量补拉。**无需手动下载**：也可手动下载分卷解压到项目根目录（自动合并）直接运行。
 
-> ⚠️ **主包只认最新版**：主包请用 `v8.14.1`；旧主包 `v8.5.0` / `v8.9.0` / `v8.13.0` **已删除废止**（旧 zip 缺语料分卷、缺 e5 模型缓存、缺 pip 编码修复）。语料附件挂在 v8.13.0 Release 属数据归属，与新老主包均可配对使用。
+> ⚠️ **主包只认最新版**：主包请用 `v9.4.0`；旧主包 `v8.5.0` / `v8.9.0` / `v8.13.0` / `v8.14.1` / `v9.3.0` **已删除废止**（旧 zip 缺语料分卷、缺 e5 模型缓存、缺 pip 编码修复）。
 
 **模型自动安装**：向量编码（multilingual-e5-large）与重排（bge-reranker-v2-m3）模型不打包（重排模型单文件超 GitHub 2GB 上限）——首次运行 `run.ps1` 自动经 **HuggingFace 国内镜像（hf-mirror.com）** 下载，约 5-15 分钟，一次完成后秒级启动；也可手动运行 `python prepare_models.py`（`--skip-reranker` 可跳过重排模型）。
 
-> **零下载部署**：把源机 `agent/.hf_cache/`（含 e5 本体 `fastembed\models--qdrant--multilingual-e5-large-onnx`，约 4.8GB）与 `agent/data/`（约 2.2GB）整目录拷贝到新机器即可直接运行。模型缓存**与 GPU/CPU 无关**——CPU、AMD、NVIDIA（DirectML）通吃同一份；显卡加速只由每台机器自己 pip 安装的 onnxruntime 执行后端决定。**注意 e5 本体必须包含**，只拷了 2.6GB 旧缓存仍会在线重新下载。
+> **零下载部署**：把源机 `agent/.hf_cache/`（含 e5 本体 `fastembed\models--qdrant--multilingual-e5-large-onnx`，约 4.8GB）与 `agent/data/`（去重后约 1.6GB：LanceDB 1.32GB + 分块文本 261MB）整目录拷贝到新机器即可直接运行。模型缓存**与 GPU/CPU 无关**——CPU、AMD、NVIDIA（DirectML）通吃同一份；显卡加速只由每台机器自己 pip 安装的 onnxruntime 执行后端决定。**注意 e5 本体必须包含**，只拷了 2.6GB 旧缓存仍会在线重新下载。
 
 `run.ps1` 全自动处理：
 
 | 步骤 | 行为 |
 |---|---|
 | 0. 包自检 | 校验包版本（防旧包）+ 检查语料/模型缓存是否缺失，缺失项黄色提示 |
-| 1. 语料 | 检测 `agent/data/lancedb`：全新安装自动下载 4 分卷（~2.4GB）；存量部署自动增量补拉新品种库分卷（76MB）；已就绪则秒级跳过 |
+| 1. 语料 | 检测 `agent/data/lancedb`：全新安装自动下载 2 分卷（~1.6GB）；存量部署按 `agent/data/.corpus-version` 标记比对——不一致（结构性变更）自动全量重下并整体替换，一致则秒级跳过 |
 | 2. Python | 未安装或版本不符则自动 `winget install Python 3.11` |
 | 3. 虚拟环境 | 自动创建 `agent/.venv`（仅首次） |
 | 4. 依赖 | 自动 `pip install -r requirements.txt`（仅首次，5-10 分钟） |
 | 5. 模型 | 自动下载向量编码模型 + 导出重排模型到本地缓存（仅首次，5-15 分钟；之后秒级启动） |
 | 6. 启动 | 启动服务并自动打开浏览器 |
 
-> 首次等待较长是因为下载语料和安装依赖/模型（语料 ~2.2GB，依赖+模型约 2GB）；一次完成后下次启动秒级。
+> 首次等待较长是因为下载语料和安装依赖/模型（语料 ~1.6GB，依赖+模型约 2GB）；一次完成后下次启动秒级。
 > 也可选择 `-IncludeData -IncludeModels` 打包完整包（含模型缓存 + 语料，约 7GB，需自行打包），下载后跳过步骤 1/5 直接运行。
 
 ### 部署给其他人
 
 对部署者的要求：**Windows 电脑 + 能上网**，无需安装任何东西（Python 都会自动装）。
 
-1. 下载 [citrus-qa-agent-v8.14.1.zip](https://github.com/w1-23/citrus-qa-agent/releases)（~2.3MB）→ 解压到任意目录
+1. 下载 [citrus-qa-agent-v9.4.0.zip](https://github.com/w1-23/citrus-qa-agent/releases)（~2.3MB）→ 解压到任意目录
 2. **双击 `run.ps1`**（或右键 → 使用 PowerShell 运行）
-3. 首次运行全自动完成（约 20-40 分钟，取决于网络）：
-   - 语料自动下载（~2.4GB 四分卷，从 GitHub Releases）
+3. 首次运行全自动完成（约 15-30 分钟，取决于网络）：
+   - 语料自动下载（~1.6GB 二分卷，从 GitHub Releases）
    - Python 检测/安装 → 虚拟环境 → 依赖安装
    - 模型经 hf-mirror 国内镜像自动下载
 4. 浏览器自动打开 `http://localhost:8000` → 页面填写 DeepSeek API Key → 开始使用
@@ -90,11 +90,11 @@
 - **中文文件夹名（如 `E:\文献`）？** → 必须使用纯英文路径（如 `E:\citrus`）。中文路径会让 onnxruntime/模型库报莫名 Traceback；新版脚本会自动拦截并红字提示。
 - **窗口闪退看不到报错？** → 新版不会闪退：任何失败都会停在窗口，完整输出在 `agent\logs\last_run.log`，把该文件发给维护者即可。
 - **Python 没装 / 版本不对？** → 脚本会自动 `winget install` Python 3.11（若系统有高版本 3.13+ 会自动降级使用），无需手动处理。
-- **语料下载慢/失败？** 先设置环境变量 `GH_MIRROR`（如 `https://ghproxy.net/`）再运行 run.ps1；或手动下载 `corpus-v8.13.0-1/2/3/4.zip` 解压到项目根目录后直接运行。
+- **语料下载慢/失败？** 先设置环境变量 `GH_MIRROR`（如 `https://ghproxy.net/`）再运行 run.ps1；或手动下载 `corpus-v9.4.0-1/2.zip` 解压到项目根目录后直接运行。
 - **模型下载慢？** 已默认走国内镜像 hf-mirror.com；如需官方源，注释 run.ps1 中 `$env:HF_ENDPOINT` 一行。
-- **首次等了很久正常吗？** 正常——语料 2.2GB + 依赖 + 模型约 2GB，总计首次约 20-40 分钟；一次完成后下次启动秒级。
+- **首次等了很久正常吗？** 正常——语料 1.6GB + 依赖 + 模型约 2GB，总计首次约 15-30 分钟；一次完成后下次启动秒级。
 - **怎么停止？** 直接关闭 PowerShell 窗口，或运行 `stop.ps1`。
-- **怎么更新版本？** 下载新主包解压**覆盖旧目录**（`agent/data/` 与 `agent/state/` 自动保留，会话与语料不丢），重新运行 run.ps1 即可。
+- **怎么更新版本？** 下载新主包解压**覆盖旧目录**（`agent/state/` 自动保留，会话不丢）；语料目录 `agent/data/` 保留，`run.ps1` 会按语料版本标记判断——标记一致则秒级跳过，v9.4 结构性变更（去重/更名/删除批次）会自动全量重下并整体替换。
 - **换电脑/多人使用？** 每台机器独立部署；语料数据共用时直接拷贝 `agent/data/` 目录（LanceDB 无单实例锁限制，可多实例并行）。
 - **不同硬件的电脑能共用一份模型文件吗？** 能——`.hf_cache/` 模型文件与 BM25 缓存与硬件无关，可整体拷贝共用；onnxruntime 的 CPU/GPU 版本由 `run.ps1` 按显卡自动选择安装（有独显→DirectML 进显存，无独显→CPU）。
 
@@ -231,26 +231,34 @@ python ingest.py --backend lancedb     # 显式指定后端（默认 auto）
 
 ```
 agent/data/
-├── 批次名/                # 任意命名，自动被发现
-│   ├── chunks/chunks.jsonl   # 旧数据包：分块文本在 chunks/ 子目录
-│   ├── chunks.jsonl          # 新数据包（pipeline1 系）：分块文本在批次根目录
-│   ├── qdrant_data/          # Qdrant 向量库（打包产物，建 LanceDB 表时复用）
-│   └── metadata.json
-└── lancedb/              # LanceDB 向量库（检索数据源，表名=批次名）
+├── 批次名/                # 任意命名，自动被发现（LanceDB 表名限字母数字/_/-/.，勿含空格）
+│   ├── chunks.jsonl       # 分块文本（根目录；检索/引用证据定位必需）
+│   ├── metadata.json      # summary.source_type = 该批次「来源名」→ 前端引用归组依据
+│   ├── _idx_map.json      # (paper_id, chunk_index) → 行序映射
+│   └── qdrant_data/       # 旧 Qdrant 向量库（建 LanceDB 表时复用，不进发布包）
+├── .corpus-version        # 语料版本标记（run.ps1 全量/增量判定依据）
+├── .corpus-batches        # 批次清单（同版本增量补拉依据）
+└── lancedb/               # LanceDB 向量库（检索数据源，表名=批次名，cosine + IVF_HNSW 索引）
 ```
+
+### 来源分组（侧栏引用卡片自动归类）
+
+侧栏引用按证据来源分组：固定 **4 组**（本地文献库 RAG / UCR品种库 / 联网搜索 / 历史证据）+ **动态组**。动态组名取自批次 `metadata.json` 的 `summary.source_type`（缺失时取文件夹名），**经前端正则去掉末尾数字自动收纳为同类型**：`paper1`~`paper8` → 组「paper」，`Citrus varieties1`/`Citrus varieties2` → 组「Citrus varieties」。品种类来源（含 `ucr` 或归组名为 Citrus varieties）沿用 UCR 语义：检索回执标 `[UCR]`、专家模式品种问题将品种证据聚拢置前。任意新批次无需改代码即可自动成组。
 
 ### 新数据包（pipeline 系预分块文献包）入库
 
 **标准流程（三步）**：
 
-1. **放包**：把新数据包放进 `agent/data/批次名/`（根目录 `chunks.jsonl` + `qdrant_data/` + `metadata.json`；任意命名，自动被发现）
+1. **放包**：把新数据包放进 `agent/data/批次名/`（根目录 `chunks.jsonl` + `metadata.json` + `_idx_map.json`；任意命名，自动被发现）
 2. **建表**：`reindex_lance.py --batch 批次名`（在 `agent/` 目录、用项目 Python 环境执行）
 3. **重启服务**：restart 后检索器自动装载新 lance 表 + 重建/取用新 BM25 指纹缓存，新批次即可检索
+
+**pipeline1 直出 LanceDB（推荐）**：外部 `pipeline1` 工程已支持 `--backend lancedb`——`run_pipeline.py --output-dir <仓库>/agent/data --batch-name 批次名 --source-type 来源名` 会一次性产出 `chunks.jsonl` + `metadata.json`（含 `summary.source_type`）+ `_idx_map.json` + `lancedb/批次名.lance`（cosine + IVF_HNSW_FLAT，索引参数 64/16/200），**无需再跑 reindex 直接可用**。
 
 ```bash
 cd agent
 rag-agent\python.exe reindex_lance.py --batch 我的新批次          # 单个包（推荐）
-rag-agent\python.exe reindex_lance.py --batch 1-1200 --no-qdrant   # qdrant 不可用时全量重嵌入
+rag-agent\python.exe reindex_lance.py --batch 我的新批次 --no-qdrant   # qdrant 不可用时全量重嵌入
 rag-agent\python.exe reindex_lance.py --all                        # 一次性重建全部批次
 ```
 

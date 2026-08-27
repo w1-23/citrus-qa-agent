@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Citrus QA Agent v8.14.1</title>
+<title>Citrus QA Agent v9.3.0</title>
 <script src="https://cdn.jsdelivr.net/npm/marked@4.3.0/marked.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -818,6 +818,8 @@ footer {
 .src-badge.ucr { background: rgba(96,165,250,.15); color: #60a5fa; }
 .src-badge.web { background: var(--accent-muted); color: var(--accent); }
 .src-badge.historical { background: var(--bg-hover); color: var(--text-muted); }
+/* v9.2 (P0#4): 动态来源（pipeline1 source_type 新标注）徽标——通用灰色，未知来源不并入 RAG */
+.src-badge.custom { background: var(--warning-glow); color: var(--warning); }
 .src-group { border: 1px dashed var(--border-hairline); border-radius: 6px; margin-bottom: 5px; overflow: hidden; }
 .src-group-header {
   display: flex; align-items: center; gap: 6px;
@@ -1183,7 +1185,7 @@ footer {
 <header>
   <div class="logo-mark">C</div>
   <h1>Citrus QA Agent</h1>
-  <span class="version-badge" id="versionBadge">v8.14.1</span>
+  <span class="version-badge" id="versionBadge">v9.3.0</span>
   <div class="header-actions">
     <button class="ctx-circle-btn" id="ctxCircleBtn" onclick="toggleCtxDrawer()" title="上下文用量">
       <svg viewBox="0 0 36 36" width="22" height="22">
@@ -1234,7 +1236,7 @@ footer {
       <div class="message bot">
         <div class="avatar">◆</div>
         <div class="content">
-          您好，我是 <span id="welcomeVersion">Citrus QA Agent v8.14.1</span>。<br>
+          您好，我是 <span id="welcomeVersion">Citrus QA Agent v9.3.0</span>。<br>
           <span style="color:var(--text-muted);font-size:13px">本地 RAG 检索（文献+UCR 品种库） · 文献综述写作 · 实验设计 · 文件读写</span>
         </div>
       </div>
@@ -1525,7 +1527,7 @@ function loadRuntimeConfig() {
 }
 /* v8.4.5: 版本单源——后端 /api/v2/config.version 下发，静态文案仅为离线回退 */
 function _appVersion() {
-  return (_runtimeConfig && _runtimeConfig.version) || '8.14.1';
+  return (_runtimeConfig && _runtimeConfig.version) || '9.3.0';
 }
 function applyAppVersion() {
   var v = _appVersion();
@@ -2719,6 +2721,8 @@ async function sendMsg(isFollowUp) {
   streamOnce();
 
   // v8.15: 证据来源展示元数据（来源分组手风琴 + 条目徽标；新增来源只加一行）
+  // v9.2 (P0#4): 硬编码仅限 4 个内置来源的名称/顺序；未知来源（如 pipeline1
+  // --source-type 新标注）动态生成同名分组 —— 见 srcKey()，分组本身代码驱动。
   var SOURCE_META = {
     rag:  { tag: 'RAG',  name: '本地文献库', cls: 'rag' },
     ucr:  { tag: 'UCR',  name: 'UCR品种库',  cls: 'ucr' },
@@ -2727,7 +2731,29 @@ async function sendMsg(isFollowUp) {
   };
   function srcMeta(item) {
     var s = (item && (item.source || item._src)) || '';
-    return SOURCE_META[s] || SOURCE_META.rag;
+    var sm = SOURCE_META[s];
+    if (sm) return sm;
+    if (!s) return SOURCE_META['rag'];
+    var key = _normSourceKey(s);
+    return { tag: key, name: key, cls: 'custom' };
+  }
+  // v9.4 (P0#4 增强): 来源分组键规范化——非内置来源去尾部数字
+  // （paper1→paper、Citrus varieties1→Citrus varieties），同名文件夹在前端
+  // 经代码提取自动收纳为同类型分组；内置 4 组（rag/ucr/web/historical）原样。
+  function _normSourceKey(s) {
+    s = String(s || '').trim();
+    if (s === 'rag' || s === 'ucr' || s === 'web' || s === 'historical') return s;
+    var norm = s.replace(/\d+$/, '').trim();
+    return norm || s;
+  }
+  // v9.2 (P0#4): 来源分组键——内置 4 组原样；未知来源（pipeline1 source_type）
+  // 经 _normSourceKey 归组，使新来源（paper1..8 → paper、Citrus varieties1..3 →
+  // Citrus varieties）自动生成侧栏手风琴组（不再并入 RAG）。
+  function srcKey(item) {
+    var s = (item && (item.source || item._src)) || '';
+    if (!s) return 'rag';
+    if (SOURCE_META[s]) return s;
+    return _normSourceKey(s);
   }
   // v8.15: 条目渲染——加来源徽标 + UCR 专属字段（无 DOI 时显示登记号/品种名）
   function renderCitationItem(item) {
@@ -2770,7 +2796,13 @@ async function sendMsg(isFollowUp) {
      src-group 结构与 renderCitationItem；条目携带来源轮次元数据） */
   function renderRestoredGroups() {
     if (!_restoredGroups) return false;
-    var order = ['rag', 'ucr', 'web', 'historical'];
+    // v9.4: 恢复视图同样支持动态来源组（与 live 侧栏同口径，未知组排在内置 4 组之后）
+    var dyn = [];
+    var gkeys = Object.keys(_restoredGroups || {});
+    for (var gk = 0; gk < gkeys.length; gk++) {
+      if (['rag', 'ucr', 'web', 'historical'].indexOf(gkeys[gk]) === -1) dyn.push(gkeys[gk]);
+    }
+    var order = ['rag', 'ucr', 'web', 'historical'].concat(dyn);
     var total = 0;
     for (var g = 0; g < order.length; g++) total += (_restoredGroups[order[g]] || []).length;
     citationCount.textContent = String(total);
@@ -2780,7 +2812,7 @@ async function sendMsg(isFollowUp) {
       var gk = order[gi];
       var items = _restoredGroups[gk] || [];
       if (items.length === 0) continue;
-      var sm2 = SOURCE_META[gk];
+      var sm2 = SOURCE_META[gk] || srcMeta({ source: gk });
       var gid = 'restore-' + gk;
       var gOpen = firstOpen;
       firstOpen = false;
@@ -2835,19 +2867,22 @@ async function sendMsg(isFollowUp) {
       html += '<span class="round-count">' + all.length + '</span></div>';
       html += '<div class="round-body" id="round-' + round.roundId + '"' + (open ? '' : ' style="display:none"') + '>';
       // v8.15: 按来源分组（固定顺序：本地文献库→UCR品种库→联网搜索→历史证据）
+      // v9.2 (P0#4): 未知来源（非 4 内置组）动态归组，排在固定 4 组之后
       var groups = {};
       for (var m = 0; m < all.length; m++) {
-        var sm = srcMeta(all[m]);
-        var key = sm.cls === 'historical' ? 'historical' : (sm.cls === 'web' ? 'web' : (sm.cls === 'ucr' ? 'ucr' : 'rag'));
+        var key = srcKey(all[m]);
         if (!groups[key]) groups[key] = [];
         groups[key].push(all[m]);
       }
-      var groupOrder = ['rag', 'ucr', 'web', 'historical'];
+      var groupOrder = ['rag', 'ucr', 'web', 'historical']
+        .concat(Object.keys(groups).filter(function (k) {
+          return ['rag', 'ucr', 'web', 'historical'].indexOf(k) === -1;
+        }));
       var firstOpen = true;
       for (var gi = 0; gi < groupOrder.length; gi++) {
         var gk = groupOrder[gi];
         if (!groups[gk] || groups[gk].length === 0) continue;
-        var sm2 = SOURCE_META[gk];
+        var sm2 = SOURCE_META[gk] || srcMeta({ source: gk });
         var gid = round.roundId + '-' + gk;
         var gOpen = open && firstOpen;
         firstOpen = false;

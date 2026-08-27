@@ -138,6 +138,48 @@ SOURCE_LABEL = {
 SOURCE_ORDER = ("rag", "ucr", "web", "historical")
 
 
+def normalize_source_key(src) -> str:
+    """v9.4: 来源分组键规范化——非内置来源去尾部数字（paper1→paper、
+    Citrus varieties1→Citrus varieties），前端 index.html srcKey/srcMeta
+    与恢复接口（/api/v2/.../citations）用同一规则，同名文件夹自动归组。"""
+    s = str(src or "").strip()
+    if not s:
+        return "rag"
+    norm = re.sub(r"\d+$", "", s).strip()
+    return norm or s
+
+
+def is_variety_source(src) -> str:
+    """v9.4: 品种库（UCR 语义）来源判定——原始值含 'ucr'，或规范化分组键
+    为 'citrus varieties'（空格/下划线写法均认；建库批次 metadata.source_type
+    = "Citrus varietiesN"，未带 metadata 时回退文件夹名 "citrus_varietiesN"）。
+    用于回执 [UCR] 徽标与 ucr_first 聚拢（v8.17 src_of()=="ucr" 的放行扩展）。"""
+    raw = str(src or "").strip().lower()
+    if not raw or raw == "rag" or raw == "historical":
+        return False
+    if "ucr" in raw:
+        return True
+    key = normalize_source_key(raw).replace("_", " ").replace("-", " ").strip()
+    return key == "citrus varieties"
+
+
+def source_tag(src) -> str:
+    """来源徽标（回执/工具上下文 [前缀]）：内置 4 组原样；
+    未知来源按品种语义给 UCR，其余 RAG（避免 [paper1] 噪音）。"""
+    tag = SOURCE_TAG.get(str(src or ""))
+    if tag:
+        return tag
+    return "UCR" if is_variety_source(src) else "RAG"
+
+
+def source_label(src) -> str:
+    """来源中文展示名：内置 4 组原样；品种库给 'Citrus varieties'；其余本地文献库。"""
+    lab = SOURCE_LABEL.get(str(src or ""))
+    if lab:
+        return lab
+    return "Citrus varieties" if is_variety_source(src) else "本地文献库"
+
+
 def src_of(r) -> str:
     """证据来源解析：优先 chunk 上的显式字段，退化为 'rag'。"""
     if not isinstance(r, dict):
