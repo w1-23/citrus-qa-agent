@@ -50,7 +50,7 @@ def test_ag16_cards():
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'core', 'strategy_cards.py'),
                encoding='utf-8').read()
     check("无 web_search/multi_search 残留", "web_search" not in src and "multi_search" not in src)
-    check("含 academic_search 指引", "academic_search" in src)
+    check("无 academic_search（v9.2 已删除）", "academic_search" not in src)
 
 
 def test_n2_tools():

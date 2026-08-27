@@ -35,8 +35,7 @@ from src.config import settings, get_deepseek_model
 
 logger = logging.getLogger(__name__)
 
-# 引用条目默认上限
-_WEB_MAX_ITEMS = 8
+# 引用条目不设上限（v9.2 审计：全量进入 web_results）
 _HTTP_TIMEOUT = 30   # 兼容旧引用；实际值由 _web_http_timeout() 从 config web_search.timeout_sec 读取
 
 
@@ -132,7 +131,7 @@ def _parse_response_output(output: list):
         calls.append({"title": (it["title"] or u)[:200], "url": u,
                       "abstract": it.get("abstract", "")[:500]})
     summary = "\n".join(p for p in text_parts if p).strip()
-    return summary, calls[: _WEB_MAX_ITEMS], {"queries": queries[:8]}
+    return summary, calls, {"queries": queries[:8]}
 
 
 @tool(response_format="content_and_artifact")

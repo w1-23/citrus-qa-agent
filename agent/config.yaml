@@ -6,6 +6,7 @@ retrieval:
   top_k_vector: 40          # 向量检索每批取回数量
   top_k_bm25: 40            # BM25 检索取回数量
   top_k_final: 10           # Rerank 后最终保留数量
+  candidate_window: 20      # v9.4: RRF 融合后精排候选窗口（原 top_k_final*2 隐式硬编码 multi_retriever.py:600）
   rrf_k: 60                 # RRF 融合常数
   rrf_weights:
     orig_dense: 1.0          # original_query 向量检索权重
@@ -14,25 +15,26 @@ retrieval:
   rerank_threshold: 0.25    # Sigmoid 概率绝对底线阈值（RAG 与 HyDE 路一致，动态阈值 = max(0.25, top×ratio)）
   dynamic_threshold_ratio: 0.60  # 动态阈值 = top_score * ratio
   web_relevance_threshold: 0.3   # Web 语义过滤阈值（BGE reranker 分数，0=不相关 1=完美匹配）
+  # v9.4: 代码级收敛早停参数（论文实验4b；原硬编码 agent_runner.py:593）
+  early_stop_min_evidence: 6     # 累计唯一证据 ≥ 该值才允许早停
+  early_stop_new_ratio: 0.25     # 本轮新增占比 < 该值 → 强制收敛
   rag_hyde_enabled: true         # HyDE: 本地RAG检索前生成英文假想答案提升召回
   # v8.15.3c: 假想答案输出上限 512→1024 —— v4-flash 默认思维链偶发把 512 预算
   # 吃光、返回空 content（8-21 19:45 连续两轮"生成结果为空"即此），1024 留余量
   # v8.16.3c: 实测真机 22:02 连空两次 → 关思维链(下) + 预算抬到 2048 双保险
   hyde_max_tokens: 2048          # v8.16.3: 结构化 HyDE（假想段落 200-500 词 + 3 多路查询 + 3-5 要点）输出上限
   hyde_thinking_off: true        # v8.17.18: 不发送 thinking 参数（api.deepseek.com 不接受，真机 TypeError 实证）；V3.2 类模型思维链默认关闭，不发送即等效关闭
+  # v9.4: 多粒度查询消融模式（论文实验2）：full=HyDE+MQ+SUM 全路（原默认）；raw=仅原始查询；
+  # hyde_only/mq_only/sum_only=仅单类；hyde_mq/hyde_sum=两类组合。见 search.py _compose_queries
+  # v9.4b（论文实证 2026-08-26）：生产默认改 raw——exp1/1b/1c/2 四重互证 full 多路
+  # （MRR 0.256）远劣于原始查询单路（0.557 生产实测/0.653 对齐英文上界）；归因：rerank
+  # 误用 HyDE 段（multi_retriever.py:728 防御已改）+ 多路池稀释。raw 还免 1 LLM 调用/查询。
+  query_mode: raw
   # v8.15 查询级结果缓存：相同/高度相似问题直接复用上次检索结果（毫秒级返回）。
   # 键 = 规范化 query + HyDE 开关 + 语料指纹(批次数+总块数)，语料增删/重启自动失效。
   rag_cache_enabled: true        # 总开关（默认开；不影响 HyDE/embed 内部缓存）
   rag_cache_size: 300            # LRU 上限（条）
   rag_cache_ttl_hours: 24        # 过期时间（小时）
-
-# 学术搜索配置（CrossRef/PubMed/Semantic Scholar/OpenAlex）
-# v8.15: 默认关闭联网学术检索（enabled: false）——PubMed 结果质量差（esummary 无摘要，
-# 模型易"补脑"）且每次检索增加 5~12s 网络等待。代码与工具保留不删，重开只需 enabled: true。
-academic_search:
-  enabled: false         # 总开关：false = academic_search/fetch_fulltext 不注册进工具列表
-  enabled_sources: []    # 保留：["pubmed"] 等；enabled=false 时忽略。重开时按需填回
-  timeout_per_source: 5  # 单源超时秒数
 
 # ── 联网搜索（v8.15，DeepSeek 原生 Responses API web_search tool）──
 # 「联网」开关在前端（输入框左下），由用户逐条开启/关闭，随请求下发到后端：
@@ -253,28 +255,10 @@ subagents:
 light:
   max_turns: 2                   # light 模式 supervisor 最大轮次（v8.3.3 接线）
 
-# ── Tool Tags (Agent tool 标签系统) ──
-tool_tags:
-  rag: [citrus_rag_search]
-  analysis_stat: [statistical_analysis, experimental_design]
-  file_io: [read_local_file, pdf_read]
-  web: [academic_search]
-  fulltext: [fetch_fulltext]
-  agent: [call_specialist]
-  orchestrator_tools: [call_specialist]
-
 # ── Tool Registry (YAML 注册替代代码注册) ──
 tools:
   registrations:
     - name: citrus_rag_search
-      category: rag
-      readonly: true
-      concurrency_key: rag
-    - name: academic_search
-      category: web
-      readonly: true
-      concurrency_key: web
-    - name: fetch_fulltext
       category: rag
       readonly: true
       concurrency_key: rag

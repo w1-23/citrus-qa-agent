@@ -102,9 +102,9 @@ def check_query_redundant(q: str, seen_queries: list) -> str:
 def _dedup_evidence_items(items: list) -> list:
     """按 DOI（无 DOI 按标题）去重，保持首次出现位置，去重碰撞时保留正文更丰富的条目。
 
-    v8.14: fetch_fulltext 抓到的全文证据与同 DOI 的学术摘要条目碰撞时，应保留正文
-    （text > abstract/snippet、更长优先），否则先到的摘要会把更完整证据挤掉。
-    对既有 RAG 路径仅产生「同论文取正文最长块而非首块」的良性差异。
+    v8.14 起用于检索/全文证据合并：同 DOI 条目碰撞时保留正文（text > abstract/snippet、
+    更长优先），否则先到的摘要会把更完整证据挤掉。对既有 RAG 路径仅产生
+    「同论文取正文最长块而非首块」的良性差异。
     """
     def _key(r):
         doi = str(r.get("doi") or "").strip().lower()
@@ -135,27 +135,10 @@ def _dedup_evidence_items(items: list) -> list:
     return out
 
 
-def _web_streak_step(streak: int, content: str) -> int:
-    """v8.15.3: 联网失败熔断状态机（纯函数可单测）。
-
-    - 内容以 [ERR_ 开头（真实工具错误：网络/空返回/参数）→ 失败 +1；
-    - 内容以 [ERR] 开头（熔断占位本身）→ 不变（不重复计失败，也不清零——
-      否则拦截自身会把 streak 复位、熔断失效且 web_unavailable 提示消失）；
-    - 其余（成功 / [DISABLED] / 其他占位）→ 清零。
-    """
-    rc = str(content or "")
-    if rc.startswith("[ERR_"):
-        return streak + 1
-    if rc.startswith("[ERR]"):
-        return streak
-    return 0
-
-
 def build_evidence_report(collected_artifacts: dict, query: str,
                           rag_search_count: int,
                           budget_blocked: int = 0,
                           dedup_blocked: int = 0,
-                          web_unavailable: bool = False,
                           ucr_first: bool = False) -> str:
     """确定性证据回执（v8.4.6，纯函数可单测）。
 
@@ -164,8 +147,9 @@ def build_evidence_report(collected_artifacts: dict, query: str,
       - 每条文献: 编号 / 标题 / 年份 / DOI + chunk 全文（reranker 已按相关性过滤）
       - 全文直接进上下文（追问时历史可见；总量受 retrieve-agent cap 控制）
       - v8.4.8: 回执明示预算/去重拦截次数（supervisor 可见检索被裁减）
-      - v8.15.3: web_unavailable=True 时回执明示联网已熔断（失败无感知的根治：
-        状态线下达给 supervisor，不再让模型盲猜"为什么不查网页"）
+      - v8.15.3: 联网失败详情与熔断收敛到 deepseek_web_search 工具层（请求级
+        contextvar + 预算复位），回执不再承担熔断状态机（v9.2 删除 web_unavailable
+        参数——运行路径恒不传值，死代码清理）
       - v8.16.2: 顺序重排——引用导引 + 网络综述 + [Wn] 条目**前置**、主文献移后。
         截尾防护：回执总量常超 40K cap（实测 rich 场景 47.6K），旧顺序下截断
         从文尾切掉的正是 [W1..W8] URL 清单与引用提示 → supervisor 无法挂 [Wn]
@@ -189,23 +173,16 @@ def build_evidence_report(collected_artifacts: dict, query: str,
     lines = [
         "## 检索回执（系统组装）",
         f"- 检索执行: {rag_search_count} 次",
-        f"- 去重后文献: {len(main)} 篇 / 学术源条目: {len(web)} 条",
+        f"- 去重后文献: {len(main)} 篇 / 联网条目: {len(web)} 条",
         f"- 检索目标: {str(query)[:200]}",
         "",
     ]
     if budget_blocked or dedup_blocked:
         lines.append(
             f"- [SEARCH_BUDGET] 预算拦截: {budget_blocked} 次检索未执行 "
-            f"（每轮 rag≤2/academic≤1，请求级 rag≤6）；"
+            f"（每轮 rag≤2，请求级 rag≤6）；"
             f"重复角度跳过: {dedup_blocked} 次。"
             "请基于已有证据收尾，或换实质不同的角度再补充。"
-        )
-        lines.append("")
-    if web_unavailable:
-        lines.append(
-            "- ⚠ 联网搜索本次请求已标记不可用（连续失败自动熔断，未再重试）。"
-            "时效/实时信息未能获取：基于本地证据收尾，或在最终回答中如实声明缺口，"
-            "不要继续尝试联网。"
         )
         lines.append("")
     lines.extend([
@@ -496,7 +473,6 @@ async def run_agent(
         # 防止模型"多轮刷角度"（实测每请求 rag 4~8 次、半数重复，检索段 60s+）
         _turn_rag, _turn_aca, _turn_web = 0, 0, 0
         _MAX_RAG_PER_TURN = 2
-        _MAX_ACA_PER_TURN = 1
         _MAX_WEB_PER_TURN = 1
         _MAX_RAG_PER_REQUEST = 6
         exec_calls: list = []
@@ -528,16 +504,6 @@ async def run_agent(
                     continue
                 _turn_rag += 1
                 _seen_queries.append(q)
-            elif agent_name == "retrieve-agent" and _tname == "academic_search":
-                if _turn_aca >= _MAX_ACA_PER_TURN:
-                    tc_id = tc_ids[idx] if idx < len(tc_ids) else extract_tc_id(tc)
-                    placeholder_results[idx] = ToolMessage(
-                        content="[SEARCH_BUDGET] 每轮学术源检索上限 1 次，该检索未执行。",
-                        tool_call_id=tc_id, name="academic_search",
-                        artifact={"main_results": [], "web_results": []})
-                    logger.info(f"[AgentRunner] {agent_name} 每轮学术检索上限拦截")
-                    continue
-                _turn_aca += 1
             exec_calls.append((idx, tc))
 
         t_tool = time.perf_counter()
@@ -627,7 +593,10 @@ async def run_agent(
             _uniq_now = len(_dedup_evidence_items(
                 list(collected_artifacts.get("main_results") or [])))
             _new_ratio = (_uniq_now - _prev_unique) / max(_uniq_now, 1)
-            if _prev_unique >= 6 and _new_ratio < 0.25:
+            # v9.4 (P0#2): 早停参数化——原硬编码 6 / 0.25，现由 config.yaml
+            # retrieval.early_stop_min_evidence / early_stop_new_ratio 控制（默认不变）
+            if (_prev_unique >= settings.EARLY_STOP_MIN_EVIDENCE
+                    and _new_ratio < settings.EARLY_STOP_NEW_RATIO):
                 logger.info(
                     f"[AgentRunner] retrieve-agent 边际收益过低 "
                     f"(新增 {_uniq_now - _prev_unique}/{_uniq_now})，代码收敛提前结束")
@@ -815,7 +784,6 @@ def _resolve_tool_names(agent_name: str) -> list[str]:
         # 工具层（请求级 contextvar + 前端开关短路）。
         "retrieve-agent": [
             "citrus_rag_search",
-            "academic_search", "fetch_fulltext",
         ],
         "write-agent": ["write_local_file"],
         "analyze-agent": [
@@ -823,10 +791,6 @@ def _resolve_tool_names(agent_name: str) -> list[str]:
         ],
     }
     names = mapping.get(agent_name, [])
-    # v8.15: 学术联网门控——academic_search/fetch_fulltext 随 ACADEMIC_ENABLED
-    # （默认关，代码保留不删）。
-    if not getattr(settings, "ACADEMIC_ENABLED", False):
-        names = [n for n in names if n not in ("academic_search", "fetch_fulltext")]
     return names
 
 

@@ -110,7 +110,7 @@ def main():
             bm25 = dedupe(r.bm25.top_k(q, k=settings.TOP_K_BM25))[:settings.TOP_K_BM25]
             fused = rrf_fuse(dedupe(dense_docs), dedupe(bm25),
                              k=settings.RRF_K, weights=[1.0, 1.0])
-            pool20 = fused[: settings.TOP_K_FINAL * 2]
+            pool20 = fused[: settings.CANDIDATE_WINDOW]
             pool_ids = [i for i, _ in pool20]
             cands = [r._chunk_full(i) for i in pool_ids]
             reranked = r.reranker.rerank(q, cands, top_k=settings.TOP_K_FINAL)

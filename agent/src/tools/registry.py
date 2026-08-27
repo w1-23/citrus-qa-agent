@@ -126,9 +126,8 @@ def cleanup_offload_files() -> int:
 # v8.4.3: 只读/分析类工具白名单（注册表未初始化时替代 spec 放行，
 # 与 config.yaml tools.registrations 的 readonly 语义一致）
 _READONLY_TOOLS = frozenset({
-    "citrus_rag_search", "academic_search", "pdf_read",
+    "citrus_rag_search", "pdf_read",
     "read_local_file", "statistical_analysis", "experimental_design",
-    "fetch_fulltext",
 })
 
 
@@ -483,14 +482,8 @@ def init_tool_registry():
             if registrations:
                 for reg in registrations:
                     name = reg.get("name")
-                    # v8.15: 学术联网工具门控——academic_search/fetch_fulltext 随
-                    # ACADEMIC_ENABLED（默认关，代码保留不删）。deepseek_web_search
-                    # 始终注册：是否联网由前端「联网」开关逐请求决定（工具执行层短路），
-                    # 不再以 config web_search.enabled 作为注册门槛。
-                    if name in ("academic_search", "fetch_fulltext") and \
-                            not getattr(settings, "ACADEMIC_ENABLED", False):
-                        logger.info(f"[ToolRegistry] 跳过联网学术工具 {name}（academic_search.enabled=false）")
-                        continue
+                    # deepseek_web_search 始终注册：是否联网由前端「联网」开关逐请求决定
+                    # （工具执行层短路），不以 config web_search.enabled 作为注册门槛。
                     tool = _TOOL_REGISTRY_BY_NAME.get(name)
                     if tool:
                         register_tool(tool, category=reg.get("category", "general"),
