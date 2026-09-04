@@ -18,7 +18,7 @@ import uuid
 
 from langchain_core.messages import AIMessage, SystemMessage
 
-from src.core.evidence import (src_of, renumber_refs,
+from src.core.evidence import (src_of, renumber_refs, clean_doi,
                                render_evidence, EVIDENCE_SNIPPET_MAX_CHARS)
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,7 @@ def count_unique_docs(main_results: list) -> int:
     seen = set()
     n = 0
     for r in main_results:
-        doi = (r.get("doi") or "").strip().lower()
+        doi = clean_doi(r.get("doi")).lower()
         if doi:
             if doi in seen:
                 continue
@@ -59,7 +59,7 @@ def dedup_by_doi(rows) -> list:
     seen = set()
     out = []
     for r in rows:
-        doi = (r.get("doi") or "").strip()
+        doi = clean_doi(r.get("doi"))
         if doi and doi in seen:
             continue
         seen.add(doi)
@@ -81,10 +81,12 @@ def build_cited_refs(deduped_main: list, all_web_results: list,
             "ref_id": i + 1,
             "type": "main",
             "source": src_of(r),                       # v8.15: rag|ucr
-            "doi": r.get("doi", "N/A"),
+            "doi": clean_doi(r.get("doi")) or "N/A",
             "title": r.get("title", r.get("name", "Untitled")),
             "section_name": r.get("section_name", ""),
-            "text_preview": (r.get("abstract") or r.get("snippet") or "")[:300],
+            # v9.4.5: 预览优先模型实际依据的 chunk 正文（abstract 是出版方摘要，
+            # 用户拿它对不上正文里的 chunk 级论断，制造"引用错位"观感）
+            "text_preview": (r.get("text") or r.get("abstract") or r.get("snippet") or "")[:300],
             "score": r.get("score", r.get("rerank_score", 0)) or 0,
             "year": r.get("year", ""),
             "authors": r.get("authors", ""),
@@ -304,7 +306,7 @@ async def run_save_node(state: dict, *, log_tag: str,
         if report_text or main_results or (include_web and web_results):
             evidence = [
                 {
-                    "doi": r.get("doi", ""),
+                    "doi": clean_doi(r.get("doi")),
                     "chunk_id": f"{r.get('paper_id', '')}:{r.get('chunk_index', '')}",
                     "title": str(r.get("title", ""))[:150],
                     "score": r.get("score", r.get("rerank_score", 0)) or 0,

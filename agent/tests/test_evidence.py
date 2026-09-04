@@ -1,10 +1,25 @@
 # -*- coding: utf-8 -*-
 """v8.13-b4c 证据单例 + render_evidence 单元测试."""
 from src.core.evidence import (
-    render_evidence, evidence_id, renumber_refs,
+    render_evidence, evidence_id, renumber_refs, clean_doi,
     canonical_evidence_items, dedup_evidence_items, src_of,
     EVIDENCE_TOOL_MAX_CHARS, EVIDENCE_SNIPPET_MAX_CHARS, EVIDENCE_RENDER_MAX_CHARS,
 )
+
+
+def test_clean_doi_v945():
+    """v9.4.5 实跑发现语料 DOI 尾带脏引号 → 链接失效 + 去重键分裂，验证清洗。"""
+    assert clean_doi('10.1186/s12870-025-07372-2"') == "10.1186/s12870-025-07372-2"
+    assert clean_doi('"10.1371/journal.ppat.1010071.g001"') == "10.1371/journal.ppat.1010071.g001"
+    assert clean_doi("  10.1007/s11032-024-01517-1  ") == "10.1007/s11032-024-01517-1"
+    assert clean_doi("N/A") == "" and clean_doi(None) == "" and clean_doi("") == ""
+    # 内部字符（斜杠/括号/连字符）不动，只剥边缘包裹符
+    assert clean_doi("10.1007/(2020)02089-8") == "10.1007/(2020)02089-8"
+    # 脏/净同 DOI 归一后合并为一条，保留正文更丰富者（大小写亦归一）
+    rows = [{"doi": '10.1371/x"', "title": "A", "text": "a" * 50},
+            {"doi": "10.1371/X", "title": "A", "text": "b"}]
+    out = dedup_evidence_items(rows)
+    assert len(out) == 1 and out[0]["text"] == "a" * 50
 
 
 def test_evidence_id_stable_key():

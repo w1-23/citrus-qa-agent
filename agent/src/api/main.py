@@ -936,7 +936,7 @@ async def session_citations(session_id: str):
     """
     import sqlite3
     import json as _json
-    from src.core.evidence import normalize_source_key
+    from src.core.evidence import normalize_source_key, clean_doi
     groups: dict[str, list] = {"rag": [], "ucr": [], "web": [], "historical": []}
     seen: dict[str, set] = {"rag": set(), "ucr": set(), "web": set()}
     num_i = 0
@@ -965,7 +965,7 @@ async def session_citations(session_id: str):
             # v9.4: 非内置来源（paper1/Citrus varieties1 等批次）按规范化分组键
             # 归组（paper1→paper），与 live 侧栏 srcKey 同口径；旧历史条目 ucr/rag/web 原样
             group = src if src in ("rag", "ucr", "web") else normalize_source_key(src)
-            doi = str(e.get("doi") or "").strip()
+            doi = clean_doi(e.get("doi"))
             title = str(e.get("title") or "").strip()[:150]
             key = (doi or title or str(e.get("chunk_id") or "")).strip()
             if not key or key in seen.setdefault(group, set()):
@@ -997,7 +997,7 @@ async def session_citations(session_id: str):
                 "ref_id": f"H{i}",
                 "type": "historical",
                 "source": str(_h.get("source") or "rag"),
-                "doi": str(_h.get("doi") or "N/A"),
+                "doi": clean_doi(_h.get("doi")) or "N/A",
                 "url": str(_h.get("url") or ""),
                 "title": str(_h.get("title") or "")[:150],
                 "year": str(_h.get("year") or ""),

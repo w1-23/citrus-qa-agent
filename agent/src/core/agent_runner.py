@@ -19,7 +19,7 @@ from langchain_core.messages import (
 from langchain_openai import ChatOpenAI
 
 from src.config import settings, get_deepseek_model
-from src.core.evidence import render_evidence, EVIDENCE_RENDER_MAX_CHARS, src_of, source_tag, is_variety_source, dedup_evidence_items, canonical_evidence_items
+from src.core.evidence import render_evidence, EVIDENCE_RENDER_MAX_CHARS, src_of, source_tag, is_variety_source, dedup_evidence_items, canonical_evidence_items, clean_doi
 from src.core.agent_loop import tc_id as extract_tc_id, last_message_content, invoke_llm_with_retry, emit_llm_usage
 from src.prompts.loader import assemble_agent_prompt
 from src.tools import _TOOL_REGISTRY_BY_NAME
@@ -192,7 +192,7 @@ def build_evidence_report(collected_artifacts: dict, query: str,
             if len(text) > 600:
                 text = text[:600] + " …"
             lines.append(f"[W{i}] {r.get('title', r.get('name', 'Untitled'))} | "
-                         f"DOI/URL: {r.get('doi', r.get('url', 'N/A'))}")
+                         f"DOI/URL: {clean_doi(r.get('doi')) or r.get('url') or 'N/A'}")
             if text:
                 lines.append(f"    片段: {text}")
     if not main and not web:
@@ -207,7 +207,7 @@ def build_evidence_report(collected_artifacts: dict, query: str,
         src = _src_tag(r)
         lines.append(
             f"[{i}][{src}] {r.get('title', r.get('name', 'Untitled'))} | "
-            f"{r.get('year', 'N/A')} | DOI: {r.get('doi') or r.get('source_type') or 'N/A'} | "
+            f"{r.get('year', 'N/A')} | DOI: {clean_doi(r.get('doi')) or r.get('source_type') or 'N/A'} | "
             f"score: {r.get('score', r.get('rerank_score', 0)) or 0}")
         if text:
             quoted = "\n".join(f"> {ln}" for ln in text.splitlines())

@@ -249,15 +249,35 @@ def render_evidence(r, *, max_chars: int = EVIDENCE_RENDER_MAX_CHARS) -> str:
 # canonical_evidence_items 是回执与侧栏共用唯一入口（同池同序同 ucr_first）。
 # ════════════════════════════════════════════════════════════════
 
+def clean_doi(raw) -> str:
+    """DOI 字段清洗（v9.4.5，实跑发现语料入库残留脏字符）。
+
+    实测侧栏出现过 `10.1186/s12870-025-07372-2"` / `10.1371/journal.ppat.1010071.g001"`
+    （尾部英文引号，入库 CSV/JSON 解析尾巴）→ DOI 超链接打不开；且脏 DOI 与干净
+    DOI 字符串不相等会让同篇论文的 chunk 去重键分裂、同一篇以两条出现。
+
+    规则：str 化 → strip → 循环剥除首尾成组/单边的引号与常见包裹符 → 小写留给
+    调用方（展示位保留原大小写，键归一另做）。空值返回 ""。
+    """
+    s = str(raw or "").strip()
+    if not s or s.upper() in ("N/A", "NONE", "NULL"):
+        return ""
+    # 反复剥除首尾的引号/空白/包裹符号（仅剥边缘，不动 DOI 内部字符）
+    while s and (s[0] in "\"'`“”‘’([{<）】>" or s[-1] in "\"'`“”‘’)]}>,;"):
+        s = s.strip("\"'`“”‘’([{<>）】) ,;")
+    return s
+
+
 def dedup_evidence_items(items: list) -> list:
     """按 DOI（无 DOI 按标题）去重，保持首次出现位置，去重碰撞时保留正文更丰富的条目。
 
     v8.14 起用于检索/全文证据合并（原 agent_runner._dedup_evidence_items，
     v9.4.2 上移为本模块公开函数）：同 DOI 条目碰撞时保留正文（text > abstract/snippet、
     更长优先），否则先到的摘要会把更完整证据挤掉。
+    v9.4.5: 去重键用 clean_doi 归一——脏引号/大小写不再让同篇论文分裂成两条。
     """
     def _key(r):
-        doi = str(r.get("doi") or "").strip().lower()
+        doi = clean_doi(r.get("doi")).lower()
         if doi:
             return ("d", doi)
         return ("t", str(r.get("title") or "").strip().lower()[:80])
