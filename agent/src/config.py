@@ -157,7 +157,7 @@ class Settings(BaseSettings):
         # ── Version (v8.4.5: 版本单源——UI/健康检查/文档以此为准) ──
     # v9.4.4: 应用版本与引用编号池修复（renumber 死号清除/统一编号池/前端 remap
     # 双重应用/缓存防护）合并升版；侧栏 ref_pool 徽标由本字段派生，单源不漂移
-    VERSION: str = "9.4.5"
+    VERSION: str = "9.4.6"
 
     # ── Context Engineering (阶段1: 静态前缀灰度开关) ──
     # true = SystemMessage 字节级稳定（format 指南/策略卡片/skills 移出前缀，
