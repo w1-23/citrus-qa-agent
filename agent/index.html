@@ -1185,7 +1185,7 @@ footer {
 <header>
   <div class="logo-mark">C</div>
   <h1>Citrus QA Agent</h1>
-  <span class="version-badge" id="versionBadge">v9.3.0</span>
+  <span class="version-badge" id="versionBadge">v9.4.4</span>
   <div class="header-actions">
     <button class="ctx-circle-btn" id="ctxCircleBtn" onclick="toggleCtxDrawer()" title="上下文用量">
       <svg viewBox="0 0 36 36" width="22" height="22">
@@ -1236,7 +1236,7 @@ footer {
       <div class="message bot">
         <div class="avatar">◆</div>
         <div class="content">
-          您好，我是 <span id="welcomeVersion">Citrus QA Agent v9.3.0</span>。<br>
+          您好，我是 <span id="welcomeVersion">Citrus QA Agent v9.4.4</span>。<br>
           <span style="color:var(--text-muted);font-size:13px">本地 RAG 检索（文献+UCR 品种库） · 文献综述写作 · 实验设计 · 文件读写</span>
         </div>
       </div>
@@ -1527,7 +1527,7 @@ function loadRuntimeConfig() {
 }
 /* v8.4.5: 版本单源——后端 /api/v2/config.version 下发，静态文案仅为离线回退 */
 function _appVersion() {
-  return (_runtimeConfig && _runtimeConfig.version) || '9.3.0';
+  return (_runtimeConfig && _runtimeConfig.version) || '9.4.4';
 }
 function applyAppVersion() {
   var v = _appVersion();

@@ -1008,7 +1008,7 @@ async def session_citations(session_id: str):
         logger.debug(f"[API] session citations historical failed: {e}")
     return {"session_id": session_id, "groups": groups,
             "count": sum(len(v) for v in groups.values()),
-            "ref_pool": "v9.4.4"}
+            "ref_pool": f"v{settings.VERSION}"}
 
 
 # ── v8.4.9 会话持久化：历史对话读取（前端刷新/关闭重开后恢复渲染）──

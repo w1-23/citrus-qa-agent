@@ -1021,7 +1021,7 @@ def _assemble_supervisor_answer(*, answer, all_main_results, all_web_results,
         "total": len(cited_refs),
         # v9.4.4: 死编号清单下发前端清除正文残留 + 版本标记
         "dropped": dropped_refs,
-        "ref_pool": "v9.4.4",
+        "ref_pool": f"v{settings.VERSION}",
     }
 
     if answer:

@@ -154,8 +154,10 @@ class Settings(BaseSettings):
     # v8.4.5: ask 模式授权等待秒数（前端卡片未回应时超时按拒绝处理）
     PERMISSION_WAIT_SEC: int = Field(default_factory=lambda: _yaml_val("permission", "wait_sec", default=90))
 
-    # ── Version (v8.4.5: 版本单源——UI/健康检查/文档以此为准) ──
-    VERSION: str = "9.4.0"
+        # ── Version (v8.4.5: 版本单源——UI/健康检查/文档以此为准) ──
+    # v9.4.4: 应用版本与引用编号池修复（renumber 死号清除/统一编号池/前端 remap
+    # 双重应用/缓存防护）合并升版；侧栏 ref_pool 徽标由本字段派生，单源不漂移
+    VERSION: str = "9.4.4"
 
     # ── Context Engineering (阶段1: 静态前缀灰度开关) ──
     # true = SystemMessage 字节级稳定（format 指南/策略卡片/skills 移出前缀，

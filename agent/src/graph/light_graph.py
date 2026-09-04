@@ -340,7 +340,7 @@ async def light_supervisor_node(state: AgentState) -> dict:
 
     references_data = {"cited": cited_refs, "uncited": [],
                        "remap": ref_remap, "total": len(cited_refs),
-                       "dropped": dropped_refs, "ref_pool": "v9.4.4"}
+                       "dropped": dropped_refs, "ref_pool": f"v{settings.VERSION}"}
 
     # v8.15.2: 不再注入历史证据引用（H1..Hn）——侧栏只显示本轮回答真实引用的证据，
     # 防止侧栏膨胀。（原 v8.4.6 F2 行为已移除）
