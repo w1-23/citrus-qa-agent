@@ -114,14 +114,26 @@ def renumber_and_sync_trace(messages: list, answer: str, cited_refs: list) -> tu
     AIMessage.content 更新为重排后文本——save 节点按
     ``trace[-1].content == state.answer`` 判重，不同步会因编号差异追加重复消息。
 
-    返回 (new_answer, new_cited, remap)。
+    返回 (new_answer, new_cited, remap, dropped)。
+    dropped: v9.4.4 新增——被从正文清除的死编号清单（无映射编号），随
+    references_data 下发前端，与 remap 互为补充：remap 负责"旧号→新号"重写，
+    dropped 负责"删除残留标记"（前端只按 remap 重写会留下正文死号，如
+    [13]/[W3]）。
     """
     ref_remap: dict = {}
+    dropped: list = []
     _orig = answer
     try:
-        answer, cited_refs, ref_remap = renumber_refs(answer, cited_refs)
+        answer, cited_refs, ref_remap, dropped = renumber_refs(answer, cited_refs)
+        if dropped:
+            logger.warning(
+                f"[renumber] 正文 {len(dropped)} 个引用编号无法解析、已从正文移除"
+                f"（编号一致性保证 v9.4.1）: {dropped}")
     except Exception as e:
-        logger.debug(f"renumber_refs skipped: {e}")
+        # v9.4.3: 静默跳过会复现"原始编号直出"故障——升级为 ERROR + 堆栈，
+        # 任何一次 renumber 失败都必须在日志里现形
+        logger.error(f"[renumber] renumber_refs FAILED (编号一致性失效风险): {e}",
+                     exc_info=True)
     if answer != _orig:
         try:
             for _m in messages:
@@ -132,7 +144,7 @@ def renumber_and_sync_trace(messages: list, answer: str, cited_refs: list) -> tu
                     break
         except Exception:
             pass
-    return answer, cited_refs, ref_remap
+    return answer, cited_refs, ref_remap, sorted(set(dropped))
 
 
 def last_message_content(messages: list, mode: str = "aimessage") -> str:

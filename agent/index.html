@@ -1964,6 +1964,7 @@ function loadWorkspaceFiles() {
    点击不可追踪）。后端 /citations 返回 groups，恢复后按 4 组手风琴渲染；
    新提问触发的实时轮次（roundHistory）到达后优先显示实时轮次结构。 */
 var _restoredGroups = null;   // {rag:[], ucr:[], web:[], historical:[]}（刷新恢复视图）
+var _restoredRefPool = null;  // v9.4.3: 恢复接口版本标记（自证编号池版本）
 
 function restoreSessionCitations() {
   var box = document.getElementById('sidebar-content');
@@ -1996,6 +1997,7 @@ function restoreSessionCitations() {
       }
       _citationsRetry = 0;
       _restoredGroups = groups;
+      _restoredRefPool = (d && d.ref_pool) || null;
       renderRoundSidebar();
     }).catch(function () { /* 保持现状，不打扰 */ });
 }
@@ -2629,23 +2631,31 @@ async function sendMsg(isFollowUp) {
         // 侧栏与正文编号一致（替代 v8.17.3 前端 W 专用压缩）。
         var _cited0 = data.cited || [];
         var _remap = data.remap || {};
-        if (Object.keys(_remap).length > 0) {
-          for (var _ci = 0; _ci < _cited0.length; _ci++) {
-            var _oldR = _cited0[_ci] && _cited0[_ci].ref_id;
-            if (_oldR != null && _remap[String(_oldR)] != null) {
-              _cited0[_ci].ref_id = _remap[String(_oldR)];
-            }
+        var _dropped = (data.dropped || []).map(String);
+        // v9.4.4（关键修复）: 后端 payload 的 ref_id 已是重排后的最终编号，
+        // 前端**不再**按 remap 改写 ref_id——历史 bug：把 remap 二次套用到
+        // 已重排编号上，与"已是新号的号"碰撞 → 不同条目撞号/跳号（[4][9]、
+        // [4][7]、[5]/[W4] 三次实测的统一根因）。remap 只用于重写正文旧编号；
+        // dropped（后端清除的无映射死号）同步从正文移除（如 [13]/[W3]）。
+        var _applied = (window._remapAppliedRounds = window._remapAppliedRounds || {});
+        if ((Object.keys(_remap).length > 0 || _dropped.length > 0)
+            && !_applied[currentRoundId]) {
+          if (Object.keys(_remap).length > 0) {
+            fullText = _rewriteRefsByMap(fullText, _remap);
           }
-          // 正文引用同步重写（text 流式已完成，fullText 已完整）
-          fullText = _rewriteRefsByMap(fullText, _remap);
+          for (var _di = 0; _di < _dropped.length; _di++) {
+            var _tok = String(_dropped[_di]).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            fullText = fullText.replace(new RegExp('\\[' + _tok + '\\]', 'g'), '');
+          }
           renderAnswer();
+          _applied[currentRoundId] = 1;
         }
         roundHistory.push({roundId:currentRoundId,query:currentQuery,cited:_cited0,uncited:data.uncited||[],historical:data.historical||[]});
         renderRoundSidebar(); citationsDiv.style.display='';
         var cited = _cited0;
         if (cited.length>0) {
           var c=document.createElement('div'); c.style.cssText='margin-top:10px;padding-top:10px;border-top:1px solid var(--border-hairline)';
-          c.innerHTML='<div style="font-size:11px;color:var(--text-muted);margin-bottom:5px">引用 ('+cited.length+'篇)</div>';
+          c.innerHTML='<div style="font-size:11px;color:var(--text-muted);margin-bottom:5px">引用 ('+cited.length+'篇)'+(data.ref_pool?' · '+data.ref_pool:'')+'</div>';
           // v8.15.2: 徽章条按 ref_id 升序（此前按回答出现顺序显得混乱）
           var order = _refIdSort(cited);
           for (var k=0;k<order.length;k++) c.innerHTML+='<span style="display:inline-block;font-family:var(--font-mono);font-size:10px;background:var(--success-glow);color:var(--success);padding:1px 5px;border-radius:3px;margin:2px;font-weight:600">['+escapeHtml(order[k].ref_id)+']</span>';
@@ -2805,7 +2815,7 @@ async function sendMsg(isFollowUp) {
     var order = ['rag', 'ucr', 'web', 'historical'].concat(dyn);
     var total = 0;
     for (var g = 0; g < order.length; g++) total += (_restoredGroups[order[g]] || []).length;
-    citationCount.textContent = String(total);
+    citationCount.textContent = String(total) + (_restoredRefPool ? ' · ' + _restoredRefPool : '');
     var html = '';
     var firstOpen = true;
     for (var gi = 0; gi < order.length; gi++) {

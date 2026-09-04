@@ -329,15 +329,18 @@ async def light_supervisor_node(state: AgentState) -> dict:
 
     elapsed = (time.perf_counter() - t0) * 1000
 
-    deduped_main = dedup_by_doi(all_main_results)
+    # v9.4.2: 单一证据编号池（与回执同池同序；light 无品种聚拢意图传 False）
+    from src.core.evidence import canonical_evidence_items
+    deduped_main = canonical_evidence_items(all_main_results, False)
 
     # v9.2: 引用回执装配 + 统一重排收敛共享原语（agent_loop，web 槽位 light=5）
     cited_refs = build_cited_refs(deduped_main, all_web_results, web_slot=5)
-    answer, cited_refs, ref_remap = renumber_and_sync_trace(
+    answer, cited_refs, ref_remap, dropped_refs = renumber_and_sync_trace(
         messages, answer, cited_refs)
 
     references_data = {"cited": cited_refs, "uncited": [],
-                       "remap": ref_remap, "total": len(cited_refs)}
+                       "remap": ref_remap, "total": len(cited_refs),
+                       "dropped": dropped_refs, "ref_pool": "v9.4.4"}
 
     # v8.15.2: 不再注入历史证据引用（H1..Hn）——侧栏只显示本轮回答真实引用的证据，
     # 防止侧栏膨胀。（原 v8.4.6 F2 行为已移除）

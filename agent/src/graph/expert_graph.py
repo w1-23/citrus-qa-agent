@@ -952,14 +952,44 @@ def _assemble_supervisor_answer(*, answer, all_main_results, all_web_results,
     """supervisor 循环后块：DOI 去重装配 cited_refs / 历史证据 / 引用校验 / 诊断日志。"""
     elapsed = (time.perf_counter() - t0) * 1000
 
-    deduped_main = dedup_by_doi(all_main_results)
+    # v9.4.2: 单一证据编号池——侧栏引用列表与检索回执同去重、同序（同函数
+    # dedup_evidence_items + 同 ucr_first 判定 _is_variety_intent(query)），
+    # 杜绝"模型写 [n] 可解析却指错文献"（此前后台 dedup_by_doi ≠ 回执去重）。
+    from src.core.evidence import canonical_evidence_items
+    try:
+        from src.tools.search import _is_variety_intent
+        _ucr_first = _is_variety_intent(state.get("query") or "")
+    except Exception:
+        _ucr_first = False
+    deduped_main = canonical_evidence_items(all_main_results, _ucr_first)
 
     # v9.2: 引用回执装配 + 统一重排收敛共享原语（agent_loop.build_cited_refs /
     # renumber_and_sync_trace——数字 1..k、W W1..Wm、H H1..Hp；remap 随
     # references_data 下发前端重写正文；轨迹同步防 save 重复消息）
-    cited_refs = build_cited_refs(deduped_main, all_web_results, web_slot=10)
-    answer, cited_refs, ref_remap = renumber_and_sync_trace(
+    # v9.4.2: web 槽位 10→14，与回执 [Wn] 上限 web[:14] 对齐（此前模型可引
+    # W11..W14 但侧栏只解析 W1..W10 → 死编号）
+    cited_refs = build_cited_refs(deduped_main, all_web_results, web_slot=14)
+    answer, cited_refs, ref_remap, dropped_refs = renumber_and_sync_trace(
         messages, answer, cited_refs)
+
+    # v9.4.3: 编号不变量自检（防静默回退/旧代码混淆）——cited ref_id 必须
+    # 组内唯一且连续（1..k、W1..Wm、H1..Hp）；违反即 ERROR 现形。
+    try:
+        from collections import Counter
+        _ids = [str(r.get("ref_id")) for r in cited_refs]
+        _dups = sorted(k for k, v in Counter(_ids).items() if v > 1)
+        _nums = sorted(int(i) for i in _ids if i.isdigit())
+        _contig = (not _nums or _nums == list(range(1, len(_nums) + 1)))
+        _ws = sorted(int(i[1:]) for i in _ids if i[:1] == "W" and i[1:].isdigit())
+        _wcontig = (not _ws or _ws == list(range(1, len(_ws) + 1)))
+        if _dups or not _contig or not _wcontig:
+            logger.error(
+                f"[ExpertGraph] 引用编号不变量违反: dups={_dups} contig={_contig} "
+                f"wcontig={_wcontig} ids={_ids[:40]}")
+        else:
+            logger.debug(f"[ExpertGraph] ref invariant OK (n={len(_ids)})")
+    except Exception as _e:
+        logger.debug(f"[ExpertGraph] ref invariant check skipped: {_e}")
 
     # v8.17.17（用户决策）：恢复历史引用进侧栏——与 web/rag/ucr 同级手风琴展示。
     # v8.15.2 曾移除（防侧栏膨胀）；用户实测：历史引用被"踢出"侧栏，跨轮信息只能
@@ -989,6 +1019,9 @@ def _assemble_supervisor_answer(*, answer, all_main_results, all_web_results,
         "historical": historical_refs,
         "remap": ref_remap,
         "total": len(cited_refs),
+        # v9.4.4: 死编号清单下发前端清除正文残留 + 版本标记
+        "dropped": dropped_refs,
+        "ref_pool": "v9.4.4",
     }
 
     if answer:

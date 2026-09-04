@@ -93,24 +93,26 @@ def test_v92_renumber_sync_trace():
     answer = "HLB 的致病机制见 [4]，防治见 [2]。"
     trace = [HumanMessage(content="问"), AIMessage(content=answer)]
 
-    new_answer, new_cited, remap = renumber_and_sync_trace(trace, answer, cited)
+    new_answer, new_cited, remap, dropped = renumber_and_sync_trace(trace, answer, cited)
     check("重排: [4][2] → [1][2]", new_answer == "HLB 的致病机制见 [1]，防治见 [2]。", new_answer)
     check("remap 正确", remap == {"2": "2", "4": "1"}, remap)
+    check("无死编号被清除", dropped == [], dropped)
     check("轨迹内 AIMessage 已同步", trace[-1].content == new_answer, trace[-1].content)
     check("save 判重不变量: trace[-1] == 返回 answer", trace[-1].content == new_answer)
 
     # 已连续编号 → 文本原样、轨迹不动（identity remap 属 renumber 正常输出）
     stable = "结论见 [1] 与 [2]。"
     trace2 = [AIMessage(content=stable)]
-    a2, c2, r2 = renumber_and_sync_trace(trace2, stable, cited)
+    a2, c2, r2, d2 = renumber_and_sync_trace(trace2, stable, cited)
     check("已连续编号文本原样", a2 == stable, a2)
     check("无改动时不触碰轨迹对象", trace2[0].content == stable)
     check("identity remap 不触发重写", r2 == {"1": "1", "2": "2"}, r2)
+    check("无死编号", d2 == [], d2)
 
     # 与 evidence.renumber_refs 纯函数一致性（共享 _extract_ref_order 行为锚定）
-    p_answer, p_cited, p_remap = renumber_refs(answer, cited)
-    a3, c3, r3 = renumber_and_sync_trace([], answer, cited)
-    check("共享重排逻辑一致", a3 == p_answer and r3 == p_remap)
+    p_answer, p_cited, p_remap, p_dropped = renumber_refs(answer, cited)
+    a3, c3, r3, d3 = renumber_and_sync_trace([], answer, cited)
+    check("共享重排逻辑一致", a3 == p_answer and r3 == p_remap and d3 == p_dropped)
 
 
 # ── VF-103 检索统计 original_query 接线（HyDE 误杀修复）────────────

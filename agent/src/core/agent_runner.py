@@ -19,7 +19,7 @@ from langchain_core.messages import (
 from langchain_openai import ChatOpenAI
 
 from src.config import settings, get_deepseek_model
-from src.core.evidence import render_evidence, EVIDENCE_RENDER_MAX_CHARS, src_of, source_tag, is_variety_source
+from src.core.evidence import render_evidence, EVIDENCE_RENDER_MAX_CHARS, src_of, source_tag, is_variety_source, dedup_evidence_items, canonical_evidence_items
 from src.core.agent_loop import tc_id as extract_tc_id, last_message_content, invoke_llm_with_retry, emit_llm_usage
 from src.prompts.loader import assemble_agent_prompt
 from src.tools import _TOOL_REGISTRY_BY_NAME
@@ -67,6 +67,7 @@ def _truncate_context_blocks(context: str, max_chars: int = 24000) -> str:
 
 # ── v8.4.6 检索代码级去重与确定性证据回执（管道而非漏斗）──
 
+
 def _normalize_query_tokens(q: str) -> list:
     """查询归一化：小写 + 提取中英数字 token 排序（用于重复检索判定）。"""
     import re
@@ -100,39 +101,11 @@ def check_query_redundant(q: str, seen_queries: list) -> str:
 
 
 def _dedup_evidence_items(items: list) -> list:
-    """按 DOI（无 DOI 按标题）去重，保持首次出现位置，去重碰撞时保留正文更丰富的条目。
+    """v9.4.2 已迁移至 src.core.evidence.dedup_evidence_items（单一编号池要求）。
 
-    v8.14 起用于检索/全文证据合并：同 DOI 条目碰撞时保留正文（text > abstract/snippet、
-    更长优先），否则先到的摘要会把更完整证据挤掉。对既有 RAG 路径仅产生
-    「同论文取正文最长块而非首块」的良性差异。
+    保留本别名为兼容过渡；新代码一律调用 evidence.dedup_evidence_items。
     """
-    def _key(r):
-        doi = str(r.get("doi") or "").strip().lower()
-        if doi:
-            return ("d", doi)
-        return ("t", str(r.get("title") or "").strip().lower()[:80])
-
-    def _priority(r):
-        text = str(r.get("text") or "").strip()
-        fallback = str(r.get("abstract") or r.get("snippet") or "").strip()
-        return (bool(text), bool(fallback), len(text or fallback))
-
-    out, seen = [], {}
-    for r in items:
-        if not isinstance(r, dict):
-            continue
-        k = _key(r)
-        if not k[1]:
-            continue
-        if k in seen:
-            i, prev = seen[k]
-            if _priority(r) > _priority(prev):
-                out[i] = r
-                seen[k] = (i, r)
-            continue
-        seen[k] = (len(out), r)
-        out.append(r)
-    return out
+    return dedup_evidence_items(items)
 
 
 def build_evidence_report(collected_artifacts: dict, query: str,
@@ -155,20 +128,17 @@ def build_evidence_report(collected_artifacts: dict, query: str,
         从文尾切掉的正是 [W1..W8] URL 清单与引用提示 → supervisor 无法挂 [Wn]
         → 回答概括化（v8.16.2 实证）。重排后截断只会损失主文献尾部,
         必读的 [Wn] 清单与编号导引恒在截断线之前；cap 同步 40000→60000。
-      - v8.17 修订: ucr_first=True 时主文献按来源**聚拢置前**——UCR 品种库条目
-        （[UCR] 前缀）稳定分区到回执 [n] 清单前部（组内保序，非按分重排），
-        supervisor 更易优先引用；**仅展示层排序，不改检索融合**（混合库无物理
-        分区，两阶段检索路由在架构上不可行，见修正1）。
+      - v8.17 修订→v9.4.2 统一: ucr_first=True 时主文献按来源**聚拢置前**（UCR
+        品种库条目稳定分区到回执 [n] 清单前部，组内保序），仅展示层排序、不改
+        检索融合。**回执与侧栏共用 canonical_evidence_items 同一编号池**（此前
+        回执/侧栏各一套去重+顺序，模型写 [n] 可解析却可能指错文献）；ucr_first
+        判定两处传同值（agent_runner 与 expert_graph 均取 _is_variety_intent(query)）。
       - v8.17.15（用户决策）: 草稿全链删除——draft_answer「原生回答参考」段与
         draft_extra_count 多路检索补充已移除；原生联网回归 retrieve-agent 工具链，
         其正文经 web_summaries（网络综述段）+ [Wn] 条目随回执注入，天然融合。
     """
-    main = _dedup_evidence_items(list(collected_artifacts.get("main_results") or []))
-    if ucr_first:
-        # v9.4: 品种来源判定扩展——UCR 批次(batch_source=ucr 或 'UCR ...')与
-        # Citrus varietiesN 批次（来源=文件夹名）均属品种族，聚拢置前
-        main = ([r for r in main if is_variety_source(src_of(r))]
-                + [r for r in main if not is_variety_source(src_of(r))])
+    main = canonical_evidence_items(
+        collected_artifacts.get("main_results"), ucr_first)
     web = list(collected_artifacts.get("web_results") or [])
     lines = [
         "## 检索回执（系统组装）",
@@ -590,7 +560,7 @@ async def run_agent(
         # 检查边际收益：累计唯一证据 ≥6 且本轮新增占比 <25% → 提前结束，
         # 不再跑满 3 轮（实测第 3 轮通过率常 1/10~4/10，边际收益极低）
         if agent_name == "retrieve-agent":
-            _uniq_now = len(_dedup_evidence_items(
+            _uniq_now = len(dedup_evidence_items(
                 list(collected_artifacts.get("main_results") or [])))
             _new_ratio = (_uniq_now - _prev_unique) / max(_uniq_now, 1)
             # v9.4 (P0#2): 早停参数化——原硬编码 6 / 0.25，现由 config.yaml

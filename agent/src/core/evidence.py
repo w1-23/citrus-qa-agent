@@ -82,16 +82,17 @@ def renumber_refs(answer: str, cited_refs: list) -> tuple:
       同组连续展示一致；正文组内呈现顺序由模型输出决定，不强制重排）；
     - cited_refs 只保留被引用的条目，顺序 = 首次出现顺序，ref_id 写为新编号；
     - remap = {旧 ref_id: 新 ref_id}，随 citations 事件附带；不在映射内的
-      残留编号保持原文不重写；
+      残留编号从正文中清除（v9.4.1：编号一致性保证——正文出现的每个引用
+      标记都必须在侧栏可解析，宁可移除标记也不保留死编号）；
     - 回答为空 / cited 为空 / 无任何引用编号 → 原样返回（防御，不误伤）。
 
-    返回 (new_answer, new_cited, remap)。
+    返回 (new_answer, new_cited, remap, dropped)。
     """
     if not answer or not cited_refs:
-        return answer, cited_refs, {}
+        return answer, cited_refs, {}, []
     order = _extract_ref_order(answer)
     if not order:
-        return answer, cited_refs, {}
+        return answer, cited_refs, {}, []
 
     by_id = {str(it.get("ref_id")): it for it in cited_refs}
     counters: dict[str, int] = {"": 0, "W": 0, "H": 0}
@@ -114,13 +115,20 @@ def renumber_refs(answer: str, cited_refs: list) -> tuple:
         new_item["ref_id"] = new_id
         new_cited.append(new_item)
 
+    dropped: list[str] = []
+
     def _repl(m):
         prefix = m.group(1).upper()
         key = prefix + m.group(2) if prefix else m.group(2)
         new = remap.get(key)
-        return "[" + (new if new is not None else key) + "]"
+        if new is not None:
+            return "[" + new + "]"
+        # v9.4.1: 无法解析的编号从正文清除（防死编号，见模块级说明）
+        dropped.append(key)
+        return ""
 
-    return _REF_ALL_RE.sub(_repl, answer), new_cited, remap
+    new_answer = _REF_ALL_RE.sub(_repl, answer)
+    return new_answer, new_cited, remap, sorted(set(dropped))
 
 # 证据全文的字段回退顺序（text 含机制/数字细节，优先；摘要/片段次之）
 _TEXT_KEYS = ("text", "abstract", "snippet")
@@ -231,3 +239,64 @@ def render_evidence(r, *, max_chars: int = EVIDENCE_RENDER_MAX_CHARS) -> str:
     if len(text) > max_chars:
         return f"{text[:max_chars]} …[超长片段截断: 原文 {len(text)} 字符]"
     return text
+
+
+# ════════════════════════════════════════════════════════════════
+# v9.4.2 单一证据编号池 —— 回执编号 [n] 与侧栏引用编号 [n] 同去重、同序。
+# 此前"检索回执"（agent_runner._dedup_evidence_items，DOI→标题、正文优先）
+# 与"侧栏引用列表"（agent_loop.dedup_by_doi，仅 DOI、首现序）是两套口径，
+# 模型照着回执编号写 [n]，侧栏却按另一套编号解析 → 编号"能解析但指错文献"。
+# canonical_evidence_items 是回执与侧栏共用唯一入口（同池同序同 ucr_first）。
+# ════════════════════════════════════════════════════════════════
+
+def dedup_evidence_items(items: list) -> list:
+    """按 DOI（无 DOI 按标题）去重，保持首次出现位置，去重碰撞时保留正文更丰富的条目。
+
+    v8.14 起用于检索/全文证据合并（原 agent_runner._dedup_evidence_items，
+    v9.4.2 上移为本模块公开函数）：同 DOI 条目碰撞时保留正文（text > abstract/snippet、
+    更长优先），否则先到的摘要会把更完整证据挤掉。
+    """
+    def _key(r):
+        doi = str(r.get("doi") or "").strip().lower()
+        if doi:
+            return ("d", doi)
+        return ("t", str(r.get("title") or "").strip().lower()[:80])
+
+    def _priority(r):
+        text = str(r.get("text") or "").strip()
+        fallback = str(r.get("abstract") or r.get("snippet") or "").strip()
+        return (bool(text), bool(fallback), len(text or fallback))
+
+    out, seen = [], {}
+    for r in items:
+        if not isinstance(r, dict):
+            continue
+        k = _key(r)
+        if not k[1]:
+            continue
+        if k in seen:
+            i, prev = seen[k]
+            if _priority(r) > _priority(prev):
+                out[i] = r
+                seen[k] = (i, r)
+            continue
+        seen[k] = (len(out), r)
+        out.append(r)
+    return out
+
+
+def canonical_evidence_items(items: list, ucr_first: bool = False) -> list:
+    """单一证据编号池（v9.4.2）：检索回执 [n] 与侧栏引用 [n] 必须同池同序。
+
+    - 去重口径统一：dedup_evidence_items（DOI→标题、正文优先、首次出现序）；
+    - ucr_first=True 时品种族（UCR / Citrus varietiesN）条目聚拢置前——仅展示
+      意图（v8.17 回执行为上移），且回执与侧栏**必须传入相同的 ucr_first 判定**，
+      否则编号顺序分裂；
+    - 调用方限定两处：agent_runner.build_evidence_report（回执）与 expert/light
+      的引用装配（侧栏），共用同一判定来源以保同序。
+    """
+    main = dedup_evidence_items(list(items or []))
+    if ucr_first:
+        main = ([r for r in main if is_variety_source(src_of(r))]
+                + [r for r in main if not is_variety_source(src_of(r))])
+    return main
