@@ -774,7 +774,11 @@ async def serve_frontend():
     html_path = PROJECT_ROOT / "index.html"
     if not html_path.exists():
         return {"error": f"index.html not found at {html_path}"}
-    return FileResponse(html_path)
+    return FileResponse(html_path, headers={
+        # v9.4.4b: no-cache 强制浏览器每次回源校验——杜绝"旧 JS 缓存吃新后端"
+        # （前端修复必须即时可见；静态文件带 Last-Modified/ETag，命中未变更
+        # 时仅回 304，代价是一次条件请求而非全量下载）
+        "Cache-Control": "no-cache, must-revalidate"})
 
 
 # v8.9 工作区静态服务（会话侧栏"工作区"文件可点击打开；只读）
@@ -1004,7 +1008,7 @@ async def session_citations(session_id: str):
         logger.debug(f"[API] session citations historical failed: {e}")
     return {"session_id": session_id, "groups": groups,
             "count": sum(len(v) for v in groups.values()),
-            "ref_pool": "v9.4.3"}
+            "ref_pool": "v9.4.4"}
 
 
 # ── v8.4.9 会话持久化：历史对话读取（前端刷新/关闭重开后恢复渲染）──
