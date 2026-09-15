@@ -36,12 +36,12 @@ def main():
     env = load_env()
     key = env.get("DEEPSEEK_API_KEY") or env.get("MAIN_API_KEY")
     base = (env.get("MAIN_BASE_URL") or "https://api.deepseek.com").rstrip("/")
-    model = env.get("MAIN_MODEL") or "deepseek-v4-flash"
+    model = env.get("MAIN_MODEL") or "deepseek-flash"
     if not key:
         print("NO KEY in .env")
         return 1
 
-    # 1) 模型清单（确认 deepseek-v4-flash 在该端点真实存在）
+    # 1) 模型清单（确认 deepseek-flash 在该端点真实存在）
     try:
         req = urllib.request.Request(
             base + "/v1/models",

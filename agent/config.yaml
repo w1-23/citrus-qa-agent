@@ -47,6 +47,14 @@ retrieval:
 web_search:
   enabled: true                   # 部署默认展示值（非启用门槛；前端开关才是总开关）
   provider: deepseek_responses    # deepseek_responses | builtin(预留 Tavily/Serper 自建源)
+  # v9.6: 联网走哪条 API 线。
+  #   responses = Responses API（tools=[{type:web_search}]）——官方自 2026-09-11 起
+  #               静默忽略该内置工具，需等官方恢复；
+  #   anthropic = Anthropic 兼容端点（tools=[{type:web_search_20250305}]）——实测可用。
+  # 两者本工具统一映射为 [Wn] 证据条目，对 supervisor/前端零影响；改本行即可回退。
+  api_style: anthropic
+  anthropic_path: /anthropic/v1/messages
+  max_uses: 5                     # anthropic 线单次调用最多搜索次数
   responses_path: /v1/responses   # Responses 端点路径（官方文档待核实，probe 可验证）
   probe_enabled: false            # 是否启用配套探测脚本（websearch_probe.py --run）
   # v8.15.3b: 联网调用 HTTP 读取超时（秒）。DeepSeek 原生联网实测 33-50s——
@@ -62,8 +70,8 @@ web_search:
       effort: none
 
 model:
-  main: "deepseek-v4-flash"   # v8.3.1: 全部切换 Flash 正式版（V4 Pro 已移除）
-  fast: "deepseek-v4-flash"
+  main: "deepseek-flash"   # v9.5.1: 官方现行模型名 deepseek-flash（服务 DeepSeek-V4.1-Flash）；旧名 deepseek-v4-flash 已下线但可调用并路由到 V4.1
+  fast: "deepseek-flash"
   embedding: "intfloat/multilingual-e5-large"
   reranker: "BAAI/bge-reranker-v2-m3"
   # v8.15.3: 检索决策子代理思维链控制。v8.17.19 起：default/off 均保持——

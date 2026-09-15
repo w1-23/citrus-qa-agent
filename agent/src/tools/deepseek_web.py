@@ -69,6 +69,129 @@ def _responses_endpoint() -> str:
     return f"{base}{path}"
 
 
+# ── v9.6: Anthropic 兼容端点联网（Responses web_search 被官方忽略时的替代线） ──
+_REF_CMD = ("如果使用了联网搜索，请在回答中对引用的信息来源标注真实网址，"
+            "格式如：[来源标题](https://...)。只列你实际引用且真实存在的网页地址。")
+
+
+def _anthropic_endpoint() -> str:
+    base = (getattr(settings, "RESOLVED_MAIN_BASE_URL", None)
+            or settings.MAIN_BASE_URL or "https://api.deepseek.com").rstrip("/")
+    path = getattr(settings, "WEB_SEARCH_ANTHROPIC_PATH", "/anthropic/v1/messages")
+    return f"{base}{path}"
+
+
+def _parse_anthropic_content(content: list):
+    """解析 Anthropic 端点响应：server_tool_use + web_search_tool_result + text。"""
+    text_parts: list[str] = []
+    queries: list[str] = []
+    url_items: list[dict] = []
+    for c in content or []:
+        if not isinstance(c, dict):
+            continue
+        t = c.get("type")
+        if t == "server_tool_use":
+            q = (c.get("input") or {}).get("query") if isinstance(c.get("input"), dict) else None
+            if q:
+                queries.append(str(q))
+        elif t == "web_search_tool_result":
+            res = c.get("content")
+            if isinstance(res, list):
+                for it in res:
+                    if isinstance(it, dict) and str(it.get("url") or "").lower().startswith("http"):
+                        url_items.append({
+                            "title": str(it.get("title") or it.get("url")),
+                            "url": str(it.get("url")),
+                            "abstract": str(it.get("page_age") or it.get("snippet") or ""),
+                        })
+        elif t == "text":
+            tx = str(c.get("text") or "")
+            text_parts.append(tx)
+            for m in _MD_LINK_RE.finditer(tx):
+                url_items.append({"title": (m.group(1).strip() or m.group(2).strip()),
+                                  "url": m.group(2).strip(), "abstract": ""})
+            for u in _BARE_URL_RE.findall(tx):
+                url_items.append({"title": u, "url": u, "abstract": ""})
+        _extract_urls_deep(c, url_items)
+    seen: set = set()
+    calls: list[dict] = []
+    for it in url_items:
+        u = _clean_url(it["url"])
+        if not u or u in seen:
+            continue
+        seen.add(u)
+        calls.append({"title": (it["title"] or u)[:200], "url": u,
+                      "abstract": it.get("abstract", "")[:500]})
+    summary = "\n".join(p for p in text_parts if p).strip()
+    return summary, calls, {"queries": queries[:8]}
+
+
+def _run_anthropic_search(query: str) -> Tuple[str, dict]:
+    """Anthropic 兼容端点联网：调用一次，映射为与 Responses 线一致的 (content, artifact)。"""
+    empty = {"main_results": [], "web_results": []}
+    max_uses = int(getattr(settings, "WEB_SEARCH_MAX_USES", 5) or 5)
+    payload = {
+        "model": get_deepseek_model(),
+        "max_tokens": 2000,
+        "messages": [{"role": "user", "content": f"{query}\n\n{_REF_CMD}"}],
+        "tools": [{"type": "web_search_20250305", "name": "web_search",
+                   "max_uses": max_uses}],
+    }
+    headers = {
+        "x-api-key": settings.RESOLVED_MAIN_API_KEY or settings.MAIN_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+    }
+    url = _anthropic_endpoint()
+    _to = _web_http_timeout()
+    t0 = time.perf_counter()
+    logger.info(f"[deepseek_web_search] anthropic 调用: {url} "
+                f"model={payload['model']} max_uses={max_uses} timeout={_to}s")
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=_to)
+    except requests.exceptions.Timeout as e:
+        logger.error(f"[deepseek_web_search] anthropic 超时 ({_to}s): {e}")
+        return (f"[ERR_NETWORK] 联网搜索超时（{_to}s 限制）。", empty)
+    except Exception as e:
+        logger.error(f"[deepseek_web_search] anthropic 调用失败: {e}")
+        return (f"[ERR_NETWORK] 联网搜索调用失败: {e}", empty)
+    if resp.status_code != 200:
+        logger.error(f"[deepseek_web_search] anthropic HTTP {resp.status_code}: {resp.text[:600]}")
+        return (f"[ERR_NETWORK] 联网搜索失败 HTTP {resp.status_code}（详情已记录日志）。", empty)
+    body = resp.json()
+    summary, calls, meta = _parse_anthropic_content(body.get("content") or [])
+    elapsed = (time.perf_counter() - t0) * 1000
+    if not summary and not calls:
+        return ("[ERR_EMPTY] 联网搜索未返回内容（模型判断无需联网或参数有误）。", empty)
+
+    items = []
+    for idx, c in enumerate(calls, 1):
+        items.append({
+            "ref_id": f"W{idx}", "type": "web", "source": "web",
+            "url": c["url"], "title": c["title"],
+            "abstract": c.get("abstract", ""), "snippet": c.get("abstract", ""),
+        })
+    _queries_line = ("\n\n本次模型联网检索了这些关键词:\n" + "、".join(
+        f"「{q[:80]}」" for q in meta.get("queries", [])[:5])) if meta.get("queries") else ""
+    if summary.strip():
+        _summary_part = f"联网检索摘要（DeepSeek 原生搜索返回）:\n{summary[:2000]}"
+    else:
+        _summary_part = ("[注意] 本次联网返回引用条目但无正文摘要。请优先使用下方引用"
+                         "标题/URL 或结合本地证据作答。")
+    text_result = (
+        _summary_part + _queries_line
+        + ("\n\n引用:\n" + "\n".join(f"[W{i}] {c['title']} — {c['url']}"
+                                      for i, c in enumerate(calls, 1)) if calls else "")
+    )
+    content = _format_web_tool_result("deepseek_web_search", query, text_result,
+                                      status="ok", results_count=len(items),
+                                      elapsed_ms=elapsed)
+    logger.info(f"[deepseek_web_search] anthropic done: {len(calls)} 引用, "
+                f"{len(summary)} 字摘要, {elapsed:.0f}ms")
+    return content, {"main_results": [], "web_results": items,
+                     "web_summary": summary[:4000]}
+
+
 def _extract_urls_deep(obj, acc: list, depth: int = 0) -> None:
     """递归深扫任意嵌套 dict/list 找含 http 的 url/title（不确定层级时的通用兜底）。"""
     if depth > 8 or obj is None:
@@ -168,6 +291,11 @@ def deepseek_web_search(query: str) -> Tuple[str, dict]:
         return "[ERR_PARSE] 查询词不能为空", empty
     if len(query) > 500:
         return f"[ERR_PARSE] 查询词过长 ({len(query)}字符)，请精简至 500 字符以内", empty
+
+    # v9.6: 按配置选择联网 API 线；anthropic 线走独立实现，返回契约与下方完全一致。
+    _style = (getattr(settings, "WEB_SEARCH_API_STYLE", "responses") or "responses").strip().lower()
+    if _style == "anthropic":
+        return _run_anthropic_search(query)
 
     # v8.17.15: 输入构造——**工具参数 query 即 web-agent 收到的 web_goal**（v9.1：
     # Supervisor 构造完整联网目标原样下发，web-agent 无 LLM 决策、不改写）。

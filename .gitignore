@@ -2,6 +2,8 @@
 .env
 *.env
 *.env.*
+keys.local.json
+**/keys.local.json
 
 # 运行状态与用户数据
 agent/state/
@@ -49,6 +51,9 @@ readme2.md
 
 # 发布产物（v8.5.0）
 dist/
+
+# 归档（2026-09-11 工作区梳理，不入库）
+_archive/
 
 # 实验/论文资产（本地保留，不入主仓库；复用脚本如需入库走独立分支）
 experiment/

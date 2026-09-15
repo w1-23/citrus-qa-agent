@@ -58,11 +58,11 @@ class Settings(BaseSettings):
     # 2. Model Endpoints & Fallback Keys
     MAIN_API_KEY: str = Field(default="")
     MAIN_BASE_URL: str = "https://api.deepseek.com"
-    MAIN_MODEL: str = Field(default_factory=lambda: _yaml_val("model", "main", default="deepseek-chat"))
+    MAIN_MODEL: str = Field(default_factory=lambda: _yaml_val("model", "main", default="deepseek-flash"))
 
     FAST_API_KEY: str = ""
     FAST_BASE_URL: str = ""
-    FAST_MODEL: str = Field(default_factory=lambda: _yaml_val("model", "fast", default="deepseek-chat"))
+    FAST_MODEL: str = Field(default_factory=lambda: _yaml_val("model", "fast", default="deepseek-flash"))
 
     EMBEDDING_API_KEY: str = ""
     EMBEDDING_BASE_URL: str = ""
@@ -114,6 +114,13 @@ class Settings(BaseSettings):
     # v8.15.3b: 联网 HTTP 读取超时（秒）——DeepSeek 原生联网实测 33-50s，
     # 旧 30s 把本会成功的慢响应自掐成"伪失败"（7×30s 白等根因）
     WEB_SEARCH_TIMEOUT: int = Field(default_factory=lambda: _yaml_val("web_search", "timeout_sec", default=90))
+    # v9.6: 联网走哪条 API 线。responses=Responses API（tools=[{type:web_search}]，
+    # 官方自 2026-09-11 起静默忽略该内置工具）；anthropic=Anthropic 兼容端点
+    # （tools=[{type:web_search_20250305}]，实测可用）。二者出参形态不同但本工具统一
+    # 映射为 [Wn] 证据条目，对上层零影响；改本字段即可回退。
+    WEB_SEARCH_API_STYLE: str = Field(default_factory=lambda: _yaml_val("web_search", "api_style", default="responses"))
+    WEB_SEARCH_ANTHROPIC_PATH: str = Field(default_factory=lambda: _yaml_val("web_search", "anthropic_path", default="/anthropic/v1/messages"))
+    WEB_SEARCH_MAX_USES: int = Field(default_factory=lambda: _yaml_val("web_search", "max_uses", default=5))
 
     # 4. Chat Parameters (centralized)
     TEMPERATURE_MAIN: float = Field(default_factory=lambda: _yaml_val("chat", "temperature_main", default=0.2))
@@ -154,8 +161,12 @@ class Settings(BaseSettings):
     # v8.4.5: ask 模式授权等待秒数（前端卡片未回应时超时按拒绝处理）
     PERMISSION_WAIT_SEC: int = Field(default_factory=lambda: _yaml_val("permission", "wait_sec", default=90))
 
-    # ── Version (v8.4.5: 版本单源——UI/健康检查/文档以此为准) ──
-    VERSION: str = "9.4.0"
+        # ── Version (v8.4.5: 版本单源——UI/健康检查/文档以此为准) ──
+    # v9.4.4: 应用版本与引用编号池修复（renumber 死号清除/统一编号池/前端 remap
+    # 双重应用/缓存防护）合并升版；侧栏 ref_pool 徽标由本字段派生，单源不漂移
+    # v9.5.0: 提示词增强（结论一致性自检/来源可信度分级/时效触发/意图感知输出组织），
+    # 仅改 source/ 与固定构建产物，不改检索与编号逻辑
+    VERSION: str = "9.5.0"
 
     # ── Context Engineering (阶段1: 静态前缀灰度开关) ──
     # true = SystemMessage 字节级稳定（format 指南/策略卡片/skills 移出前缀，
