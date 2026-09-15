@@ -155,7 +155,7 @@ uvicorn src.api.main:app --host 0.0.0.0 --port 8000
 2. 填入你的 DeepSeek API Key（`sk-` 开头，[platform.deepseek.com](https://platform.deepseek.com) → API Keys 创建）
 3. 点击「保存并开始使用」→ 立即进入聊天界面
 
-> 模型固定为 **deepseek-v4-flash**（已针对该模型调优全部提示词与参数）。Key 保存于本机 `agent/state/api_key`，跨重启保留；更换 Key 只需删除该文件后刷新页面。
+> 模型固定为 **deepseek-flash**（DeepSeek-V4.1-Flash，已针对该模型调优全部提示词与参数）。Key 保存于本机 `agent/state/api_key`，跨重启保留；更换 Key 只需删除该文件后刷新页面。
 
 ## 🖥️ 界面速览
 
@@ -180,7 +180,14 @@ context_budget:
 
 pipeline:
   parallel_sections: 3      # 写作并行章数（1=串行）
+
+web_search:
+  api_style: anthropic      # 联网 API 线：anthropic=Anthropic 兼容端点（官方 Responses 内置
+                            #   web_search 被忽略时的可用线，默认）；responses=Responses 端点
+  max_uses: 5               # anthropic 线单次调用最多搜索次数
 ```
+
+> 联网复用主模型的 Key 与 base_url（`DEEPSEEK_API_KEY` / `MAIN_BASE_URL`），无需额外配置；改 `web_search.api_style` 即可在两条线之间回退。
 
 ## 📁 项目结构
 
@@ -196,7 +203,7 @@ citrus-qa-agent/
 │   │   ├── session/            # 会话持久化（SQLite）/ 权限授权
 │   │   ├── tools/              # 检索 / 读文件 / 统计 / 写文件（沙箱化）
 │   │   ├── retrieval/          # 向量检索 + 重排（LanceDB/BM25/混合）
-│   │   ├── prompts/            # 提示词：source/ 20 份源文件 + builds/ 固定角色 system prompt（启动时拼接，之后不变）
+│   │   ├── prompts/            # 提示词：source/ 21 份源文件 + builds/ 固定角色 system prompt（启动时拼接，之后不变）
 │   │   └── guardrails/         # 记忆 / 提示注入消毒 / 日志脱敏
 │   ├── tests/                  # 150 个回归测试
 │   └── workspace/output/       # 写作成果输出目录（运行时生成）
