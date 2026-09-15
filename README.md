@@ -37,12 +37,15 @@
 | 包 | 大小 | 说明 |
 |---|---|---|
 | `citrus-qa-agent-v9.4.0.zip` | 2.3 MB | **必下**：代码 + 一键脚本（挂 v9.4.0 Release） |
-| `corpus-v9.4.0-1.zip` | 1002 MB | 语料分卷 1/2（挂 v9.4.0 Release） |
-| `corpus-v9.4.0-2.zip` | 591 MB | 语料分卷 2/2 |
+| `corpus-v9.4.0-1.zip` | 1002 MB | 语料分卷 1/5（挂 v9.4.0 Release） |
+| `corpus-v9.4.0-2.zip` | 591 MB | 语料分卷 2/5 |
+| `corpus-v9.4.0-3.zip` | 2.2 MB | 增量分卷 3/5：`CGI_experiment_methods_english`（CGI 实验方法英文文献） |
+| `corpus-v9.4.0-4.zip` | 2.3 MB | 增量分卷 4/5：`Chinese_Citrus_Varieties_Deng_Xiuxin`（中国柑橘品种志） |
+| `corpus-v9.4.0-5.zip` | 204 MB | 增量分卷 5/5：`english_literature`（英文文献 640 篇） |
 
-> 语料 = **公开文献 7 批 + 柑橘品种库 2 批 = 8 个批次**（全量 LanceDB 向量表，均带 IVF_HNSW 索引，共 166,055 片）：`paper1`~`paper8`（公开科研文献，paper3/paper4 与 paper1/paper5 内容 100% 重复已于 v9.4 去重归档）+ `Citrus varieties1`（UCR 柑橘品种库 1,067 个品种，原名 categories-cn）+ `Citrus varieties2`（中国柑橘品种历史文献）。每个批次含 `chunks.jsonl`（分块文本）+ `metadata.json`（含 `summary.source_type`=批次来源名，前端据此归组）+ `_idx_map.json` + `lancedb/<批次>.lance`（向量表）。
+> 语料 = **11 个批次 / 187,441 片**（全量 LanceDB 向量表，均带 IVF_HNSW 索引）：`paper1`/`paper2`/`paper5`~`paper8`（公开科研文献，paper3/paper4 与 paper1/paper5 内容 100% 重复已于 v9.4 去重归档）+ `english_literature`（英文文献 640 篇）+ `CGI_experiment_methods_english`（CGI 实验方法英文文献）+ `Chinese_Citrus_Varieties_Deng_Xiuxin`（中国柑橘品种志）+ `citrus_varieties1`（UCR 柑橘品种库 1,067 个品种，原名 categories-cn）+ `citrus_varieties2`（中国柑橘品种历史文献）。每个批次含 `chunks.jsonl`（分块文本）+ `metadata.json`（含 `summary.source_type`=批次来源名，前端据此归组）+ `_idx_map.json` + `lancedb/<批次>.lance`（向量表）。
 >
-> **语料版本与主包同步（v9.4.0）**：每个分卷内带 `agent/data/.corpus-version` 与 `.corpus-batches` 标记。`run.ps1` 全新安装自动按序号下载 1→2 分卷；**存量部署**检测到本地语料版本标记缺失或不一致（结构性变更：去重/更名/删除批次）时**全量重下并整体替换** `agent/data`，确保不残留已删批次；同一版本内后续新增批次按 `.corpus-batches` 清单增量补拉。**无需手动下载**：也可手动下载分卷解压到项目根目录（自动合并）直接运行。
+> **语料版本与主包同步（v9.4.0）**：每个分卷内带 `agent/data/.corpus-version` 与 `.corpus-batches` 标记。`run.ps1` 全新安装自动按序号下载全部分卷（现为 1→5）；**存量部署**检测到本地语料版本标记缺失或不一致（结构性变更：去重/更名/删除批次）时**全量重下并整体替换** `agent/data`，确保不残留已删批次。**存量部署补齐新增批次（分卷 3/4/5）**：删除 `agent/data/.corpus-version` 后重跑 `run.ps1`，或手动下载分卷 3/4/5 解压到项目根目录（自动合并）。**无需手动下载**：也可手动下载全部分卷解压到项目根目录直接运行。
 
 > ⚠️ **主包只认最新版**：主包请用 `v9.4.0`；旧主包 `v8.5.0` / `v8.9.0` / `v8.13.0` / `v8.14.1` / `v9.3.0` **已删除废止**（旧 zip 缺语料分卷、缺 e5 模型缓存、缺 pip 编码修复）。
 
