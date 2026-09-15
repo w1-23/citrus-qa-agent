@@ -198,6 +198,8 @@ def test_v8153d_original_query_direct():
             return _FakeResp()
 
     old = dw.requests
+    old_style = getattr(dw.settings, "WEB_SEARCH_API_STYLE", "responses")
+    dw.settings.WEB_SEARCH_API_STYLE = "responses"  # this test targets the Responses line
     set_web_search_enabled(True)
     reset_web_budget(1)
     try:
@@ -205,6 +207,7 @@ def test_v8153d_original_query_direct():
         c, a = dw.deepseek_web_search.func("2025年以来HLB田间种群感染密度")
     finally:
         dw.requests = old
+        dw.settings.WEB_SEARCH_API_STYLE = old_style
         set_web_search_enabled(False)
 
     inp = str(captured.get("payload", {}).get("input", ""))

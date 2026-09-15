@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
 """websearch_probe — DeepSeek Responses API web_search 能力探测（v8.15 P3）。
 
+⚠️ v9.5.1（2026-09-11）：官方 Responses API 文档已明确 `web_search` 等内置工具
+   被“忽略”（仅 `function` 类型受支持）。因此本探测脚本的 web_search 结果不再
+   可用；智能体联网回答测试暂停，web_search 工具保留但预期返回空/被忽略。
+
 联调前先跑本脚本核对官方文档三要素：
   1. 端点精确路径（config web_search.responses_path，默认 /v1/responses）
-  2. 当前模型（deepseek-v4-flash / deepseek-chat）是否在支持列表
+  2. 当前模型（deepseek-flash / deepseek-chat）是否在支持列表
   3. 返回 output 里 web_search_call 的精确字段名（title/url/status/content）
 
 用法（真机，需有效 API key）：

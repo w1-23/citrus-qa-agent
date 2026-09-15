@@ -1,7 +1,8 @@
 # 模型路由矩阵（MODEL_ROUTING）
 
-节点 → 模型 / 温度 / 超时 / 输出上限 一览（v8.4，2026-08-13 修订）。
-原则：**推理与生成用 MAIN（deepseek-v4-flash, temp 0.2），辅助分类/压缩用 FAST（temp 0）**。
+节点 → 模型 / 温度 / 超时 / 输出上限 一览（v9.5.1，2026-09-11 修订）。
+原则：**推理与生成用 MAIN（deepseek-flash，temp 0.2），辅助分类/压缩用 FAST（temp 0）**。
+（v9.5.1：官方模型名统一为 `deepseek-flash`，服务 DeepSeek-V4.1-Flash；旧名 `deepseek-v4-flash` 已下线，调用会路由到 V4.1。）
 
 ## 主链路
 
@@ -29,5 +30,5 @@
   保留优先级提示（实体/数值/决策/标识符）保证，无需 main 模型；且压缩提示已
   上下文感知（带 query + prior_summary 增量整合）。
 - **路由兜底 `_resolve_mode`**（AG-12）：纯规则（关键词/长度），无 LLM 调用。
-- `settings.FAST_MODEL` 默认与 MAIN 相同（deepseek-v4-flash），可在 `.env` 用 `FAST_MODEL` 覆盖为更便宜的模型。
+- `settings.FAST_MODEL` 默认与 MAIN 相同（deepseek-flash），可在 `.env` 用 `FAST_MODEL` 覆盖为更便宜的模型。
 - 修改任一节点模型/温度后，回归：`test_batch1.py` + `test_batch2.py` + 一次真实问答。

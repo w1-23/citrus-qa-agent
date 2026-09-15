@@ -88,11 +88,22 @@ def renumber_refs(answer: str, cited_refs: list) -> tuple:
 
     返回 (new_answer, new_cited, remap, dropped)。
     """
-    if not answer or not cited_refs:
+    if not answer:
         return answer, cited_refs, {}, []
     order = _extract_ref_order(answer)
     if not order:
         return answer, cited_refs, {}, []
+    if not cited_refs:
+        # v9.6: 证据池为空时，正文中的任何 [n]/[Wn]/[Hn] 都是死编号（模型幻觉/
+        # 越界）——即使无有效池也必须清除，保 CiteExist 不变量在"无证据"时成立。
+        dead: list[str] = []
+
+        def _strip(m):
+            prefix = m.group(1).upper()
+            dead.append(prefix + m.group(2) if prefix else m.group(2))
+            return ""
+
+        return _REF_ALL_RE.sub(_strip, answer), cited_refs, {}, sorted(set(dead))
 
     by_id = {str(it.get("ref_id")): it for it in cited_refs}
     counters: dict[str, int] = {"": 0, "W": 0, "H": 0}
