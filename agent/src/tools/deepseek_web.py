@@ -130,9 +130,11 @@ def _run_anthropic_search(query: str) -> Tuple[str, dict]:
     """Anthropic 兼容端点联网：调用一次，映射为与 Responses 线一致的 (content, artifact)。"""
     empty = {"main_results": [], "web_results": []}
     max_uses = int(getattr(settings, "WEB_SEARCH_MAX_USES", 5) or 5)
-    # v9.6.3: 单次联网调用的输出预算改为可配置。原先硬编码 2000 会被"内部检索
-    # 若干次 + 思考"吃光（实测输出 3.0k-4.2k tokens），stop_reason=max_tokens，
-    # 结果只拿到引用条目、拿不到综合正文——§5.8 旧数据的成因。
+    # v9.6.3: 单次联网调用的输出预算改为可配置。原先硬编码 2000 会被该次调用
+    # 内部的若干次检索 + 思考吃光（实测输出 3.0k-4.2k tokens），stop_reason=
+    # max_tokens，结果只拿到引用条目、拿不到综合正文——§5.8 旧数据的成因。
+    # 注意区分：本函数内 max_uses 是"供应商侧单次调用内部的检索次数上限"，
+    # 与请求级预算（src/core/tracing.reset_web_budget，生产为 1 次调用）不同。
     max_tokens = int(getattr(settings, "WEB_SEARCH_MAX_TOKENS", 8000) or 8000)
     payload = {
         "model": get_deepseek_model(),
