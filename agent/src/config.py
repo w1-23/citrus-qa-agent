@@ -121,6 +121,10 @@ class Settings(BaseSettings):
     WEB_SEARCH_API_STYLE: str = Field(default_factory=lambda: _yaml_val("web_search", "api_style", default="responses"))
     WEB_SEARCH_ANTHROPIC_PATH: str = Field(default_factory=lambda: _yaml_val("web_search", "anthropic_path", default="/anthropic/v1/messages"))
     WEB_SEARCH_MAX_USES: int = Field(default_factory=lambda: _yaml_val("web_search", "max_uses", default=5))
+    # v9.6.3: 单次联网调用的输出预算。原硬编码 2000 会被"内部检索若干次 + 思考"
+    # 吃光，导致 stop_reason=max_tokens、最终无文本（实测 time-001 仅 33 字符）。
+    # 实测 8000 可稳定 end_turn（输出 3.5k-4.3k tokens）。
+    WEB_SEARCH_MAX_TOKENS: int = Field(default_factory=lambda: _yaml_val("web_search", "max_tokens", default=8000))
 
     # 4. Chat Parameters (centralized)
     TEMPERATURE_MAIN: float = Field(default_factory=lambda: _yaml_val("chat", "temperature_main", default=0.2))
@@ -166,7 +170,11 @@ class Settings(BaseSettings):
     # 双重应用/缓存防护）合并升版；侧栏 ref_pool 徽标由本字段派生，单源不漂移
     # v9.5.0: 提示词增强（结论一致性自检/来源可信度分级/时效触发/意图感知输出组织），
     # 仅改 source/ 与固定构建产物，不改检索与编号逻辑
-    VERSION: str = "9.5.0"
+    # v9.6.3: ①联网单次调用的输出预算可配置（web_search.max_tokens，默认 8000；
+    #   原硬编码 2000 会被内部检索+思考吃光 → stop_reason=max_tokens → 只拿到引用
+    #   条目、拿不到综合正文）；②每轮"按正文过滤 + 重编号"后的 cited_refs 落盘，
+    #   /citations 刷新路径改读它并去掉 LIMIT 10，侧栏与正文标号一致。
+    VERSION: str = "9.6.3"
 
     # ── Context Engineering (阶段1: 静态前缀灰度开关) ──
     # true = SystemMessage 字节级稳定（format 指南/策略卡片/skills 移出前缀，

@@ -55,6 +55,9 @@ web_search:
   api_style: anthropic
   anthropic_path: /anthropic/v1/messages
   max_uses: 5                     # anthropic 线单次调用最多搜索次数
+  # v9.6.3: 单次联网调用的输出预算。原硬编码 2000 会被内部检索+思考吃光，
+  # 导致 stop_reason=max_tokens、最终无综合正文（§5.8 旧数据成因）。实测 8000 稳定 end_turn。
+  max_tokens: 8000
   responses_path: /v1/responses   # Responses 端点路径（官方文档待核实，probe 可验证）
   probe_enabled: false            # 是否启用配套探测脚本（websearch_probe.py --run）
   # v8.15.3b: 联网调用 HTTP 读取超时（秒）。DeepSeek 原生联网实测 33-50s——

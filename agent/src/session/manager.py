@@ -188,6 +188,20 @@ class SessionManager:
                             pass
                 # v8.4 压缩检查点（存储全量·发送裁剪：记录"已摘要至哪条消息 + 摘要文本"，
                 # 原始轨迹永不删除——发送视图基于 checkpoint 增量构建，防摘要套摘要）
+                # v9.6.3: session_evidence 增加"本轮实际被正文引用的引用集"。
+                # 原因：/citations 端点原读 evidence_json（原始检索账本）并硬截 10 条，
+                # 刷新会退化成"检索到的 10 条"而不是"正文引用的 N 条"，与实时 SSE
+                # 发的 cited_refs 不一致。落盘后端点优先读本列。
+                cur = conn.execute("PRAGMA table_info(session_evidence)")
+                ev_cols = {row[1] for row in cur.fetchall()}
+                for col, col_type in [("cited_refs_json", "TEXT")]:
+                    if col not in ev_cols:
+                        try:
+                            conn.execute(
+                                f"ALTER TABLE session_evidence ADD COLUMN {col} {col_type}")
+                            logger.info(f"[SessionManager] added column: {col}")
+                        except Exception:
+                            pass
                 cur = conn.execute("PRAGMA table_info(sessions)")
                 session_cols = {row[1] for row in cur.fetchall()}
                 for col, col_type in [
@@ -726,18 +740,24 @@ class SessionManager:
     # ── Evidence Ledger（v8.3.8）──
 
     async def save_evidence(self, session_id: str, query: str,
-                            evidence: list, report_text: str) -> None:
-        """保存一轮检索的证据账本（结构化清单 + 报告全文）。"""
+                            evidence: list, report_text: str,
+                            cited_refs: Optional[list] = None) -> None:
+        """保存一轮检索的证据账本（结构化清单 + 报告全文 + 正文实际引用集）。
+
+        v9.6.3: cited_refs 为本轮经过"按正文过滤 + 重编号"后的引用集（实时 SSE
+        发的那一份），持久化后 /citations 刷新路径才能与其一致。
+        """
         if not evidence and not report_text:
             return
         try:
             await asyncio.to_thread(self._save_evidence_sync, session_id,
-                                    query, evidence, report_text)
+                                    query, evidence, report_text, cited_refs)
         except Exception as e:
             logger.error(f"[SessionManager] save_evidence failed: {e}")
 
     def _save_evidence_sync(self, session_id: str, query: str,
-                            evidence: list, report_text: str):
+                            evidence: list, report_text: str,
+                            cited_refs: Optional[list] = None):
         import sqlite3
         lock = _get_session_lock(session_id)
         with lock:
@@ -751,17 +771,25 @@ class SessionManager:
                 if len(_report) > 8000:
                     _report = (_report[:8000]
                                + "\n[报告已截断：原文超 8000 字符，全文见 messages 表]")
+                _cited = ""
+                if cited_refs:
+                    try:
+                        _cited = json.dumps(cited_refs, ensure_ascii=False)[:1_000_000]
+                    except Exception:
+                        _cited = ""
                 conn.execute(
                     "INSERT INTO session_evidence "
-                    "(session_id, turn_seq, query, evidence_json, report_text, created_at) "
-                    "VALUES (?,?,?,?,?,?)",
+                    "(session_id, turn_seq, query, evidence_json, report_text, "
+                    " cited_refs_json, created_at) "
+                    "VALUES (?,?,?,?,?,?,?)",
                     (session_id, turn_seq, query[:500],
                      json.dumps(evidence, ensure_ascii=False)[:1_000_000],
-                     _report, datetime.now().isoformat()),
+                     _report, _cited, datetime.now().isoformat()),
                 )
                 conn.commit()
         logger.info(f"[SessionManager] evidence saved: session={session_id[:8]} "
-                    f"turn={turn_seq} {len(evidence)} items")
+                    f"turn={turn_seq} {len(evidence)} items, "
+                    f"{len(cited_refs or [])} cited")
 
     def _load_evidence_rows(self, session_id: str, limit: Optional[int],
                             *, cols: str = "evidence_json",

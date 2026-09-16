@@ -944,18 +944,28 @@ async def session_citations(session_id: str):
     try:
         with sqlite3.connect(str(PROJECT_ROOT / "state" / "sessions.db")) as conn:
             conn.row_factory = sqlite3.Row
+            # v9.6.3: 不再 LIMIT 10、不再只读 evidence_json。
+            # 优先读 cited_refs_json（本轮"按正文过滤 + 重编号"后的引用集，与实时
+            # SSE 的 citations 事件同源）；老会话无该列时回退到 evidence_json。
             rows = conn.execute(
-                "SELECT turn_seq, evidence_json FROM session_evidence "
-                "WHERE session_id=? ORDER BY id DESC LIMIT 10", (session_id,)).fetchall()
+                "SELECT turn_seq, evidence_json, cited_refs_json FROM session_evidence "
+                "WHERE session_id=? ORDER BY id ASC", (session_id,)).fetchall()
     except Exception as e:
         logger.warning(f"[API] session citations failed: {e}")
         return {"session_id": session_id, "groups": groups, "count": 0}
-    for r in reversed(rows):   # 旧 → 新：编号顺序与回答内首次出现一致
+    for r in rows:   # 旧 → 新：编号顺序与回答内首次出现一致
         turn_seq = r["turn_seq"]
+        raw = None
         try:
-            raw = _json.loads(r["evidence_json"] or "[]")
+            if r["cited_refs_json"]:
+                raw = _json.loads(r["cited_refs_json"])
         except Exception:
-            raw = []
+            raw = None
+        if raw is None:                      # 回退：老会话只落了检索账本
+            try:
+                raw = _json.loads(r["evidence_json"] or "[]")
+            except Exception:
+                raw = []
         if not isinstance(raw, list):
             continue
         for e in raw:
@@ -967,26 +977,40 @@ async def session_citations(session_id: str):
             group = src if src in ("rag", "ucr", "web") else normalize_source_key(src)
             doi = clean_doi(e.get("doi"))
             title = str(e.get("title") or "").strip()[:150]
-            key = (doi or title or str(e.get("chunk_id") or "")).strip()
+            key = (doi or str(e.get("url") or "") or
+                   title or str(e.get("chunk_id") or "")).strip()
             if not key or key in seen.setdefault(group, set()):
                 continue
             seen[group].add(key)
-            if group == "web":
-                web_i += 1
-                ref_id = f"W{web_i}"
+            # v9.6.3: 落盘的 ref_id 已由 renumber_refs 按"正文首次出现顺序"分配
+            # （数字池 1..k、web 池 W1..Wm），直接沿用，保证与正文标号一致；
+            # 老会话（无 cited_refs_json）才现算编号。
+            rid = e.get("ref_id")
+            if isinstance(rid, int) or (isinstance(rid, str) and rid.strip()):
+                ref_id = str(rid)
+                if group == "web":
+                    web_i += 1
+                else:
+                    num_i += 1
             else:
-                num_i += 1
-                ref_id = str(num_i)
+                if group == "web":
+                    web_i += 1
+                    ref_id = f"W{web_i}"
+                else:
+                    num_i += 1
+                    ref_id = str(num_i)
             groups.setdefault(group, []).append({
                 "ref_id": ref_id,
                 "type": "main" if group != "web" else "web",
                 "source": group,
                 "doi": doi or "N/A",
+                "url": str(e.get("url") or ""),      # v9.6.3: web 条目侧栏要可点击
                 "title": title,
                 "year": str(e.get("year") or ""),
                 "score": float(e.get("score") or 0),
                 "chunk_id": str(e.get("chunk_id") or ""),
-                "text_preview": str(e.get("snippet") or "")[:250],
+                "text_preview": str(
+                    e.get("text_preview") or e.get("snippet") or "")[:250],
                 "round_seq": turn_seq,   # 来源轮次元数据（前端可显示"第 N 轮"）
             })
     # 历史组 = 最近 10 轮证据去重（H1..Hn，与 live historical 组同口径）

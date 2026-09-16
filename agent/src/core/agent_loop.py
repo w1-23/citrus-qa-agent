@@ -332,8 +332,12 @@ async def run_save_node(state: dict, *, log_tag: str,
                     }
                     for w in web_results[:30]
                 ]
+            # v9.6.3: 本轮正文实际引用的引用集（已按答案过滤 + 重编号），随证据
+            # 账本一并落盘，使 /citations 刷新路径与实时 SSE 的 cited_refs 一致。
+            _refs_data = state.get("references_data") or {}
+            _cited = _refs_data.get("cited") if isinstance(_refs_data, dict) else None
             spawn(session_manager.save_evidence(
-                session_id, query, evidence, report_text))
+                session_id, query, evidence, report_text, _cited))
     except Exception as e:
         logger.warning(f"[{log_tag}:save] failed: {e}")
 
