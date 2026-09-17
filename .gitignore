@@ -60,3 +60,10 @@ experiment/
 paper/
 agent/scripts/
 make-mobile-leaf.mjs
+
+# 投稿稿件与复现清单（2026-09-17）：**投稿前绝不可进公开仓库**
+# 稿件、复现索引与构建脚本放在 paper_cea/。录用前公开发布等于提前披露未发表工作；
+# 复现包应随 DOI 存档（Zenodo 等）或审稿私有链接交付，而不是进这个代码仓库。
+# 需要公开时再显式放开，例如：
+#   !paper_cea/REPRODUCIBILITY.md
+paper_cea/
