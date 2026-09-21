@@ -144,6 +144,8 @@ app.add_middleware(
 # cancel 端点按会话找到 running job 后在此安全点取消（书中 §4.7.6 取消式处理：
 # 不在任意时刻强行掐断，而是向任务发取消信号，在 LLM/tool await 处抛 CancelledError）。
 _running_graph_tasks: dict = {}
+# v10.0（卡点①）: Intake 意图澄清卡挂起表 token -> {event, choice, profile, session_id}
+_pending_intents: dict = {}
 
 
 class ChatRequest(BaseModel):
@@ -320,6 +322,75 @@ async def chat_v2(req: ChatRequest):
         async def process_graph():
             # v8.4.11: 注册运行任务（cancel 端点按 job_id 定位取消）
             _running_graph_tasks[job_id] = asyncio.current_task()
+
+            # ── v10.0（卡点①）Intake：fast 模型判一次；有歧义且答错代价高 → 弹卡确认 ──
+            #    卡片同步等待（上限 INTENT_WAIT_SEC，超时按推荐项放行），确认后的
+            #    intent_confirmed 作为全链路锚点：联网原问、检索 goal、审计基线共用。
+            confirmed_intent = query
+            _token = ""  # 意图卡 token（finally 清理，防用户取消时挂起表泄漏）
+            if mode == "expert":
+                try:
+                    from src.core.intake import (judge_intent, decide_card,
+                                                 resolve_choice, INTENT_WAIT_SEC)
+                    await emit_to_client(_encode_event("status", {
+                        "stage": "intake", "summary": "正在理解你的问题…"}))
+                    # v10.0: 带入最近 4 条对话（指代消解/延续上下文——"甜橙呢"这类追问）
+                    _ctx = ""
+                    try:
+                        _hist_msgs = await session_manager.get_messages(sid)
+                        _ctx = "\n".join(
+                            f"{'用户' if type(_m).__name__ == 'HumanMessage' else '助手'}: "
+                            f"{str(getattr(_m, 'content', ''))[:200]}"
+                            for _m in (_hist_msgs or [])[-4:])
+                    except Exception as _ce:
+                        logger.debug(f"[Intake] context fetch skipped: {_ce}")
+                    _profile = await judge_intent(query, context=_ctx)
+                    if _profile:
+                        initial_state["intent_profile"] = _profile
+                    if _profile and decide_card(_profile, mode=mode):
+                        _token = uuid.uuid4().hex[:16]
+                        _pending_intents[_token] = {
+                            "event": asyncio.Event(), "choice": None,
+                            "profile": _profile, "session_id": sid,
+                        }
+                        await emit_to_client(_encode_event("intent_confirm", {
+                            "token": _token,
+                            "question": query[:500],
+                            "intent_summary": _profile.get("intent_summary", ""),
+                            "reason": _profile.get("clarify_reason", ""),
+                            "options": _profile.get("interpretations", []),
+                            "timeout_sec": INTENT_WAIT_SEC,
+                        }))
+                        _pend = _pending_intents[_token]
+                        try:
+                            await asyncio.wait_for(_pend["event"].wait(),
+                                                   timeout=INTENT_WAIT_SEC)
+                        except asyncio.TimeoutError:
+                            pass
+                        confirmed_intent = resolve_choice(_profile, _pend.get("choice"))
+                        _pending_intents.pop(_token, None)
+                        await emit_to_client(_encode_event("intent_resolved", {
+                            "token": _token,
+                            "intent": confirmed_intent,
+                            "timeout": _pend.get("choice") is None,
+                        }))
+                        try:
+                            from src.core.business_logger import blog
+                            blog("intent_resolved", token=_token[:8],
+                                 chosen=str((_pend.get("choice") or {}).get("choice_id")),
+                                 timeout=_pend.get("choice") is None)
+                        except Exception:
+                            pass
+                        logger.info(f"[Intake] confirmed={confirmed_intent[:60]}")
+                except Exception as _e:
+                    logger.warning(f"[Intake] skipped ({type(_e).__name__}: {_e})")
+            initial_state["intent_confirmed"] = confirmed_intent
+            if confirmed_intent and confirmed_intent != query:
+                try:
+                    set_original_query(confirmed_intent)  # 联网工具围绕确认意图作答
+                except Exception:
+                    pass
+
             try:
                 async for node_output in graph.astream(initial_state, stream_mode="updates",
                                                        recursion_limit=settings.RECURSION_LIMIT):
@@ -362,6 +433,11 @@ async def chat_v2(req: ChatRequest):
                                     done_payload.update(cit)
                                 if output.get("tools_called"):
                                     done_payload["tools_called"] = output["tools_called"]
+                                # v10.0（卡点②③）: 裁决与审计结果随 done 下发
+                                if output.get("audit_report"):
+                                    done_payload["audit"] = output["audit_report"]
+                                if output.get("adjudication"):
+                                    done_payload["adjudication"] = output["adjudication"]
                                 await emit_to_client(_encode_event("done", done_payload))
                                 # v8.3.7 M2: 任务完成落状态
                                 jobs_mod.update_job(job_id, status="completed",
@@ -428,6 +504,9 @@ async def chat_v2(req: ChatRequest):
             finally:
                 # v8.4.11: 注销运行任务（正常/取消/异常路径统一清理）
                 _running_graph_tasks.pop(job_id, None)
+                # v10.0（卡点①）: 用户取消/异常时清理未消费的意图卡挂起条目
+                if _token:
+                    _pending_intents.pop(_token, None)
                 # v8.17.15: 草稿任务注册表已删除（草稿全链移除，联网回归
                 # retrieve-agent 工具链），此处不再等待草稿——直接关闭连接。
                 # v9.2 P4 根治: 确定性排空替代原 10×0.1s 轮询排空——桥中遗留
@@ -610,6 +689,26 @@ async def permission_grant(req: GrantRequest):
 
 class ModeRequest(BaseModel):
     mode: str
+
+
+# ── v10.0（卡点①）意图澄清卡回执：原 SSE 请求在 wait_for 中继续，无需重放 ──
+class IntentChoiceRequest(BaseModel):
+    token: str = Field(..., min_length=4, max_length=64)
+    choice_id: Optional[int] = None
+    custom_text: Optional[str] = Field(default=None, max_length=2000)
+
+
+@app.post("/api/v2/intent/confirm")
+async def intent_confirm_choice(req: IntentChoiceRequest):
+    pend = _pending_intents.get(req.token)
+    if not pend:
+        return {"status": "expired"}
+    pend["choice"] = {"choice_id": req.choice_id,
+                      "custom_text": (req.custom_text or "").strip()}
+    pend["event"].set()
+    logger.info(f"[Intake] card choice: id={req.choice_id} "
+                f"custom={bool(req.custom_text)} token={req.token[:8]}")
+    return {"status": "ok"}
 
 
 @app.post("/api/v2/permission/mode")

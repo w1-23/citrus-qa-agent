@@ -29,7 +29,7 @@ async def run_web_agent(web_goal: str) -> dict:
     """Web-Agent 极简执行器：无 LLM 决策，原样使用 web_goal 调一次联网。
 
     任何情况只调用一次（预算/开关短路由工具内部判定并返回控制信号）；
-    输出 = 工具回执 + 一句「联网检索员判定」；证据经 artifact 透传。
+    输出 = 工具回执 + 一句「联网侧回执」（代码生成，仅计数，不跨源判定）；证据经 artifact 透传。
     """
     from src.tools.deepseek_web import deepseek_web_search
 
@@ -48,24 +48,24 @@ async def run_web_agent(web_goal: str) -> dict:
     summary = str(artifact.get("web_summary") or "").strip()
 
     if "[DISABLED]" in text:
-        judge = "联网检索员判定：前端联网开关关闭，本轮无联网证据。"
+        judge = "联网侧回执：本轮未联网（开关关闭），无联网结果。"
         status = "disabled"
     elif "[WEB_BUDGET_EXHAUSTED]" in text:
-        judge = "联网检索员判定：本次请求联网预算已用尽（仅允许 1 次）。"
+        judge = "联网侧回执：本轮联网预算已用尽，无联网结果。"
         status = "budget"
     elif text.startswith("[ERR_") or "[AgentError]" in text or text.startswith("[Error"):
-        judge = "联网检索员判定：联网检索失败，本轮无联网证据（详见回执）。"
+        judge = "联网侧回执：联网检索失败，无联网结果。"
         status = "error"
     elif not web_items and not summary:
-        judge = "联网检索员判定：联网未返回有效信息（0 引用 0 摘要），不重试。"
+        judge = "联网侧回执：联网未返回结果（0 引用、0 正文）。"
         status = "empty"
     elif not summary:
-        judge = (f"联网检索员判定：获得 {len(web_items)} 条引用但无正文摘要"
-                 "（模型未生成综述；可依据标题/URL，不重试）。")
+        judge = (f"联网侧回执：获得 {len(web_items)} 条引用，无原生回答正文"
+                 "（模型未生成综述；可依据标题/URL 作答）。")
         status = "ok"
     else:
-        judge = (f"联网检索员判定：获得 {len(web_items)} 条引用、正文摘要 "
-                 f"{len(summary)} 字，可支撑时效与实时信息裁决。")
+        judge = (f"联网侧回执：获得 {len(web_items)} 条引用（URL 去重）、"
+                 f"原生回答正文 {len(summary)} 字。")
         status = "ok"
 
     result_text = f"{text.strip()}\n\n{judge}"

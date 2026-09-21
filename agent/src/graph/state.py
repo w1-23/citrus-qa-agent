@@ -34,6 +34,10 @@ class AgentState(TypedDict, total=False):
     search_suggestions: list[str]
     format_hint: Optional[str]
 
+    # v10.0（卡点① Intake）: 意图判定结果（结构化）与用户确认后的意图（全链路锚点）
+    intent_profile: Optional[dict]
+    intent_confirmed: Optional[str]
+
     retrieval_context: Optional[str]
     references_data: Optional[dict]
 

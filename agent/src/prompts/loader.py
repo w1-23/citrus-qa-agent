@@ -1,4 +1,4 @@
-"""Prompt Loader — 启动时固定拼接的 system prompt 装配入口.
+﻿"""Prompt Loader — 启动时固定拼接的 system prompt 装配入口.
 
 v9.0（用户决策改造，2026-09）: 固定 system prompt 架构——"检索 + 回答" 业务流中
 所有角色规则在一轮流程内都会被用到，因此不再按需动态加载，改为启动时一次性拼接：
@@ -28,18 +28,14 @@ from typing import Iterable
 # 角色 → 固定源文件映射（唯一维护入口，改这里即改拼接结果）
 # ─────────────────────────────────────────────────────────────
 ROLE_SOURCE_FILES: dict[str, list[str]] = {
-    # Supervisor（主控 Agent：路由 + 证据仲裁 + 最终回答，含全部输出格式模板）
+    # Supervisor（主控 Agent：路由 + 证据仲裁 + 最终回答，含输出规范）
     "supervisor": [
         "01_global_role_domain.md",
         "02_global_data_fidelity_citation.md",
         "03_supervisor_routing_fusion.md",
-        "09_format_fact.md",
-        "10_format_mechanism.md",
-        "11_format_compare.md",
-        "12_format_review.md",
-        "13_format_experiment.md",
-        "14_format_task.md",
-        "15_format_default.md",
+        # v10.0（2026-09-11 用户决策）: 原 09~15 七份格式模板合并为一份精简输出规范，
+        # 旧版留在 src/prompts/_backup_20260911/（详见该目录 README）
+        "09_output_style.md",
         "16_tool_usage_file_rules.md",
         "17_data_source_boundaries.md",
         "18_evidence_arbitration_citation.md",

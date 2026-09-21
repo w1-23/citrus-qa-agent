@@ -180,7 +180,7 @@ def _run_anthropic_search(query: str) -> Tuple[str, dict]:
     _queries_line = ("\n\n本次模型联网检索了这些关键词:\n" + "、".join(
         f"「{q[:80]}」" for q in meta.get("queries", [])[:5])) if meta.get("queries") else ""
     if summary.strip():
-        _summary_part = f"联网检索摘要（DeepSeek 原生搜索返回）:\n{summary[:2000]}"
+        _summary_part = f"联网检索摘要（DeepSeek 原生搜索返回）:\n{summary}"
     else:
         _summary_part = ("[注意] 本次联网返回引用条目但无正文摘要。请优先使用下方引用"
                          "标题/URL 或结合本地证据作答。")
@@ -195,7 +195,8 @@ def _run_anthropic_search(query: str) -> Tuple[str, dict]:
     logger.info(f"[deepseek_web_search] anthropic done: {len(calls)} 引用, "
                 f"{len(summary)} 字摘要, {elapsed:.0f}ms")
     return content, {"main_results": [], "web_results": items,
-                     "web_summary": summary[:4000]}
+                     "web_summary": summary,
+        }
 
 
 def _extract_urls_deep(obj, acc: list, depth: int = 0) -> None:
@@ -382,7 +383,7 @@ def deepseek_web_search(query: str) -> Tuple[str, dict]:
         # "模型判断无需联网"（误导），改为明示"返回引用但无正文"：web_items 照常
         # 保留（侧栏 [Wn] 可用），正文缺口如实标注、不重试（预算仅 turn0 一次）。
         if summary.strip():
-            _summary_part = f"联网检索摘要（DeepSeek 原生搜索返回）:\n{summary[:2000]}"
+            _summary_part = f"联网检索摘要（DeepSeek 原生搜索返回）:\n{summary}"
         else:
             _summary_part = ("[注意] 本次联网返回引用条目但无正文摘要（模型未生成综述）。"
                              "请优先使用下方引用标题/URL 或结合本地证据作答；"
@@ -408,7 +409,8 @@ def deepseek_web_search(query: str) -> Tuple[str, dict]:
         return content, {
             "main_results": [],
             "web_results": items,
-            "web_summary": summary[:4000],
+            "web_summary": summary,
+        
         }
     except requests.exceptions.Timeout as e:
         # v8.15.3: 超时单独分支（超时 ≠ 403/429——盲重试与误改配置都源于此混为一谈）

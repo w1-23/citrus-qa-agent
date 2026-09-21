@@ -178,7 +178,7 @@ def build_evidence_report(collected_artifacts: dict, query: str,
     if _summaries:
         lines.append("## 网络综述（DeepSeek 原生联网回答正文）")
         for _si, _s in enumerate(_summaries[:3], 1):
-            _body = _s if len(_s) <= 4000 else _s[:4000] + " …"
+            _body = _s  # v10.0: 原生联网回答全文注入（不截断、不浓缩）
             _quoted = "\n".join(f"> {ln}" for ln in _body.splitlines())
             lines.append(f"### 综述 {_si}")
             lines.append(_quoted)

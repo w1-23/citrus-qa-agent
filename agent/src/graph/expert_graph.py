@@ -15,6 +15,9 @@ from langchain_core.messages import (
 from langgraph.graph import StateGraph, END
 
 from src.graph.state import AgentState
+# v10.0（卡点②③）：证据裁决 + 回答审计（架构级约束）
+from src.core.adjudicate import adjudicate_batch, split_by_drops
+from src.core.source_tiers import grade_web_items
 from src.config import settings, get_deepseek_model, PROJECT_ROOT
 from src.core.agent_loop import (
     tc_id as extract_tc_id, count_unique_docs, dedup_by_doi, emit_llm_usage,
@@ -683,7 +686,9 @@ async def _execute_supervisor_tools(*, turn, response, messages,
                                     all_main_results, all_web_results,
                                     tool_names_called, used_queries,
                                     max_tools_per_turn, session_id,
-                                    tool_call_count, consecutive_failures):
+                                    tool_call_count, consecutive_failures,
+                                    intent: str = "",
+                                    adjudication_log: list | None = None):
     """执行本轮 supervisor 工具调用（原 supervisor_node 内联 ~200 行块提取）。
 
     就地扩写 messages / all_main_results / all_web_results / tool_names_called /
@@ -858,8 +863,24 @@ async def _execute_supervisor_tools(*, turn, response, messages,
     forced_final = False
     for pidx, tc, tc_dict, sub_result in done_list:
         artifacts = sub_result.get("artifacts", {}) or {}
-        all_main_results.extend(artifacts.get("main_results", []))
-        all_web_results.extend(artifacts.get("web_results", []))
+        _new_main = artifacts.get("main_results", []) or []
+        _new_web = grade_web_items(artifacts.get("web_results", []) or [])
+        # ── v10.0（卡点②）证据裁决：按 intent_confirmed 丢弃无关证据（生成前）──
+        #    程序化域名分级（T3 低可信标记）+ fast 模型相关性过滤（上限 min(3,n//2)，
+        #    fail-open：任何异常都不丢）。丢弃项不进入引用池与 write-agent 上下文。
+        if (_new_main or _new_web) and adjudication_log is not None:
+            try:
+                _adj = await adjudicate_batch(intent or "", _new_main, _new_web, turn=turn)
+                _drops = set(_adj.get("dropped_keys") or [])
+                if _drops:
+                    _new_main, _new_web = split_by_drops(_new_main, _new_web, _drops)
+                adjudication_log.append({**_adj, "tool": tc_dict["name"],
+                                         "kept_main": len(_new_main),
+                                         "kept_web": len(_new_web)})
+            except Exception as _ae:
+                logger.warning(f"[Adjudicate] batch skipped: {_ae}")
+        all_main_results.extend(_new_main)
+        all_web_results.extend(_new_web)
         tool_call_count += 1
         if tc_dict["name"] not in tool_names_called:
             tool_names_called.append(tc_dict["name"])
@@ -946,9 +967,61 @@ async def _execute_supervisor_tools(*, turn, response, messages,
 
 
 # v8.13-b5a: expert supervisor 循环骨架·收尾/引用装配 + 诊断日志（纯组装，不回写循环态）
+def _stage_a_audit(answer: str, cited_refs: list, n_main: int, n_web: int,
+                   state: dict, session_id: str) -> dict:
+    """v10.0（卡点③）Stage A 代码硬门：引用存在性 / 统计口径 / 时效共现。
+
+    完整证据池 = 本地 [1..k] + 联网 [W1..m] + 历史 [H*]；锚点 intent_confirmed。
+    返回可序列化 dict（stage_a + stage_b 占位 + intent），异常返回 {}（fail-open）。
+    """
+    audit_report: dict = {}
+    try:
+        from src.core.audit import run_code_audit
+        _intent = (state.get("intent_confirmed") or state.get("query") or "")
+        _profile = state.get("intent_profile") or {}
+        _valid_ids: set = set()
+        for _i in range(1, (n_main or 0) + 1):
+            _valid_ids.add(str(_i))
+        for _i in range(1, (n_web or 0) + 1):
+            _valid_ids.add(f"W{_i}")
+        try:
+            _hist_refs = session_manager.get_evidence_refs(session_id, limit=10)
+        except Exception:
+            _hist_refs = []
+        for _h in (_hist_refs or []):
+            _rid = str(_h.get("ref_id") or "").strip().upper()
+            if _rid:
+                _valid_ids.add(_rid)
+        _rep = run_code_audit(
+            answer, cited_refs=cited_refs, valid_ref_ids=_valid_ids,
+            query=_intent,
+            recency_required=bool(_profile.get("recency_required")),
+            web_available=bool(n_web),
+        )
+        audit_report = {
+            "stage_a": {
+                "severity": _rep.severity,
+                "issues": [{"code": _x.code, "severity": _x.severity,
+                            "sentence": _x.sentence[:200], "detail": _x.detail}
+                           for _x in _rep.issues],
+                "stats": _rep.stats,
+            },
+            "stage_b": None,
+            "intent": _intent[:200],
+        }
+        if _rep.severity != "ok":
+            logger.warning(f"[Audit] stage_a={_rep.severity} "
+                           f"issues={len(_rep.issues)} codes="
+                           f"{[x.code for x in _rep.issues][:6]}")
+    except Exception as _e:
+        logger.debug(f"[Audit] stage_a skipped: {_e}")
+    return audit_report
+
+
 def _assemble_supervisor_answer(*, answer, all_main_results, all_web_results,
                                 tool_call_count, tool_names_called, session_id,
-                                state, messages, trace_start_index, t0) -> dict:
+                                state, messages, trace_start_index, t0,
+                                adjudication_log: list | None = None) -> dict:
     """supervisor 循环后块：DOI 去重装配 cited_refs / 历史证据 / 引用校验 / 诊断日志。"""
     elapsed = (time.perf_counter() - t0) * 1000
 
@@ -1062,6 +1135,11 @@ def _assemble_supervisor_answer(*, answer, all_main_results, all_web_results,
         evidence_count=_evidence_count,
         ltm_chars=_ltm_chars)
 
+    # ── v10.0（卡点③）回答审计 Stage A：代码硬门（引用存在性/口径/时效）──
+    audit_report = _stage_a_audit(
+        answer, cited_refs, len(deduped_main), len(all_web_results),
+        state, session_id)
+
     # v8.4.1: 业务日志——supervisor 完成（回答长度/工具/证据量，排查"回答太短"类问题）
     # v8.4.6: 附加 evidence_avail/cited 指标（输出画像与后续评估的度量基础）
     # v8.13: citation_info 计算上移——此前 blog 引用后置变量恒 NameError，
@@ -1108,6 +1186,8 @@ def _assemble_supervisor_answer(*, answer, all_main_results, all_web_results,
         "references_data": references_data,
         "tools_called": tool_names_called,
         "citation_info": citation_info,
+        "audit_report": audit_report,
+        "adjudication": adjudication_log or [],
         "turn_trace": messages[trace_start_index:],
         "_trace": {
             "node": "supervisor",
@@ -1156,6 +1236,8 @@ async def supervisor_node(state: AgentState) -> dict:
     answer = ""
     all_main_results = []
     all_web_results = []
+    # v10.0（卡点②）: 证据裁决日志（进 state → 审计/ledger 可追溯每批丢弃）
+    adjudication_log = []
     tool_call_count = 0
     tool_names_called = []   # v8.3.7 M3: 已调用工具名（假完成检测用）
     t0 = time.perf_counter()
@@ -1223,6 +1305,8 @@ async def supervisor_node(state: AgentState) -> dict:
                     max_tools_per_turn=max_tools_per_turn, session_id=session_id,
                     tool_call_count=tool_call_count,
                     consecutive_failures=consecutive_failures,
+                    intent=(state.get("intent_confirmed") or query),
+                    adjudication_log=adjudication_log,
                 )
             )
             if forced_final:
@@ -1251,12 +1335,128 @@ async def supervisor_node(state: AgentState) -> dict:
         logger.error(f"[ExpertGraph:supervisor] error: {e}")
         answer = f"An error occurred: {e}"
 
-    return _assemble_supervisor_answer(
+    result = _assemble_supervisor_answer(
         answer=answer, all_main_results=all_main_results, all_web_results=all_web_results,
         tool_call_count=tool_call_count, tool_names_called=tool_names_called,
         session_id=session_id, state=state, messages=messages,
         trace_start_index=trace_start_index, t0=t0,
+        adjudication_log=adjudication_log,
     )
+
+    # ── v10.0（卡点③）回答审计 Stage B：fast 模型回看 ──
+    #    需求满足度 / 相关性 / 引用蕴含抽查 / 结构；输出结构化 verdict 挂
+    #    audit_report["stage_b"]，并落 blog/diag（外层 ledger 可收）。失败不阻断回答。
+    try:
+        from src.core.audit import review_with_llm
+        _fast = _pool_get_llm(
+            model=settings.RESOLVED_FAST_MODEL,
+            api_key=settings.RESOLVED_FAST_API_KEY,
+            base_url=settings.RESOLVED_FAST_BASE_URL or settings.RESOLVED_MAIN_BASE_URL,
+            temperature=0.0, timeout=25, max_tokens=800, thinking_off=True,
+        )
+
+        async def _review_call(msgs):
+            _r = await _fast.ainvoke(msgs)
+            return getattr(_r, "content", None) or str(_r)
+
+        _cited = (result.get("references_data") or {}).get("cited") or []
+        _review = await asyncio.wait_for(
+            review_with_llm(
+                answer=result.get("answer", ""),
+                query=query,
+                intent_summary=state.get("intent_confirmed") or query,
+                cited_refs=_cited,
+                llm_call=_review_call,
+            ),
+            timeout=25,
+        )
+        if _review:
+            result.setdefault("audit_report", {})["stage_b"] = _review
+            try:
+                from src.core.business_logger import blog
+                blog("audit_result",
+                     stage_a=(result.get("audit_report", {}).get("stage_a", {}) or {}).get("severity", "?"),
+                     severity=str(_review.get("severity") or "?"),
+                     requirement_met=bool(_review.get("requirement_met")),
+                     relevance=str(_review.get("relevance") or "?"),
+                     fixes=len(_review.get("fixes") or []))
+            except Exception:
+                pass
+            try:
+                from src.core.diag import diag
+                diag("audit_result", severity=str(_review.get("severity") or "?"),
+                     requirement_met=bool(_review.get("requirement_met")),
+                     relevance=str(_review.get("relevance") or "?"))
+            except Exception:
+                pass
+            if str(_review.get("severity")) == "critical":
+                logger.warning(f"[Audit] stage_b critical: "
+                               f"{(result.get('audit_report', {}) or {}).get('stage_a', {})}"
+                               f" fixes={(_review.get('fixes') or [])[:3]}")
+    except Exception as _e:
+        logger.debug(f"[Audit] stage_b skipped: {_e}")
+
+    # ── v10.0（卡点③）审计处置：critical → 1 次修复循环（预算封顶；失败保留原文）──
+    #    修复指令只做最小改动，禁止改动证据/引用对应关系；修复过程不流式上屏，
+    #    修完后重跑 Stage A 并更新 audit_report，结果落 blog（外层 ledger 可收）。
+    try:
+        _rep0 = result.get("audit_report") or {}
+        _sev_a = str(((_rep0.get("stage_a") or {}).get("severity")) or "ok")
+        _sev_b = str(((_rep0.get("stage_b") or {}).get("severity")) or "ok")
+        if _sev_a == "critical" or _sev_b == "critical":
+            _issue_lines = []
+            for _x in (((_rep0.get("stage_a") or {}).get("issues")) or [])[:4]:
+                _issue_lines.append(
+                    f"- [{_x.get('code')}] {str(_x.get('sentence'))[:70]}："
+                    f"{str(_x.get('detail'))[:110]}")
+            for _f in (((_rep0.get("stage_b") or {}).get("fixes")) or [])[:4]:
+                _issue_lines.append(f"- {str(_f)[:130]}")
+            if _issue_lines:
+                _instr = ("质检发现以下问题，请只做最小修改后重新输出完整回答：\n"
+                          + "\n".join(_issue_lines)
+                          + "\n要求：① 保持证据与引用编号的对应关系，不新增未在证据中出现的"
+                            "数字或结论；② 统计数字必须写明原始口径（如实生选种口径就写"
+                            "实生选种，不得当作杂交育种比例）；③ 其余内容与结构保持不变，"
+                            "只修问题句。")
+                _new_ans = ""
+                try:
+                    _rep_msg = await asyncio.wait_for(
+                        stream_llm_response(
+                            llm_base,
+                            messages + [HumanMessage(content=_instr)],
+                            on_text=lambda *_a, **_k: None,
+                            on_reasoning=lambda *_a, **_k: None),
+                        timeout=120)
+                    # stream_llm_response 返回 AIMessage，非 str
+                    _new_ans = getattr(_rep_msg, "content", "") or ""
+                except Exception as _re:
+                    logger.warning(f"[Audit] repair call failed: {_re}")
+                    _new_ans = ""
+                if _new_ans and len(_new_ans) > 200:
+                    result["answer"] = _new_ans
+                    _cited1 = (result.get("references_data") or {}).get("cited") or []
+                    _new_rep = _stage_a_audit(
+                        _new_ans, _cited1, len(all_main_results), len(all_web_results),
+                        state, session_id)
+                    if _new_rep:
+                        result.setdefault("audit_report", {})["stage_a"] = (
+                            _new_rep.get("stage_a") or {})
+                        result["audit_report"]["repaired"] = True
+                        try:
+                            from src.core.business_logger import blog
+                            blog("audit_repair",
+                                 before=_sev_a + "/" + _sev_b,
+                                 after=str((_new_rep.get("stage_a") or {}).get("severity")),
+                                 chars=len(_new_ans))
+                        except Exception:
+                            pass
+                        logger.info(
+                            f"[Audit] repaired: {_sev_a}/{_sev_b} -> "
+                            f"{( _new_rep.get('stage_a') or {}).get('severity')}")
+    except Exception as _e:
+        logger.debug(f"[Audit] repair skipped: {_e}")
+
+    return result
 
 
 async def expert_save_node(state: AgentState) -> dict:

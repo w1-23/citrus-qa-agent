@@ -1178,6 +1178,17 @@ footer {
 /* ── Responsive: hide sidebar on narrow screens ── */
 @media (max-width: 820px) { .sidebar { display: none; } }
 @media (max-width: 640px) { .ctx-drawer { width: 100vw; right: -100vw; } }
+/* v10.0（卡点①）意图澄清卡：复用 perm-card 容器，选项按钮化 */
+.intent-question { font-size: 13px; color: var(--text-secondary); margin: 6px 0 10px; line-height: 1.6; }
+.intent-opt { display: block; width: 100%; text-align: left; margin: 6px 0; padding: 10px 12px;
+  border: 1px solid var(--border-hairline); border-radius: 8px; background: transparent;
+  color: var(--text-primary); cursor: pointer; line-height: 1.55; font-size: 13px;
+  transition: border-color 0.15s var(--ease-out-quint), color 0.15s var(--ease-out-quint); }
+.intent-opt:hover { border-color: var(--accent); color: var(--accent); }
+.intent-custom { display: flex; gap: 8px; margin-top: 10px; }
+.intent-custom input { flex: 1; padding: 8px 10px; border: 1px solid var(--border-hairline);
+  border-radius: 8px; background: var(--bg-elevated); color: var(--text-primary); font-size: 13px; }
+.intent-custom input:focus { outline: none; border-color: var(--accent); }
 </style>
 </head>
 <body>
@@ -1397,7 +1408,9 @@ function renderMarkdownSafe(text) {
     if (code && typeof code === 'object') { code = code.text || ''; }
     return '<code>' + escapeHtmlCode(code) + '</code>';
   };
-  return marked.parse(String(text == null ? '' : text), { renderer: renderer, breaks: true });
+  // v10.0: 回答不使用删除线——防模型输出 ~~...~~ 被 marked 渲染成"横线划掉"观感
+  var src = String(text == null ? '' : text).replace(/~~/g, '');
+  return marked.parse(src, { renderer: renderer, breaks: true });
 }
 
 /* ─── v8.4.3: 运行时配置（上下文预算/权限模式单一来源，删本地硬编码）─── */
@@ -1653,6 +1666,73 @@ function grantPermission(toolName, scope) {
     // v8.10j: 不再重放流——v8.4.5 起后端为"挂起等待授权→同一执行内继续"，
     // 授权后原请求自动继续输出；前端重放会造成双通道（二次权限检查 + 二次回答）
   }).catch(function(e) { alert('授权失败: ' + e.message); });
+}
+
+/* ─── v10.0（卡点①）意图澄清卡：LLM 判定歧义后弹出，中文候选 + 自填；超时按推荐项放行 ─── */
+function showIntentCard(data) {
+  var existing = document.getElementById('intent-card');
+  if (existing) existing.remove();
+  var card = document.createElement('div');
+  card.id = 'intent-card';
+  card.className = 'perm-card';
+  var opts = data.options || [];
+  var html = '<div class="perm-title">🤔 确认一下你的问题</div>';
+  if (data.intent_summary) {
+    html += '<div class="intent-question">我理解你想问：' + escapeHtml(data.intent_summary) + '</div>';
+  }
+  if (data.reason) {
+    html += '<div class="perm-hint">存在歧义：' + escapeHtml(data.reason) + '</div>';
+  }
+  for (var i = 0; i < opts.length; i++) {
+    var o = opts[i] || {};
+    var label = escapeHtml(o.text || '');
+    if (o.caliber) {
+      label += '<br><span class="perm-hint">口径：' + escapeHtml(o.caliber) + '</span>';
+    }
+    html += '<button class="intent-opt" data-id="' + (o.id != null ? o.id : (i + 1)) + '">'
+          + (i + 1) + '. ' + label + '</button>';
+  }
+  html += '<div class="intent-custom">'
+        + '<input id="intent-custom-input" type="text" placeholder="以上都不是，自己说明一下…" />'
+        + '<button class="primary" id="intent-custom-send">提交</button></div>'
+        + '<div class="perm-hint">' + (data.timeout_sec || 30) + 's 未选择将按第 1 项继续</div>';
+  card.innerHTML = html;
+  card.querySelectorAll('.intent-opt').forEach(function(btn) {
+    btn.onclick = function() {
+      confirmIntent(data.token, btn.getAttribute('data-id'), '');
+    };
+  });
+  var send = card.querySelector('#intent-custom-send');
+  if (send) {
+    send.onclick = function() {
+      var el = card.querySelector('#intent-custom-input');
+      var v = (el && el.value ? el.value : '').trim();
+      if (!v) return;
+      confirmIntent(data.token, null, v);
+    };
+  }
+  document.body.appendChild(card);
+}
+
+function confirmIntent(token, choiceId, customText) {
+  fetch('/api/v2/intent/confirm', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      token: token,
+      // data-id 来自按钮属性（字符串）→ 归一为数字，NaN 转 null（后端 Optional[int]）
+      choice_id: (function(v) {
+        if (v === null || v === undefined || v === '') return null;
+        var n = parseInt(v, 10);
+        return isNaN(n) ? null : n;
+      })(choiceId),
+      custom_text: customText || null,
+    }),
+  }).then(function(r) { return r.json(); }).then(function() {
+    var card = document.getElementById('intent-card');
+    if (card) card.remove();
+    // 后端为"挂起等待→同一请求内继续"，选择后原 SSE 流自动继续，无需重放
+  }).catch(function(e) { alert('提交失败: ' + e.message); });
 }
 
 /* ─── Theme ─── */
@@ -2175,6 +2255,9 @@ function renderContextPanel(data) {
       updateStatus('answer', msg || '正在规划结构...');
     } else if (stage === 'final_answer') {
       updateStatus('answer', '生成最终答案...');
+    } else if (stage === 'intake') {
+      // v10.0: Intake 意图判定（fast 模型一次；有歧义时随后弹确认卡）
+      updateStatus('tool', data.summary || msg || '正在理解你的问题...');
     } else if (stage === 'step_active') {
       updateStatus('tool', (stepNames[data.step_id] || data.step_id) + '...');
     } else if (stage === 'step_done') {
@@ -2611,6 +2694,16 @@ async function sendMsg(isFollowUp) {
         break;
       case 'context_usage': updateContextTokens((data.delta != null ? data.delta : data.total) || 0); break;
       case 'context_degraded': showBanner('⚠️ 历史会话加载失败，本次回答可能缺少上下文'); break;
+      case 'intent_confirm':
+        showIntentCard(data);
+        appendTerminal('🤔 已弹出意图确认卡片（' + ((data.options || []).length) + ' 个候选）');
+        break;
+      case 'intent_resolved':
+        var _ic = document.getElementById('intent-card');
+        if (_ic) _ic.remove();
+        appendTerminal('✓ 已按确认意图继续：' + String(data.intent || '').substring(0, 80)
+                       + (data.timeout ? '（超时·按推荐项）' : ''));
+        break;
       case 'permission_request':
         showPermissionCard(data);
         appendTerminal('⚠ 工具 ' + (data.tool_name || '') + ' 需要权限确认（已弹出审批卡片）');
@@ -2670,7 +2763,33 @@ async function sendMsg(isFollowUp) {
         } else if (data.citation_mismatch) {
           showBanner('⚠ 回答引用编号(' + (data.citation_count||0) + ')多于检索文献(' + (data.retrieval_count||0) + ')');
         }
-        if (!fullText&&data.answer) fullText=data.answer;
+        // v10.0（卡点③）: 修复循环的修正答案不流式上屏，须以 done.answer 覆盖草稿
+        var _repaired = !!(data.audit && data.audit.repaired);
+        if (_repaired && data.answer) {
+          fullText = data.answer;
+          showBanner('✓ 质检发现问题并已自动修正，以上为修正后的最终答案');
+        } else if (!fullText && data.answer) {
+          fullText = data.answer;
+        }
+        // v10.0（卡点③）: 审计结果轻提示（critical / 需求未满足）
+        try {
+          var _au = data.audit || {};
+          var _sa = (_au.stage_a || {}).severity || 'ok';
+          var _sb = (_au.stage_b || {}).severity || '';
+          if (_sa === 'critical' || _sb === 'critical') {
+            showBanner('⚠ 质检发现回答存在事实/引用/口径问题，已尝试修正，请谨慎采用');
+          } else if (_au.stage_b && _au.stage_b.requirement_met === false) {
+            showBanner('⚠ 质检认为回答可能未完全满足你的问题要求（口径/范围），请注意甄别');
+          }
+        } catch (_ae) {}
+        // v10.0（卡点②）: 证据裁决透明度（舍弃条数）
+        if (data.adjudication && data.adjudication.length) {
+          var _dropN = 0;
+          for (var _ai = 0; _ai < data.adjudication.length; _ai++) {
+            _dropN += ((data.adjudication[_ai] || {}).dropped_keys || []).length;
+          }
+          if (_dropN > 0) appendTerminal('🧹 证据裁决：已舍弃 ' + _dropN + ' 条与问题无关的证据');
+        }
         if (fullText) {
           answerDiv.innerHTML=renderMarkdownSafe(fullText.replace(/__NEED_COMPLEX__/g,''));
         }

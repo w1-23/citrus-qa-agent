@@ -57,7 +57,7 @@ web_search:
   max_uses: 5                     # anthropic 线单次调用最多搜索次数
   # v9.6.3: 单次联网调用的输出预算。原硬编码 2000 会被内部检索+思考吃光，
   # 导致 stop_reason=max_tokens、最终无综合正文（§5.8 旧数据成因）。实测 8000 稳定 end_turn。
-  max_tokens: 8000
+  max_tokens: 16000              # v10.0: 原生回答不允许截断——输出预算 8000→16000（顶格仍被截止时再调大）
   responses_path: /v1/responses   # Responses 端点路径（官方文档待核实，probe 可验证）
   probe_enabled: false            # 是否启用配套探测脚本（websearch_probe.py --run）
   # v8.15.3b: 联网调用 HTTP 读取超时（秒）。DeepSeek 原生联网实测 33-50s——
@@ -161,6 +161,7 @@ agent:
   tool_timeouts:
     deepseek_web_search: 120
   tool_result_caps:              # 子Agent结果回传supervisor的分档截断(字符)
+    call_search_both: 200000     #   v10.0: 本地+联网合并回执（含原生回答全文，必须零截断）
     write-agent: 1000            #   write-agent 只回传保存摘要
     retrieve-agent: 60000        #   v8.4.6: 检索证据清单完整回传（原 15000 截掉关键证据细节）
                                  #   v8.16.2: 40000→60000 —— rich 场景回执实测 47.6K

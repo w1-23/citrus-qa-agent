@@ -67,3 +67,10 @@ make-mobile-leaf.mjs
 # 需要公开时再显式放开，例如：
 #   !paper_cea/REPRODUCIBILITY.md
 paper_cea/
+
+# 专利材料（2026-09-21）：**申请前绝不可进公开仓库**
+# 本仓库是公开仓库，申请前公开技术方案会破坏新颖性。patent/ 放的是申请稿全文、
+# 审查意见对齐分析、技术方案差异等——一律本地留存。需要时用本地分支/tag 或离线
+# tar 交付，不要 push 到 origin。
+patent/
+_scratch/
