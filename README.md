@@ -120,7 +120,6 @@ powershell -ExecutionPolicy Bypass -File .\run.ps1
 01_源码_src/       源码包 src/（api core engine enhance graph guardrails prompts retrieval session skills tools）
 02_配置_config/    config.yaml（检索/联网/模型）· enhance_entities.yaml（实体归一）
 04_脚本_scripts/   ingest.py · prepare_models.py · reindex_lance.py · e2e_check.py
-05_测试_tests/     测试与 pytest.ini
 06_网页_index/     index.html（由 src/api/main.py 挂载）
 run.ps1 / stop.ps1 一键启停
 pack_release.ps1   打包工具（-CorpusOnly 生成语料分卷）
