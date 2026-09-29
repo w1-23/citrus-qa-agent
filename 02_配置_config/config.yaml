@@ -1,0 +1,309 @@
+# GSRA: Graph-Structured Retrieval Agent 配置文件
+# 优先级: 环境变量 > YAML > pydantic-settings 默认值
+
+retrieval:
+  backend: lancedb            # v8.13-b5b: 全项目数据源重定向——lancedb 统一承载新旧数据包（无锁/热更新）
+  top_k_vector: 40          # 向量检索每批取回数量
+  top_k_bm25: 40            # BM25 检索取回数量
+  top_k_final: 10           # Rerank 后最终保留数量
+  candidate_window: 20      # v9.4: RRF 融合后精排候选窗口（原 top_k_final*2 隐式硬编码 multi_retriever.py:600）
+  rrf_k: 60                 # RRF 融合常数
+  rrf_weights:
+    orig_dense: 1.0          # original_query 向量检索权重
+    hyde_dense: 1.0          # HyDE 假想答案向量检索权重
+    bm25: 1.0                # BM25 词法检索权重
+  rerank_threshold: 0.25    # Sigmoid 概率绝对底线阈值（RAG 与 HyDE 路一致，动态阈值 = max(0.25, top×ratio)）
+  dynamic_threshold_ratio: 0.60  # 动态阈值 = top_score * ratio
+  web_relevance_threshold: 0.3   # Web 语义过滤阈值（BGE reranker 分数，0=不相关 1=完美匹配）
+  # v9.4: 代码级收敛早停参数（论文实验4b；原硬编码 agent_runner.py:593）
+  early_stop_min_evidence: 6     # 累计唯一证据 ≥ 该值才允许早停
+  early_stop_new_ratio: 0.25     # 本轮新增占比 < 该值 → 强制收敛
+  rag_hyde_enabled: true         # HyDE: 本地RAG检索前生成英文假想答案提升召回
+  # v8.15.3c: 假想答案输出上限 512→1024 —— v4-flash 默认思维链偶发把 512 预算
+  # 吃光、返回空 content（8-21 19:45 连续两轮"生成结果为空"即此），1024 留余量
+  # v8.16.3c: 实测真机 22:02 连空两次 → 关思维链(下) + 预算抬到 2048 双保险
+  hyde_max_tokens: 2048          # v8.16.3: 结构化 HyDE（假想段落 200-500 词 + 3 多路查询 + 3-5 要点）输出上限
+  hyde_thinking_off: true        # v8.17.18: 不发送 thinking 参数（api.deepseek.com 不接受，真机 TypeError 实证）；V3.2 类模型思维链默认关闭，不发送即等效关闭
+  # v9.4: 多粒度查询消融模式（论文实验2）：full=HyDE+MQ+SUM 全路（原默认）；raw=仅原始查询；
+  # hyde_only/mq_only/sum_only=仅单类；hyde_mq/hyde_sum=两类组合。见 search.py _compose_queries
+  # v9.4b（论文实证 2026-08-26）：生产默认改 raw——exp1/1b/1c/2 四重互证 full 多路
+  # （MRR 0.256）远劣于原始查询单路（0.557 生产实测/0.653 对齐英文上界）；归因：rerank
+  # 误用 HyDE 段（multi_retriever.py:728 防御已改）+ 多路池稀释。raw 还免 1 LLM 调用/查询。
+  query_mode: raw
+  # v8.15 查询级结果缓存：相同/高度相似问题直接复用上次检索结果（毫秒级返回）。
+  # 键 = 规范化 query + HyDE 开关 + 语料指纹(批次数+总块数)，语料增删/重启自动失效。
+  rag_cache_enabled: true        # 总开关（默认开；不影响 HyDE/embed 内部缓存）
+  rag_cache_size: 300            # LRU 上限（条）
+  rag_cache_ttl_hours: 24        # 过期时间（小时）
+
+# ── 联网搜索（v8.15，DeepSeek 原生 Responses API web_search tool）──
+# 「联网」开关在前端（输入框左下），由用户逐条开启/关闭，随请求下发到后端：
+# 前端开 → 本次请求可联网（DeepSeek 自主决定何时检索、不限制网站），引用带网址
+# 落入侧栏「联网搜索」证据组；前端关 → 工具执行层短路，零网络调用。
+# 本段 enabled 只作为部署默认展示值，**不设启用门槛**（不代表"必须改这里才能用"）。
+# ⚠️ 未实测标记：Responses 端点路径/引用字段形态以官方文档为准（实现按 OpenAI
+# Responses API web_search tool 契约编写，沙箱无外网未联调，请先跑
+# `python -m src.tools.websearch_probe --run` 核对 ①②③ 后再正式使用）。
+web_search:
+  enabled: true                   # 部署默认展示值（非启用门槛；前端开关才是总开关）
+  provider: deepseek_responses    # deepseek_responses | builtin(预留 Tavily/Serper 自建源)
+  # v9.6: 联网走哪条 API 线。
+  #   responses = Responses API（tools=[{type:web_search}]）——官方自 2026-09-11 起
+  #               静默忽略该内置工具，需等官方恢复；
+  #   anthropic = Anthropic 兼容端点（tools=[{type:web_search_20250305}]）——实测可用。
+  # 两者本工具统一映射为 [Wn] 证据条目，对 supervisor/前端零影响；改本行即可回退。
+  api_style: anthropic
+  anthropic_path: /anthropic/v1/messages
+  max_uses: 5                     # anthropic 线单次调用最多搜索次数
+  # v9.6.3: 单次联网调用的输出预算。原硬编码 2000 会被内部检索+思考吃光，
+  # 导致 stop_reason=max_tokens、最终无综合正文（§5.8 旧数据成因）。实测 8000 稳定 end_turn。
+  max_tokens: 16000              # v10.0: 原生回答不允许截断——输出预算 8000→16000（顶格仍被截止时再调大）
+  responses_path: /v1/responses   # Responses 端点路径（官方文档待核实，probe 可验证）
+  probe_enabled: false            # 是否启用配套探测脚本（websearch_probe.py --run）
+  # v8.15.3b: 联网调用 HTTP 读取超时（秒）。DeepSeek 原生联网实测 33-50s——
+  # 曾设 30s 导致"本会成功的慢响应被自掐"→ 伪失败 → 熔断 → 7 次全败白等 210s。
+  # 90s 覆盖实测区间并留余量；执行层对应预算见 agent.tool_timeouts。
+  timeout_sec: 90
+  # v9.1（真机实测 2026-08-24）: Responses 端点不接受 thinking:disabled（HTTP 200
+  # 但 reasoning 块照出）；实测有效关闭字段为 reasoning effort none（输出无
+  # reasoning 块）。与 chat/completions 端点字段（model.reasoning_off_body）不同，
+  # 联网搜索内部调用走本配置。
+  reasoning_off_body:
+    reasoning:
+      effort: none
+
+# ── v10.7 多智能体联网架构：Web Agent 自主检索（计划 §3.3）──
+# 原则「语义决策由模型，约束由代码」：搜什么由 Supervisor 决定、相关性/充分性由
+# Web Agent 判断，而**轮次上限与预算由代码强制**（src/core/web_agent_loop.py）。
+web_agent:
+  max_rounds: 2                   # 轮次硬上限（代码侧再钳到 ≤2）；第 1 轮充分即停止
+  self_judge: true                # 由 Web Agent 自己判断相关性/充分性（关掉＝只搜一轮）
+  allow_strategy_switch: true     # 第 2 轮允许换策略（换关键词/粒度/来源/语言）
+  stop_when_sufficient: true      # 第 1 轮相关且充分 → 立即停止
+
+model:
+  main: "deepseek-flash"   # v9.5.1: 官方现行模型名 deepseek-flash（服务 DeepSeek-V4.1-Flash）；旧名 deepseek-v4-flash 已下线但可调用并路由到 V4.1
+  fast: "deepseek-flash"
+  embedding: "intfloat/multilingual-e5-large"
+  reranker: "BAAI/bge-reranker-v2-m3"
+  # v8.15.3: 检索决策子代理思维链控制。v8.17.19 起：default/off 均保持——
+  # off = retrieve-agent（及 hints/压缩/HyDE）经 extra_body 下发关闭字段
+  # （supervisor 不传，思维链保持开启做融合判断）。字段见下方 reasoning_off_body。
+  # v8.17.17（用户决策）：改 off——检索决策轮只要"判断预算/角度/收尾"，无需
+  # 自由推理；用户日志实测推理显著拖慢 retrieve-agent 每轮 LLM（2.4~24.5s）。
+  # retrieve-agent 接线保留（agent_runner thinking_off=...=="off"）；
+  # supervisor/expert 合成轮不接 thinking_off，保持默认（不发送，不影响）。
+  reasoning_mode: "off"     # default | off
+  # v8.17.19: thinking_off 关思维链的请求体字段（extra_body 原样透传网关，
+  # 不走顶层参数——v8.17.18 曾顶层下发致 TypeError 全挂）。
+  # 官方 DeepSeek 推荐 thinking；网关不支持时替换为备选并真机验证
+  # （判断标准：响应无 reasoning_content 且耗时明显下降）：
+  #   reasoning: {enabled: false}  |  reasoning_effort: none  |  enable_thinking: false
+  # v8.17.19: thinking_off 关思维链的请求体字段（extra_body 原样透传网关，
+  # 不走顶层参数——v8.17.18 曾顶层下发致 TypeError 全挂）。
+  # 官方 DeepSeek 推荐 thinking；网关不支持时替换为备选并真机验证
+  # （判断标准：响应无 reasoning_content 且耗时明显下降）：
+  #   reasoning: {enabled: false}  |  reasoning_effort: none  |  enable_thinking: false
+  # 2026-08-24 真机实测（chat/completions 端点）：thinking:disabled 有效（默认值保持）。
+  reasoning_off_body:
+    thinking:
+      type: disabled
+
+embedder:
+  force_cpu: false          # 强制 CPU（调试用）
+  # offline_mode: true     # 默认离线(大陆推荐)。改为 false 或设 HF_HUB_OFFLINE=0 可连 HuggingFace 检查更新
+
+onnx:
+  provider_priority:
+    - "DmlExecutionProvider"
+    - "CUDAExecutionProvider"
+    - "CPUExecutionProvider"
+
+# ── Compute Scheduler ──
+compute:
+  prefer_device: "auto"       # auto / directml / cuda / cpu
+  fallback_to_cpu: true
+  dml_device_id: 0
+  cuda_device_id: 0
+
+react:
+  max_steps: 5
+
+logging:
+  level: "INFO"
+  dir: "logs"
+
+chat:
+  temperature_main: 0.2
+    # 主模型（deepseek-chat）生成温度。值越大回答越随机。
+    # 当前 0.2 偏保守，适合科研回答需事实准确性。可提至 0.3 让综合论述更流畅。
+  temperature_fast: 0.0
+    # 快模型生成温度，用于意图分类、历史压缩、查询翻译等辅助任务。
+    # 0.0 = 确定性最高，避免这些辅助任务引入随机偏差。
+  max_tokens: 4096
+    # 每次 LLM 生成的最大 token 数。涵盖了主回答的输出长度上限。
+    # 注意：仍受模型上下文窗口和已消耗 token 的双重限制。
+    # v8.4 清理: 旧 graph.py 压缩参数（history_compact_threshold 等）已随
+    # check_history/compact_history 节点删除，压缩统一走 context_budget 段
+
+graph:
+  recursion_limit: 25            # main.py
+
+# v8.4.4: 无消费点的 feature_flags 键已清理（框架与 /api/v1/flags 端点保留，
+# 具体开关接入业务时再添加）
+feature_flags: {}
+
+# ── Mixed Route ──
+# v8.3.1: 已彻底删除服务端路由自动升级（用户手动切换 light/expert，前端 light_mode 决定模式）。
+# 保留本段注释作为设计记录，无任何配置项。
+
+api:
+  qdrant_timeout: 60             # Qdrant 客户端连接超时秒数
+
+# ── Agent / Sub-agent ──
+agent:
+  agents_dir: "src/prompts/agents"
+  workspace_dir: "workspace"     # 文件读写工作目录
+  tool_exec_timeout_sec: 60      # 单个工具执行整体超时（超时返回 [ERR_TIMEOUT]）
+  # v8.15.3b: 单工具超时覆盖（秒）。deepseek_web_search 走官方 Responses 原生联网，
+  # 实测 33-50s，默认 60s 上限会误杀 → 单独放行至 120s（HTTP 读取预算见 web_search.timeout_sec）
+  tool_timeouts:
+    deepseek_web_search: 120
+  tool_result_caps:              # 子Agent结果回传supervisor的分档截断(字符)
+    call_search_both: 200000     #   v10.0: 本地+联网合并回执（含原生回答全文，必须零截断）
+    write-agent: 1000            #   write-agent 只回传保存摘要
+    retrieve-agent: 60000        #   v8.4.6: 检索证据清单完整回传（原 15000 截掉关键证据细节）
+                                 #   v8.16.2: 40000→60000 —— rich 场景回执实测 47.6K
+                                 #   (15文献+3综述+8联网条目) 旧 cap 截尾恰好切掉文末 [Wn] 清单
+                                 #   + 引用导引（v8.16.2 实证根因）。重排+扩 cap 后 rich 零截断。
+    analyze-agent: 10000         #   分析结论
+    default: 100000              #   read_local_file/pdf_read 保留大值
+
+# ── Write Pipeline (Plan-Execute 长文写作流水线, v8.3.2) ──
+pipeline:
+  material_min_count: 8         # 材料包就绪最小文献数（不足时 supervisor 补 1 次定向检索）
+  max_plan_retries: 1           # Plan 校验失败最大重试次数
+  refs_coverage_ratio: 0.4      # 大纲 refs 覆盖章节比例下限
+  section_max_tokens: 4000      # 单章生成输出上限
+  section_timeout: 120          # 单章 LLM 调用超时(秒)
+  resume_enabled: true          # 中断续传（pipeline_tasks 表）开关
+  parallel_sections: 3          # v8.4.6: 单章生成并发度（生成并发、按序写盘；1=串行，兼容旧行为）
+
+# ── File I/O ──
+file_io:
+  read_max_size_mb: 50           # 单次读取文件大小上限（MB）
+  write_max_size_mb: 10          # 单次写入文件大小上限（MB）
+
+# ── Statistics ──
+statistics:
+  alpha: 0.05                    # 统计显著性阈值
+  max_sample_size: 100000        # 单次分析最大样本量
+
+# ── Bio Databases ──
+bio_db:
+  entrez_email: "citrus-agent@localhost"  # NCBI Entrez 必填邮箱
+  entrez_tool: "CitrusQAAgent"           # NCBI Entrez 工具名
+  kegg_api_url: "https://rest.kegg.jp"           # KEGG API
+  uniprot_api_url: "https://rest.uniprot.org"    # UniProt API
+  string_api_url: "https://string-db.org/api"    # STRING API
+
+# v8.4.4: HITL 旧体系已删除（stub 端点/配置无消费点）——权限确认由
+# permission 体系承担（permission_mode + /api/v2/permission/grant + 前端审批卡片）
+
+# ── Sandbox ──
+sandbox:
+  enabled: true
+  allowed_patterns:
+    - read_*
+    - search_*
+    - list_*
+  dangerous_patterns:
+    - delete_*
+    - exec_*
+    - write_*
+
+# ── Context Budget v8.4（存储全量·发送裁剪：SQLite 轨迹 append-only 永不改写，
+#    压缩是"发送视图构建"，只在用户轮边界（新请求 load 时）批量执行）──
+context_budget:
+  enabled: true
+  max_tokens: 1000000          # v8.4.3: 发送视图预算=模型窗口(DeepSeek V4 Flash 1M)
+                               #   软阈值 75%(750K) 批量压缩 / 硬阈值 93%(930K) 熔断兜底
+  soft_threshold: 0.75         # 视图 ≥75% 时批量压缩（一次压到 ~50%，不逐步挤牙膏——
+                               #   每次压缩=一次缓存破坏，批量=只破坏一次）
+  hard_threshold: 0.93         # 硬阈值：规则式保护截断 + 强制收尾兜底
+  target_ratio: 0.50           # 批量压缩目标：压到预算 ~50%
+  protect_recent_turns: 3      # 保护名单：最近 3 轮 Q/A 不压缩（当前用户意图/被引用证据/DOI 等标识符
+                               #   由压缩提示词保证保留）
+  keep_recent_turns: 2         # TRUNCATE 硬截断时保留最近轮数
+  summarize_ratio: 0.70
+  compact_max_tokens: 800
+
+# ── Context Engineering v8.4 ──
+context:
+  static_prefix: true           # v8.4.4 转正: SystemMessage 字节级稳定(格式指南/策略卡片/
+                                #   skills 移出前缀，追加到当前轮 HumanMessage 尾部)，
+                                #   利于 DeepSeek 上下文缓存命中（灰度验证通过后转默认）
+
+# ── Permission v8.4.3（结构化权限确认）──
+# 权限拒绝不再靠用户打字"确认权限"（被当普通 query 白烧一轮），
+# 由前端审批卡片 + POST /api/v2/permission/grant 闭环。
+permission:
+  mode: auto_workspace          # ask=危险操作弹卡片审批 | auto_workspace=workspace/output 下写文件免询问 |
+                                # deny=一律拒绝危险操作
+  wait_sec: 90                  # v8.4.5: ask 模式授权等待秒数（卡片未回应则超时按拒绝处理）
+
+# ── Fast Guard v8.1.1 ──
+guard:
+  enabled: true
+  max_query_length: 12
+
+# ── Supervisor v8.1.1 ──
+supervisor:
+  max_turns: 8
+  max_tools_per_turn: 2         # v8.3.4: 每轮工具调用预算（防一轮内串行多个子代理）
+  parallel_tool_calls: false
+
+# ── Subagents v8.1.1 ──
+subagents:
+  retrieve-agent:
+    max_turns: 3
+  write-agent:
+    max_turns: 6
+  analyze-agent:
+    max_turns: 2
+
+# ── Light Mode v8.1.1 ──
+light:
+  max_turns: 2                   # light 模式 supervisor 最大轮次（v8.3.3 接线）
+
+# ── Tool Registry (YAML 注册替代代码注册) ──
+tools:
+  registrations:
+    - name: citrus_rag_search
+      category: rag
+      readonly: true
+      concurrency_key: rag
+    - name: deepseek_web_search
+      category: web
+      readonly: true
+      concurrency_key: web
+    - name: pdf_read
+      category: analysis
+      readonly: true
+      concurrency_key: analysis
+    - name: read_local_file
+      category: file
+      readonly: true
+      concurrency_key: file
+    - name: write_local_file
+      category: write
+      readonly: false
+      concurrency_key: file
+    - name: statistical_analysis
+      category: analysis
+      readonly: true
+      concurrency_key: analysis
+    - name: experimental_design
+      category: analysis
+      readonly: true
+      concurrency_key: analysis

@@ -1,0 +1,46 @@
+# 专利增强包配置（可选）——**默认全部关闭**
+#
+# 优先级：环境变量 > 本文件 > 内置默认（关）。
+# 本文件不存在时行为完全不变；存在时也只影响 `agent/src/enhance/` 内的模块。
+#
+# 与 `config.yaml` 分开存放是**刻意**的：`config.yaml` 被 `src/config.py` 读取，
+# 而 `src/config.py` 是三个机制实验的依赖文件——增强开关不碰它，
+# 保证实验侧配置文件逐字节不变。
+
+enhance:
+  # ── 模块1 + 模块6：论断支持度校验 + 证据等级自动判定 ──
+  # 对正文每个论断句与表格每个单元格，算它与其所引原文块的支持度；
+  # 低于阈值判"不支持"，等级由得分自动判定（替代模型自报的"模型推断"标签）。
+  support_check: false
+  support_threshold: 0.35        # 交叉编码器相关性阈值（0–1）
+  require_number_match: true     # 硬门：论断里的数值必须在所引原文块出现
+  evidence_level: true           # 随 support_check 生效
+
+  # ── 模块1b：回检闭环 ──
+  # 判为不支持 → 以论断为查询定向回检 → 重绑支撑块；仍失败 → 降级「原文未记载」
+  # 并同步更新编号映射。需调用方注入 retrieve_fn 才生效。
+  recheck: false
+  recheck_max: 3
+
+  # ── 模块2：联网原文块管线 ──
+  # 对联网引用条目抓取原文、切块，使其与本地证据同构（侧栏预览=模型依据的那一块）。
+  # 抓取失败 fail-open 退回搜索片段。
+  web_fulltext: false
+  web_fulltext_max: 5
+
+  # ── 模块3：柑橘领域实体归一 ──
+  # 映射表：agent/enhance_entities.yaml（26 对象 / 93 别名，由语料取证 + NCBI 核验生成）
+  # **用途默认只开对齐与冲突检测，不开查询扩展**——机制实验 exp3 证明查询扩展会把 gold 挤出。
+  entity_norm: false
+  entity_query_expansion: false    # 查询扩展：默认关（会挤出 gold）
+  entity_alignment: true           # 跨来源对象对齐（表格行主键，不影响检索）
+  entity_conflict: true            # 冲突检测（关系比对，不影响检索）
+
+  # ── 模块4：去重粒度 ──
+  # doi   = 文献级（**默认，与 v9.6.3 及三个机制实验口径一致**）
+  # chunk = 块级（paper_id:chunk_index，侧栏展示的即模型实际依据的那一块）
+  dedup_granularity: doi
+
+# 注：历史记忆证据（[Hn]）**不提供**（2026-09-21 决定）。
+# 原稿里 [Hn] 游离于语料指纹之外的问题，用"不写进权利要求"解决，
+# 而不是补一套指纹管理；既有 [Hn] 代码保持原样不动。
