@@ -10,6 +10,7 @@ import asyncio
 import contextvars
 import json
 import logging
+import re
 import time
 from typing import Optional
 
@@ -159,15 +160,24 @@ def log_sse_frame(event_dict: dict) -> None:
 # Tool Execution Heartbeat / Progress tracker
 # ═══════════════════════════════════════════════════════════════════════
 
-_tool_start_times: dict[str, tuple[float, str]] = {}
+_tool_start_times_var: contextvars.ContextVar = contextvars.ContextVar(
+    "tool_start_times", default=None)
+
+
+def _tool_start_times() -> dict[str, tuple[float, str]]:
+    timers = _tool_start_times_var.get()
+    if timers is None:
+        timers = {}
+        _tool_start_times_var.set(timers)
+    return timers
 
 
 def mark_tool_start(tool_call_id: str, tool_name: str = "") -> None:
-    _tool_start_times[tool_call_id] = (time.perf_counter(), tool_name)
+    _tool_start_times()[tool_call_id] = (time.perf_counter(), tool_name)
 
 
 def mark_tool_end(tool_call_id: str) -> None:
-    _tool_start_times.pop(tool_call_id, None)
+    _tool_start_times().pop(tool_call_id, None)
 
 
 # v9.2: 删除 get_tool_elapsed——grep 证实全仓库无调用方（get_running_tools
@@ -177,11 +187,11 @@ def mark_tool_end(tool_call_id: str) -> None:
 def get_running_tools() -> list[tuple[str, str, float]]:
     """Returns list of (call_id, tool_name, elapsed_seconds)."""
     now = time.perf_counter()
-    return [(cid, name, now - ts) for cid, (ts, name) in _tool_start_times.items()]
+    return [(cid, name, now - ts) for cid, (ts, name) in _tool_start_times().items()]
 
 
 def clear_tool_timers() -> None:
-    _tool_start_times.clear()
+    _tool_start_times().clear()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -190,21 +200,87 @@ def clear_tool_timers() -> None:
 
 
 def emit_thinking(content: str) -> None:
-    """Emit a THINKING event (LLM internal reasoning)."""
-    emit_encoded("thinking", {"content": content})
+    """Emit a safe progress label; never forward model-generated reasoning text."""
+    emit_status("agent_progress", message="正在规划下一步工具操作…")
 
 
 def emit_reasoning(content: str) -> None:
-    """v8.4.13 Emit REASONING 增量（DeepSeek reasoning_content 思维链）——
-    前端「深度思考」折叠块逐 chunk 累积。"""
-    emit_encoded("reasoning", {"content": content})
+    """Deprecated: private model reasoning must never be sent to clients."""
+    return
+
+
+_TOOL_LABELS = {
+    "deepseek_search": "Web Search",
+    "deepseek_fetch": "Web Fetch",
+    "deepseek_fetch_paper": "Web Fetch (paper full text)",
+    "local_bm25_search": "本地关键词核对",
+    "local_dense_search": "本地语义检索",
+    "local_hybrid_search": "本地混合检索",
+    "citrus_rag_search": "本地语义检索",
+    "pdf_read": "读取 PDF",
+    "read_local_file": "读取文件",
+    "write_local_file": "写入文件",
+    "statistical_analysis": "统计分析",
+    "experimental_design": "实验设计",
+    "call_write_agent": "写作助手",
+    "call_analyze_agent": "分析助手",
+}
+
+
+def _safe_tool_summary(tool_name: str, args: dict | None = None,
+                       output: str = "") -> str:
+    """Build a compact, non-secret execution label for progress/history UI."""
+    args = args if isinstance(args, dict) else {}
+    label = _TOOL_LABELS.get(tool_name, tool_name.replace("_", " ")[:48] or "工具")
+    if tool_name in {"deepseek_search", "local_bm25_search", "local_dense_search", "local_hybrid_search", "citrus_rag_search"}:
+        detail = str(args.get("query") or "")
+        detail = " ".join(detail.split())[:180]
+        families = args.get("corpus_types") or []
+        if isinstance(families, str):
+            families = [families]
+        if families and tool_name.startswith("local_"):
+            detail = f"[{', '.join(str(x) for x in families)}] {detail}"
+        return f"{label}：{detail}" if detail else label
+    if tool_name == "deepseek_fetch":
+        detail = str(args.get("url") or "")[:200]
+        return f"{label}：{detail}" if detail else label
+    if tool_name == "deepseek_fetch_paper":
+        detail = str(args.get("doi") or args.get("pmid") or args.get("title") or "")[:160]
+        return f"{label}：{detail}" if detail else label
+    if tool_name in {"read_local_file", "pdf_read"}:
+        detail = str(args.get("path") or args.get("file_path") or "")
+        detail = detail.replace("\\", "/").rsplit("/", 1)[-1][:100]
+        return f"{label}：{detail}" if detail else label
+    if output:
+        text = " ".join(str(output).split())
+        if text.startswith(("[WEB_TOOL_ERROR]", "[LOCAL_SEARCH_ERROR]", "[TOOL_ERROR]")):
+            return f"{label}：{text[:180]}"
+        match = re.search(r"Search returned (\d+) result", text, re.I)
+        if match:
+            return f"{label}：找到 {match.group(1)} 条结果"
+        if text.startswith("Fetched page:"):
+            return text.split("\n", 1)[0][:180]
+        return f"{label}：{text[:150]}"
+    return label
 
 
 def emit_tool_call_start(tool_name: str, args: dict, tool_call_id: str = "") -> None:
-    """Emit a TOOL_CALL_START event with fully assembled arguments."""
+    """Emit a sanitized, user-auditable TOOL_CALL_START event."""
+    args = args if isinstance(args, dict) else {}
+    safe_args = {}
+    for key in ("query", "url", "count", "limit", "need_content", "task",
+                "corpus_types", "l1_categories"):
+        value = args.get(key)
+        if isinstance(value, (str, int, float, bool)):
+            safe_args[key] = str(value)[:240] if isinstance(value, str) else value
+        elif isinstance(value, list) and key in {"corpus_types", "l1_categories"}:
+            safe_args[key] = [str(item)[:80] for item in value[:8]]
+    summary = _safe_tool_summary(tool_name, safe_args)
     emit_encoded("tool_call_start", {
         "tool_name": tool_name,
-        "args": args,
+        "display_name": _TOOL_LABELS.get(tool_name, tool_name),
+        "args": safe_args,
+        "summary": summary,
         "tool_call_id": tool_call_id,
     })
     if tool_call_id:
@@ -225,9 +301,13 @@ def emit_tool_result(tool_name: str, output: str, tool_call_id: str = "",
     """Emit a TOOL_RESULT event with output content and optional summary."""
     if tool_call_id:
         mark_tool_end(tool_call_id)
+    is_error = bool(is_error or str(output).startswith((
+        "[WEB_TOOL_ERROR]", "[WEB_DISABLED]", "[WEB_FETCH_EMPTY]",
+        "[LOCAL_SEARCH_ERROR]", "[TOOL_ERROR]", "[ERR_REQUEST_DEADLINE]")))
+    summary = summary or _safe_tool_summary(tool_name, output=output)
     emit_encoded("tool_result", {
         "tool_name": tool_name,
-        "output": output[:100000],
+        "output": output[:6000],
         "summary": summary[:500],
         "is_error": is_error,
         "tool_call_id": tool_call_id,

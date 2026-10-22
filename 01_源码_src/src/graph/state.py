@@ -8,6 +8,9 @@ from langchain_core.messages import BaseMessage
 class AgentState(TypedDict, total=False):
     messages: Annotated[list[BaseMessage], add_messages]
     query: str
+    visualization_enabled: bool
+    request_deadline: float
+    agent_no_prefetch_hints: bool
     session_id: str
     mode: str
     # v8.3.7: 幂等键（save 节点写入历史时用，防重发重复）

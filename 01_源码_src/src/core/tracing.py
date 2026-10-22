@@ -18,10 +18,10 @@ _job_id: contextvars.ContextVar = contextvars.ContextVar(
 _session_id: contextvars.ContextVar = contextvars.ContextVar(
     "session_id", default="")
 
-# v8.15: 本次请求是否开启联网搜索（前端开关逐请求下发；工具执行层据此短路）
-# 与 session_id 同机制：chat_v2 显式写入，经 copy_context 贯穿到工具协程/线程。
+# Web tools are enabled by default; the Agent decides whether each query needs them.
+# Kept as request context so older tool execution paths remain compatible.
 _web_search_enabled: contextvars.ContextVar = contextvars.ContextVar(
-    "web_search_enabled", default=False)
+    "web_search_enabled", default=True)
 
 # v9.1（用户决策：每个用户请求最多调用一次 deepseek_web_search）: 联网调用
 # 请求级预算。v8.17.17 的 _web_used 在 agent_runner 实例内（每次 run_agent 重置），
@@ -41,7 +41,7 @@ def set_web_search_enabled(enabled: bool) -> None:
 
 
 def web_search_enabled() -> bool:
-    return _web_search_enabled.get()
+    return bool(_web_search_enabled.get())
 
 
 def reset_web_budget(quota: int = 1) -> None:

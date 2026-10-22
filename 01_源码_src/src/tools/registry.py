@@ -126,7 +126,8 @@ def cleanup_offload_files() -> int:
 # v8.4.3: 只读/分析类工具白名单（注册表未初始化时替代 spec 放行，
 # 与 config.yaml tools.registrations 的 readonly 语义一致）
 _READONLY_TOOLS = frozenset({
-    "citrus_rag_search", "pdf_read",
+    "citrus_rag_search", "pdf_read", "deepseek_search", "deepseek_fetch", "deepseek_fetch_paper",
+    "local_bm25_search", "local_dense_search", "local_hybrid_search",
     "read_local_file", "statistical_analysis", "experimental_design",
 })
 
@@ -292,7 +293,9 @@ async def _run_single_tool(tool: BaseTool, tool_call: dict) -> ToolMessage:
             logger.error(f"[PartitionedNode] 工具 {tool.name} 执行失败: {e}")
             error_msg = _classify_error(e)
             return ToolMessage(content=error_msg, tool_call_id=tool_call["id"], name=tool.name, artifact={})
-        if isinstance(content, str):
+        if isinstance(content, str) and tool_name not in {
+                "deepseek_search", "deepseek_fetch", "deepseek_fetch_paper", "local_bm25_search", "local_dense_search", "local_hybrid_search",
+                "citrus_rag_search", "deepseek_web_search"}:
             content = _offload_large_result(content, tool_name)
         return ToolMessage(content=content, artifact=artifact, tool_call_id=tool_call["id"], name=tool_name)
     else:
@@ -314,12 +317,16 @@ async def _run_single_tool(tool: BaseTool, tool_call: dict) -> ToolMessage:
                 result = ToolMessage(content=_offload_large_result(result, tool_name), tool_call_id=tool_call["id"], name=tool_name)
             elif isinstance(result, tuple) and len(result) == 2:
                 content, artifact = result
-                if isinstance(content, str):
+                if isinstance(content, str) and tool_name not in {
+                        "deepseek_search", "deepseek_fetch", "deepseek_fetch_paper", "local_bm25_search", "local_dense_search", "local_hybrid_search",
+                        "citrus_rag_search", "deepseek_web_search"}:
                     content = _offload_large_result(content, tool_name)
                 result = ToolMessage(content=content, artifact=artifact, tool_call_id=tool_call["id"], name=tool_name)
             else:
                 result = ToolMessage(content=str(result), tool_call_id=tool_call["id"], name=tool_name)
-        elif isinstance(result.content, str):
+        elif isinstance(result.content, str) and tool_name not in {
+                "deepseek_search", "deepseek_fetch", "deepseek_fetch_paper", "local_bm25_search", "local_dense_search", "local_hybrid_search",
+                "citrus_rag_search", "deepseek_web_search"}:
             result.content = _offload_large_result(result.content, tool_name)
 
         return result

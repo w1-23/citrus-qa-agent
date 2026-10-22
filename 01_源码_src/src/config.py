@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     # 1. API Keys
     LLAMA_CLOUD_API_KEY: str = ""
     DEEPSEEK_API_KEY: str = ""
+    # Deployment-owned credential for DeepSeek Search/Fetch, independent from
+    # the user-configurable main-model provider key.
+    DEEPSEEK_WEB_API_KEY: str = ""
 
     # 2. Model Endpoints & Fallback Keys
     MAIN_API_KEY: str = Field(default="")
@@ -229,6 +232,12 @@ class Settings(BaseSettings):
     LIGHT_MAX_TURNS: int = Field(default_factory=lambda: _yaml_val("light", "max_turns", default=2))
     SUBAGENT_MAX_TURNS: dict = Field(default_factory=lambda: _yaml_val("subagents", default={}))
     TOOL_EXEC_TIMEOUT_SEC: int = Field(default_factory=lambda: _yaml_val("agent", "tool_exec_timeout_sec", default=60))
+    # Single-agent request deadline. The model chooses how many tool turns to use;
+    # this wall-clock deadline is the only loop-level stop condition.
+    AGENT_REQUEST_TIMEOUT_SEC: int = Field(
+        default_factory=lambda: _yaml_val("agent", "request_timeout_sec", default=180))
+    SEARCH_FETCH_TIMEOUT_SEC: int = Field(
+        default_factory=lambda: _yaml_val("agent", "search_fetch_timeout_sec", default=30))
     # v8.15.3b: 单工具超时覆盖（{tool_name: 秒}，覆盖 TOOL_EXEC_TIMEOUT_SEC 默认值）
     TOOL_TIMEOUTS: dict = Field(default_factory=lambda: _yaml_val("agent", "tool_timeouts", default={}))
 
@@ -283,6 +292,8 @@ class Settings(BaseSettings):
     # v8.5.0 开源版：运行时 API Key（WebUI 引导填写）——优先于 .env，
     # 持久化到 state/api_key（gitignore 内，不入仓库）；.env 保持不动
     _runtime_api_key: str = ""
+    # DeepSeek Search/Fetch has a separate runtime credential from the main model.
+    _runtime_deepseek_web_api_key: str = ""
 
     def _load_runtime_api_key(self) -> None:
         """启动时从 state/api_key 读取（WebUI 填写的 key 跨重启保留）。"""
@@ -311,6 +322,33 @@ class Settings(BaseSettings):
         except Exception:
             return False
 
+    def _load_runtime_deepseek_web_api_key(self) -> None:
+        """Load the separately configured Search/Fetch key from local state."""
+        try:
+            p = PROJECT_ROOT / "state" / "deepseek_web_api_key"
+            if p.exists():
+                value = p.read_text(encoding="utf-8").strip()
+                if value:
+                    self._runtime_deepseek_web_api_key = value
+        except Exception:
+            pass
+
+    def save_runtime_deepseek_web_api_key(self, api_key: str) -> bool:
+        """Persist a WebUI-provided Search/Fetch key outside tracked config."""
+        try:
+            p = PROJECT_ROOT / "state" / "deepseek_web_api_key"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(api_key.strip(), encoding="utf-8")
+            try:
+                import os
+                os.chmod(p, 0o600)
+            except Exception:
+                pass
+            self._runtime_deepseek_web_api_key = api_key.strip()
+            return True
+        except Exception:
+            return False
+
     # ── v8.14.1 运行时模型覆盖（前端设置面板切换底座模型）──
     # state/model_config.json（gitignore 内）存 {main_model,fast_model,main_base_url,fast_base_url}；
     # 空字段 = 回退 yaml/env 默认。优先级: 运行时覆盖 > 环境变量 > YAML > 默认值。
@@ -323,19 +361,23 @@ class Settings(BaseSettings):
                 data = json.loads(p.read_text(encoding="utf-8"))
                 self._runtime_model_cfg = {
                     k: str(v).strip() for k, v in data.items()
-                    if k in ("main_model", "fast_model", "main_base_url", "fast_base_url")
+                    if k in ("main_model", "fast_model", "main_base_url", "fast_base_url",
+                             "context_window_tokens")
                     and str(v).strip()
                 }
         except Exception:
             self._runtime_model_cfg = {}
 
     def save_runtime_model_config(self, *, main: str = "", fast: str = "",
-                                  main_base_url: str = "", fast_base_url: str = "") -> bool:
+                                  main_base_url: str = "", fast_base_url: str = "",
+                                  context_window_tokens: int | str = "") -> bool:
         cfg = {}
         for k, v in (("main_model", main), ("fast_model", fast),
-                     ("main_base_url", main_base_url), ("fast_base_url", fast_base_url)):
-            if (v or "").strip():
-                cfg[k] = v.strip()
+                     ("main_base_url", main_base_url), ("fast_base_url", fast_base_url),
+                     ("context_window_tokens", context_window_tokens)):
+            value = str(v or "").strip()
+            if value:
+                cfg[k] = value
         try:
             p = PROJECT_ROOT / "state" / "model_config.json"
             if not cfg:
@@ -357,8 +399,23 @@ class Settings(BaseSettings):
         return self._runtime_model_cfg.get("main_model") or self.MAIN_MODEL
 
     @property
+    def RESOLVED_CONTEXT_BUDGET_MAX_TOKENS(self) -> int:
+        value = self._runtime_model_cfg.get("context_window_tokens")
+        try:
+            return min(max(int(value), 4096), 1_000_000) if value else self.CONTEXT_BUDGET_MAX_TOKENS
+        except (TypeError, ValueError):
+            return self.CONTEXT_BUDGET_MAX_TOKENS
+
+    @property
     def RESOLVED_FAST_MODEL(self) -> str:
-        return self._runtime_model_cfg.get("fast_model") or self.FAST_MODEL
+        explicit_fast = self._runtime_model_cfg.get("fast_model")
+        if explicit_fast:
+            return explicit_fast
+        # When a user switches the main Provider, do not send the default
+        # DeepSeek fast-model ID to that Provider. Blank fast-model means follow main.
+        if self._runtime_model_cfg.get("main_model"):
+            return self.RESOLVED_MAIN_MODEL
+        return self.FAST_MODEL
 
     @property
     def RESOLVED_MAIN_BASE_URL(self) -> str:
@@ -366,7 +423,30 @@ class Settings(BaseSettings):
 
     @property
     def RESOLVED_MAIN_API_KEY(self) -> str:
-        return self._runtime_api_key or self.DEEPSEEK_API_KEY or self.MAIN_API_KEY
+        if self._runtime_api_key:
+            return self._runtime_api_key
+        if self.MAIN_API_KEY:
+            return self.MAIN_API_KEY
+        if "api.deepseek.com" in self.RESOLVED_MAIN_BASE_URL.lower():
+            return self.DEEPSEEK_API_KEY
+        return ""
+
+    @property
+    def RESOLVED_DEEPSEEK_WEB_API_KEY(self) -> str:
+        """Resolve deployment web credential without coupling it to other Providers."""
+        if self._runtime_deepseek_web_api_key:
+            return self._runtime_deepseek_web_api_key
+        dedicated = (self.DEEPSEEK_WEB_API_KEY or self.DEEPSEEK_API_KEY or "").strip()
+        if dedicated:
+            return dedicated
+        if "api.deepseek.com" in self.RESOLVED_MAIN_BASE_URL.lower():
+            return self.RESOLVED_MAIN_API_KEY
+        return ""
+
+    @property
+    def HAS_EXPLICIT_DEEPSEEK_WEB_API_KEY(self) -> bool:
+        """Whether Search/Fetch has a dedicated key, rather than a main-key fallback."""
+        return bool(self._runtime_deepseek_web_api_key or self.DEEPSEEK_WEB_API_KEY)
 
     @property
     def RESOLVED_FAST_API_KEY(self) -> str:
@@ -379,6 +459,7 @@ class Settings(BaseSettings):
                 or self.RESOLVED_MAIN_BASE_URL)
 
 settings = Settings()
+settings._load_runtime_deepseek_web_api_key()
 
 # v8.5.0 模型镜像兜底：任何启动方式（run.ps1 / 手动 uvicorn）下，
 # HuggingFace 模型（reranker/embedding）首次下载统一走国内镜像，

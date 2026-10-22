@@ -22,6 +22,26 @@ from src.retrieval.bm25 import (
 
 logger = logging.getLogger(__name__)
 
+LOCAL_CORPUS_FAMILIES = {
+    "literature", "ucr_varieties", "deng_variety_book", "experiment_methods",
+}
+
+
+def local_corpus_family(chunk: Dict) -> str:
+    """Map an indexed record to the curated corpus families exposed to the Agent."""
+    batch = str(chunk.get("_batch") or "").lower()
+    source = str(chunk.get("source_type") or chunk.get("_src") or "").lower()
+    if batch == "citrus_varieties1" or "ucr citrus variety" in source:
+        return "ucr_varieties"
+    if (batch in {"citrus_varieties2", "chinese_citrus_varieties_deng_xiuxin"}
+            or "chinese citrus varieties book" in source):
+        return "deng_variety_book"
+    if batch == "cgi_experiment_methods_english" or "cgi_methods" in source:
+        return "experiment_methods"
+    if batch.startswith("paper") or "literature" in source:
+        return "literature"
+    return ""
+
 # v8.6 (书 §3.2 离线建索引): BM25 倒排索引持久化——语料不变则启动直接加载，
 # 跳过 fit（实测 119k chunk 语料 fit+倒排 ~15s → 加载 ~2s）；查询走倒排加速。
 _BM25_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / ".hf_cache" / "bm25"
@@ -761,6 +781,81 @@ class MultiBatchRetriever:
     def search(self, query: str) -> List[Dict]:
         # v9.2: 单查询路径同样登记用户原文（保持非 HyDE 路径统计校验不回归）
         return self.search_multi([query], original_query=query)
+
+    def search_dense_only(self, query: str, limit: int = 8) -> List[Dict]:
+        """Run vector retrieval only, without BM25 fusion or reranking.
+
+        This is intended for speculative local prefetch and evidence-gap checks,
+        where BM25 runs separately and both result streams must remain distinct.
+        """
+        return self.search_dense_filtered(query, limit=limit)
+
+    def search_dense_filtered(self, query: str, limit: int = 8,
+                              corpus_types: list[str] | None = None,
+                              l1_categories: list[str] | None = None) -> List[Dict]:
+        """Vector-only retrieval limited to selected corpus families/categories."""
+        if not query or not self.global_chunks:
+            return []
+        allowed = ({str(x).strip() for x in corpus_types} & LOCAL_CORPUS_FAMILIES
+                   if corpus_types is not None else LOCAL_CORPUS_FAMILIES)
+        categories = {str(x).strip().lower() for x in (l1_categories or []) if str(x).strip()}
+        eligible = {
+            int(row["_global_idx"]) for row in self.global_chunks
+            if local_corpus_family(row) in allowed
+            and (not categories or str(row.get("l1_category") or "").strip().lower() in categories)
+        }
+        if not eligible:
+            return []
+        query_vec = self.embedder.embed_query(query)
+        batch_names = (list(self.lance_tables.keys()) if self.backend == "lancedb"
+                       else list(self.batches.keys()))
+        eligible_batches = {self.global_chunks[i].get("_batch") for i in eligible}
+        batch_names = [name for name in batch_names if name in eligible_batches]
+        if not batch_names:
+            return []
+        workers = max(1, min(len(batch_names), 8))
+        hits: list[tuple[int, float]] = []
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(self._vector_search, name, query_vec,
+                                       min(max(int(limit) * 3, settings.TOP_K_VECTOR, 40), 200))
+                       for name in batch_names]
+            for future in as_completed(futures):
+                hits.extend(future.result())
+        best: dict[int, float] = {}
+        for index, score in hits:
+            if index not in eligible:
+                continue
+            best[index] = max(float(score), best.get(index, float("-inf")))
+        selected = sorted(best.items(), key=lambda pair: pair[1], reverse=True)[:max(1, int(limit))]
+        rows = []
+        for index, score in selected:
+            row = self._chunk_full(index)
+            row["score"] = score
+            rows.append(row)
+        return rows
+
+    def search_bm25_filtered(self, query: str, limit: int = 8,
+                             corpus_types: list[str] | None = None,
+                             l1_categories: list[str] | None = None) -> List[Dict]:
+        """BM25-only retrieval over selected corpus families/categories."""
+        allowed = {str(x).strip() for x in (corpus_types or [])}
+        allowed &= LOCAL_CORPUS_FAMILIES
+        if not query or not allowed:
+            return []
+        categories = {str(x).strip().lower() for x in (l1_categories or []) if str(x).strip()}
+        eligible = {
+            int(row["_global_idx"]) for row in self.global_chunks
+            if local_corpus_family(row) in allowed
+            and (not categories or str(row.get("l1_category") or "").strip().lower() in categories)
+        }
+        hits = self.bm25.top_k(query, k=max(int(limit) * 12, 80),
+                               allowed_doc_ids=eligible)
+        rows = []
+        for index, score in hits[:max(1, int(limit))]:
+            row = self._chunk_full(index)
+            row["score"] = float(score)
+            rows.append(row)
+        return rows
 
     def search_hyde(self, original_query: str, hyde_answer: str) -> List[Dict]:
         """HyDE hybrid search: dual dense (original + hyde) + BM25 + RRF + Reranker(original_query).

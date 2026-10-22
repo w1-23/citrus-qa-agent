@@ -486,7 +486,7 @@ async def expert_load_node(state: AgentState) -> dict:
         from src.guardrails.memory import memory_store
 
         budget_config = ContextBudgetConfig(
-            max_tokens=settings.CONTEXT_BUDGET_MAX_TOKENS,
+            max_tokens=settings.RESOLVED_CONTEXT_BUDGET_MAX_TOKENS,
             soft_threshold=settings.CONTEXT_BUDGET_SOFT_THRESHOLD,
             hard_threshold=settings.CONTEXT_BUDGET_HARD_THRESHOLD,
         )
@@ -511,7 +511,14 @@ async def expert_load_node(state: AgentState) -> dict:
 
         # v8.17.15: 草稿全链删除（用户决策）——原生联网回归 retrieve-agent
         # 工具链（每轮 goal 驱动、每 turn ≤1 次），此处不再启动 draft_worker。
-        ctx = await ctx_mgr.load(session_id, query, mode)
+        load_coro = ctx_mgr.load(
+            session_id, query, mode,
+            generate_hints=not bool(state.get("agent_no_prefetch_hints")))
+        if state.get("agent_no_prefetch_hints") and state.get("request_deadline"):
+            remaining = max(0.1, float(state["request_deadline"]) - time.monotonic() - 25.0)
+            ctx = await asyncio.wait_for(load_coro, timeout=remaining)
+        else:
+            ctx = await load_coro
         # v8.4: 收尾装配收敛至 context_manager.finalize_load_result
         # （与 light 图共用，消除双实现漂移）
         result = finalize_load_result(

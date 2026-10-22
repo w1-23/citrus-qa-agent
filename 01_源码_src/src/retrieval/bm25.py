@@ -63,14 +63,16 @@ class BM25Plus:
             for term, pairs in postings.items()
         }
 
-    def top_k(self, query: str, k: int = 20) -> List[Tuple[int, float]]:
+    def top_k(self, query: str, k: int = 20,
+              allowed_doc_ids: set[int] | None = None) -> List[Tuple[int, float]]:
         query_tokens = _tokenize(query)
         if not query_tokens or self.corpus_size == 0: return []
         if self.inv:
-            return self._top_k_inverted(query_tokens, k)
-        return self._top_k_scan(query_tokens, k)
+            return self._top_k_inverted(query_tokens, k, allowed_doc_ids)
+        return self._top_k_scan(query_tokens, k, allowed_doc_ids)
 
-    def _top_k_scan(self, query_tokens: List[str], k: int) -> List[Tuple[int, float]]:
+    def _top_k_scan(self, query_tokens: List[str], k: int,
+                    allowed_doc_ids: set[int] | None = None) -> List[Tuple[int, float]]:
         """全量枚举（旧路径；无倒排索引时兜底，如手工构造的实例）。
 
         v8.11: fit 后 tokenized_corpus 已释放（None）→ 从倒排重建每文档 term
@@ -85,6 +87,8 @@ class BM25Plus:
                     corpus[doc_idx][term] = int(tf)
         scores = []
         for i, doc_tokens in enumerate(corpus):
+            if allowed_doc_ids is not None and i not in allowed_doc_ids:
+                continue
             doc_tf = Counter(doc_tokens)
             score = 0.0
             doc_len = self.doc_lens[i]
@@ -98,10 +102,13 @@ class BM25Plus:
         indexed = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
         return [(idx, score) for idx, score in indexed if score > 0][:k]
 
-    def _top_k_inverted(self, query_tokens: List[str], k: int) -> List[Tuple[int, float]]:
+    def _top_k_inverted(self, query_tokens: List[str], k: int,
+                        allowed_doc_ids: set[int] | None = None) -> List[Tuple[int, float]]:
         """倒排路径（v8.11 numpy 平行数组向量化）：仅统计包含查询词的文档，
         累加顺序与全量枚举一致（外层按查询词、内层按文档），结果逐位等价。"""
         scores: Dict[int, float] = {}
+        allowed_ids = (np.fromiter(allowed_doc_ids, dtype=np.uint32)
+                       if allowed_doc_ids is not None else None)
         for qt in query_tokens:
             idf = self.idf.get(qt)
             if idf is None:
@@ -110,6 +117,11 @@ class BM25Plus:
             if entry is None:
                 continue
             ids, tfs = entry
+            if allowed_ids is not None:
+                mask = np.isin(ids, allowed_ids)
+                ids, tfs = ids[mask], tfs[mask]
+                if not len(ids):
+                    continue
             dl = self.doc_lens[ids]                     # uint32 -> float64 精确（<2^53）
             num = tfs + self.delta * tfs                # float64
             # den = tf + k1*(1-b+b*dl/avgdl)；k1>0 且 (1-b+b*dl/avgdl)>0 → den>0 恒成立

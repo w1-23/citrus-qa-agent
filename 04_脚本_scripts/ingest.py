@@ -68,7 +68,7 @@ def chunk_text(text: str, chunk_size: int) -> list:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Citrus QA Agent 语料导入")
+    ap = argparse.ArgumentParser(description="CitrusQA 语料导入")
     ap.add_argument("--dir", default=str(ROOT / "data" / "import"),
                     help="输入目录（含 PDF/txt/md）")
     ap.add_argument("--batch", default="",

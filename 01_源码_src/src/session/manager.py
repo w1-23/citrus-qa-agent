@@ -424,9 +424,9 @@ class SessionManager:
                         # v8.7: "AIMessageChunk" 为 v8.4.13 流式化后的旧数据
                         # 类型残留（保存端已归一化为 "ai"）——按 ai 还原，避免
                         # 其 ToolMessage 配对消息因跳过而孤立（API 400 根因）。
+                        # Provider reasoning is private internal model output;
+                        # do not restore it into conversation context.
                         kw = {"content": content, "name": name or None}
-                        if reasoning:
-                            kw["additional_kwargs"] = {"reasoning_content": reasoning}
                         if tool_calls_json:
                             try:
                                 tool_calls = [
@@ -570,11 +570,8 @@ class SessionManager:
         if hasattr(msg, "name"):
             name = msg.name
 
-        # v8.10l: 深度思考持久化（stream_llm 聚合时注入 additional_kwargs）
-        if hasattr(msg, "additional_kwargs") and isinstance(msg.additional_kwargs, dict):
-            rk = msg.additional_kwargs.get("reasoning_content")
-            if rk:
-                reasoning = str(rk)
+        # Provider reasoning_content is private internal model output. Never
+        # persist it as part of a user-visible conversation trace.
 
         return (msg_type, content, tool_call_id, tool_calls_json, name, reasoning)
 

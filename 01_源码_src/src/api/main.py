@@ -1,9 +1,9 @@
-"""API Gateway — v8.3.0 with Fast Guard + ContextManager + structured SSE.
+"""API Gateway with Fast Guard, ContextManager, and structured Agent SSE.
 
 FastGuard: rule-based short-circuit for trivial greetings (<1ms, no graph).
-SSE event protocol: all events use canonical {event, data} format with
-JSON-string data. Five structured event types: thinking, tool_call_start,
-tool_executing, tool_result, text. Heartbeat + Tool progress keepalive.
+SSE events carry safe progress summaries, sanitized tool calls/results,
+context/cache usage, streamed answer text, and completion metadata. Private
+model reasoning is never sent to clients.
 """
 from __future__ import annotations
 
@@ -35,45 +35,6 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 
-FAST_GUARD_PATTERNS: set[str] = {
-    "你好", "您好", "hello", "hi", "hey",
-    "在吗", "谢谢", "thanks", "thank you",
-    "再见", "bye", "拜拜", "晚安", "早安",
-    "你是谁", "你能做什么", "你会什么", "你有什么功能",
-    "what can you do", "who are you",
-}
-
-
-def _is_fast_guard_hit(query: str) -> bool:
-    """v8.4.4: 去掉 12 字符长度门槛（"what can you do" 15 字符曾永不命中）——
-    问候语归一化后精确/前缀匹配；带问候+科研问句的复合输入仍走完整链路。"""
-    cleaned = " ".join(query.strip().lower().split())
-    if cleaned in FAST_GUARD_PATTERNS:
-        return True
-    _CHITCHAT_TAIL = {"", "啊", "呀", "哈", "呢", "嘛", "!", "！", "~", "～", "！", "，", ","}
-    for pat in ("你好", "您好", "hello", "hi", "hey", "在吗", "谢谢",
-                "thanks", "再见", "拜拜", "晚安", "早安"):
-        if cleaned == pat:
-            return True
-        if cleaned.startswith(pat):
-            rest = cleaned[len(pat):].lstrip(" ，,。.")
-            if rest in _CHITCHAT_TAIL:
-                return True
-    return False
-
-
-def _fast_guard_reply(query: str) -> str:
-    return (
-        "你好！我是柑橘科研助手。\n\n"
-        "我可以帮助你:\n"
-        "- 检索柑橘领域文献（基因、病害、代谢、栽培等）\n"
-        "- 机制解析与对比分析\n"
-        "- 实验设计与统计分析\n"
-        "- 学术综述撰写与保存\n\n"
-        "请问有什么柑橘科研相关的问题？"
-    )
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("[Lifespan] starting...")
@@ -92,20 +53,16 @@ async def lifespan(app: FastAPI):
                     + ", ".join(f"{k}={len(v)}chars" for k, v in _prompts.items()))
     except Exception as e:
         logger.error(f"[Lifespan] fixed prompts build failed: {e}")
-    # v9.1.2（用户真机日志排查: Ruby 旧工具调用 vs 同 session 新路径矛盾）:
-    # 启动时打印 supervisor 工具 schema 快照——进程内 schema 单例在 import 时求值、
-    # 恒定不变（supervisor_tools → expert_graph._AGENT_TOOLS → bind_tools，无按会话
-    # 重建路径）。真机重启后第一眼即可从本行日志判定进程加载的代码版本：
-    #   含 call_search_both = 新代码；含 [LEGACY ... PRESENT] 标记 = 旧构建。
+    # Log the actual active general-agent toolset. The legacy expert schema is
+    # still imported for compatibility helpers, but it is not bound to chat
+    # requests and must not be presented as the active tool list.
     try:
-        from src.tools.supervisor_tools import get_supervisor_tool_names
-        _sup_names = get_supervisor_tool_names()
-        logger.info("[Lifespan] supervisor tools snapshot: "
-                    + ", ".join(_sup_names)
-                    + (" [LEGACY call_retrieve_agent PRESENT]" 
-                       if "call_retrieve_agent" in _sup_names else ""))
+        from src.graph.general_agent_graph import _toolset
+        _active_tools, _ = _toolset()
+        logger.info("[Lifespan] active general-agent tools: "
+                    + ", ".join(tool.name for tool in _active_tools))
     except Exception as e:
-        logger.warning(f"[Lifespan] supervisor tools snapshot failed: {e}")
+        logger.warning(f"[Lifespan] active agent tools snapshot failed: {e}")
     yield
     try:
         from src.retrieval.multi_retriever import MultiBatchRetriever
@@ -130,7 +87,7 @@ async def lifespan(app: FastAPI):
 
 
 # v8.4.5: 版本单源（settings.VERSION）——UI/健康检查/API 元数据共用
-app = FastAPI(title=f"Citrus QA Agent v{settings.VERSION}", version=settings.VERSION, lifespan=lifespan)
+app = FastAPI(title=f"CitrusQA v{settings.VERSION}", version=settings.VERSION, lifespan=lifespan)
 # v8.3.3: 无 Cookie 鉴权场景下不允许 "*" + credentials 组合（浏览器规范拒绝），仅开 Origin
 app.add_middleware(
     CORSMiddleware,
@@ -153,9 +110,11 @@ class ChatRequest(BaseModel):
     # v8.3.7: 长度上限（防单条超长文本打爆预算/日志）+ 客户端幂等 ID（重试复用）
     query: str = Field(..., min_length=1, max_length=20000)
     client_request_id: Optional[str] = Field(default=None, max_length=64)
+    # Deprecated request fields retained for older clients; unified Agent mode
+    # and always-available web tools are now server-controlled.
     light_mode: Optional[bool] = None
-    # v8.15: 联网搜索开关（前端「联网搜索」按钮——仅后端主开关 web_search.enabled 开启后生效）
     web_search_enabled: Optional[bool] = None
+    visualization_enabled: bool = False
 
 
 @app.post("/api/v2/chat")
@@ -171,36 +130,8 @@ async def chat_v2(req: ChatRequest):
     # v8.3.7 M1: 幂等键（客户端稳定 ID 优先，服务端 30s 桶兜底）——重发/重试不重复写历史
     from src.session.manager import compute_idempotency_key
     idem_key = compute_idempotency_key(sid, query, req.client_request_id or "")
-    # 模式完全由客户端 light_mode 决定（用户手动切换，无服务端自动升级）
-    mode = "light" if req.light_mode else "expert"
-
-    # Fast Guard: pure greeting -> direct reply, no graph, no RAG
-    if _is_fast_guard_hit(query):
-        reply = _fast_guard_reply(query)
-        t0 = time.perf_counter()
-
-        async def guard_events():
-            from src.core.progress_bus import _encode_event, log_sse_frame
-            elapsed = int((time.perf_counter() - t0) * 1000)
-            evt = _encode_event("done", {
-                "session_id": sid,
-                "answer": reply,
-                "gen_time_ms": elapsed,
-            })
-            log_sse_frame(evt)
-            yield evt
-            try:
-                from langchain_core.messages import HumanMessage, AIMessage
-                from src.core.background import spawn
-                spawn(session_manager.save_messages(
-                    sid,
-                    [HumanMessage(content=query), AIMessage(content=reply)],
-                    idem_key,
-                ))
-            except Exception:
-                pass
-
-        return EventSourceResponse(guard_events())
+    # All chat requests use the same general Agent loop; legacy light_mode is ignored.
+    mode = "expert"
 
     logger.info(f"[API v2] mode={mode} session={sid[:8]}... query={query[:60]} req={rid}")
 
@@ -229,21 +160,20 @@ async def chat_v2(req: ChatRequest):
     set_job_id(job_id)
     initial_state: AgentState = {
         "query": query,
+        "visualization_enabled": bool(req.visualization_enabled),
+        "request_deadline": time.monotonic() + max(
+            1, int(getattr(settings, "AGENT_REQUEST_TIMEOUT_SEC", 180) or 180)),
+        "agent_no_prefetch_hints": True,
         "session_id": sid,
         "mode": mode,
         "messages": [],
         "answer": "",
         "idempotency_key": idem_key,
-        # v8.15: 联网搜索由前端开关逐请求决定（config web_search.enabled 仅作部署默认值，
-        # 不设启用门槛）——前端开则本次可联网，关则工具执行层短路为 [DISABLED]
-        # v9.2: 开关只经 tracing contextvar（下行 set_web_search_enabled）传递，
-        # state 键为写而不读死字段已于重构中删除
+    # Web tools are always available to the Agent. It decides per question
+    # whether searching is useful; legacy web_search_enabled=false is ignored.
     }
-    from src.core.tracing import set_web_search_enabled, set_original_query, reset_web_budget
-    set_web_search_enabled(bool(req.web_search_enabled))
-    # v9.1（用户决策：每个用户请求最多一次联网）: 请求级联网预算重置——
-    # deepseek_web_search 入口消费，超预算返回 [WEB_BUDGET_EXHAUSTED]。
-    reset_web_budget(1)
+    from src.core.tracing import set_web_search_enabled, set_original_query
+    set_web_search_enabled(True)
     # v8.15.3d: 用户原始问题直传联网工具——deepseek_web_search 把原始问题原样交给
     # DeepSeek 原生联网（output_text 围绕原始问题作答），检索词仅作"搜索参考关键词"
     set_original_query(query)
@@ -323,73 +253,8 @@ async def chat_v2(req: ChatRequest):
             # v8.4.11: 注册运行任务（cancel 端点按 job_id 定位取消）
             _running_graph_tasks[job_id] = asyncio.current_task()
 
-            # ── v10.0（卡点①）Intake：fast 模型判一次；有歧义且答错代价高 → 弹卡确认 ──
-            #    卡片同步等待（上限 INTENT_WAIT_SEC，超时按推荐项放行），确认后的
-            #    intent_confirmed 作为全链路锚点：联网原问、检索 goal、审计基线共用。
-            confirmed_intent = query
-            _token = ""  # 意图卡 token（finally 清理，防用户取消时挂起表泄漏）
-            if mode == "expert":
-                try:
-                    from src.core.intake import (judge_intent, decide_card,
-                                                 resolve_choice, INTENT_WAIT_SEC)
-                    await emit_to_client(_encode_event("status", {
-                        "stage": "intake", "summary": "正在理解你的问题…"}))
-                    # v10.0: 带入最近 4 条对话（指代消解/延续上下文——"甜橙呢"这类追问）
-                    _ctx = ""
-                    try:
-                        _hist_msgs = await session_manager.get_messages(sid)
-                        _ctx = "\n".join(
-                            f"{'用户' if type(_m).__name__ == 'HumanMessage' else '助手'}: "
-                            f"{str(getattr(_m, 'content', ''))[:200]}"
-                            for _m in (_hist_msgs or [])[-4:])
-                    except Exception as _ce:
-                        logger.debug(f"[Intake] context fetch skipped: {_ce}")
-                    _profile = await judge_intent(query, context=_ctx)
-                    if _profile:
-                        initial_state["intent_profile"] = _profile
-                    if _profile and decide_card(_profile, mode=mode):
-                        _token = uuid.uuid4().hex[:16]
-                        _pending_intents[_token] = {
-                            "event": asyncio.Event(), "choice": None,
-                            "profile": _profile, "session_id": sid,
-                        }
-                        await emit_to_client(_encode_event("intent_confirm", {
-                            "token": _token,
-                            "question": query[:500],
-                            "intent_summary": _profile.get("intent_summary", ""),
-                            "reason": _profile.get("clarify_reason", ""),
-                            "options": _profile.get("interpretations", []),
-                            "timeout_sec": INTENT_WAIT_SEC,
-                        }))
-                        _pend = _pending_intents[_token]
-                        try:
-                            await asyncio.wait_for(_pend["event"].wait(),
-                                                   timeout=INTENT_WAIT_SEC)
-                        except asyncio.TimeoutError:
-                            pass
-                        confirmed_intent = resolve_choice(_profile, _pend.get("choice"))
-                        _pending_intents.pop(_token, None)
-                        await emit_to_client(_encode_event("intent_resolved", {
-                            "token": _token,
-                            "intent": confirmed_intent,
-                            "timeout": _pend.get("choice") is None,
-                        }))
-                        try:
-                            from src.core.business_logger import blog
-                            blog("intent_resolved", token=_token[:8],
-                                 chosen=str((_pend.get("choice") or {}).get("choice_id")),
-                                 timeout=_pend.get("choice") is None)
-                        except Exception:
-                            pass
-                        logger.info(f"[Intake] confirmed={confirmed_intent[:60]}")
-                except Exception as _e:
-                    logger.warning(f"[Intake] skipped ({type(_e).__name__}: {_e})")
-            initial_state["intent_confirmed"] = confirmed_intent
-            if confirmed_intent and confirmed_intent != query:
-                try:
-                    set_original_query(confirmed_intent)  # 联网工具围绕确认意图作答
-                except Exception:
-                    pass
+            # The shared Agent reasons directly from the user's original query;
+            # no separate intake model or confirmation card rewrites it.
 
             try:
                 async for node_output in graph.astream(initial_state, stream_mode="updates",
@@ -433,6 +298,14 @@ async def chat_v2(req: ChatRequest):
                                     done_payload.update(cit)
                                 if output.get("tools_called"):
                                     done_payload["tools_called"] = output["tools_called"]
+                                trace_meta = output.get("_trace") or {}
+                                if trace_meta.get("node") == "supervisor":
+                                    done_payload["retrieval_trace"] = {
+                                        key: trace_meta[key] for key in (
+                                            "source_scope", "local_route", "local_tool_types",
+                                            "retrieval_disabled_simple_query")
+                                        if key in trace_meta
+                                    }
                                 # v10.0（卡点②③）: 裁决与审计结果随 done 下发
                                 if output.get("audit_report"):
                                     done_payload["audit"] = output["audit_report"]
@@ -504,9 +377,6 @@ async def chat_v2(req: ChatRequest):
             finally:
                 # v8.4.11: 注销运行任务（正常/取消/异常路径统一清理）
                 _running_graph_tasks.pop(job_id, None)
-                # v10.0（卡点①）: 用户取消/异常时清理未消费的意图卡挂起条目
-                if _token:
-                    _pending_intents.pop(_token, None)
                 # v8.17.15: 草稿任务注册表已删除（草稿全链移除，联网回归
                 # retrieve-agent 工具链），此处不再等待草稿——直接关闭连接。
                 # v9.2 P4 根治: 确定性排空替代原 10×0.1s 轮询排空——桥中遗留
@@ -733,7 +603,7 @@ async def runtime_config():
     return {
         "version": settings.VERSION,
         "context": {
-            "max_tokens": settings.CONTEXT_BUDGET_MAX_TOKENS,
+            "max_tokens": settings.RESOLVED_CONTEXT_BUDGET_MAX_TOKENS,
             "soft_threshold": settings.CONTEXT_BUDGET_SOFT_THRESHOLD,
             "hard_threshold": settings.CONTEXT_BUDGET_HARD_THRESHOLD,
         },
@@ -742,25 +612,26 @@ async def runtime_config():
         "permission_wait_sec": settings.PERMISSION_WAIT_SEC,
         # v8.5.0 开源版: 只暴露"是否已配置"，永不回传 key 本身
         "has_api_key": bool(settings.RESOLVED_MAIN_API_KEY),
-        # v8.15: 数据源开关状态（前端据此动态显示欢迎语/联网按钮可用性）
+        # Unified Agent always has Search/Fetch tools available; it decides per query.
         "web_search": {
-            "enabled": bool(settings.WEB_SEARCH_ENABLED),
-            # v8.15: provider 纯信息展示；启用时一律走 DeepSeek Responses 原生 web_search。
-            # 注意：旧 .env 残留 WEB_SEARCH_PROVIDER=serper 是历史 Tavily 自建源配置，
-            # 已不参与执行路径（仅作展示兜底）。
-            "provider": ("deepseek_responses" if settings.WEB_SEARCH_ENABLED
-                         else settings.WEB_SEARCH_PROVIDER),
+            "enabled": True,
+            "provider": "deepseek_search_fetch",
+            "configured": settings.HAS_EXPLICIT_DEEPSEEK_WEB_API_KEY,
+            "fallback_available": bool(settings.RESOLVED_DEEPSEEK_WEB_API_KEY)
+                                 and not settings.HAS_EXPLICIT_DEEPSEEK_WEB_API_KEY,
         },
         "model": {
             "main": settings.RESOLVED_MAIN_MODEL,
             "fast": settings.RESOLVED_FAST_MODEL,
             "main_base_url": settings.RESOLVED_MAIN_BASE_URL,
             "fast_base_url": settings.RESOLVED_FAST_BASE_URL,
+            "context_window_tokens": settings.RESOLVED_CONTEXT_BUDGET_MAX_TOKENS,
             "defaults": {
                 "main": settings.MAIN_MODEL,
                 "fast": settings.FAST_MODEL,
                 "main_base_url": settings.MAIN_BASE_URL,
                 "fast_base_url": settings.FAST_BASE_URL or settings.MAIN_BASE_URL,
+                "context_window_tokens": settings.CONTEXT_BUDGET_MAX_TOKENS,
             },
             "runtime_overrides": settings.has_model_overrides,
         },
@@ -780,9 +651,9 @@ class ApiKeyRequest(BaseModel):
 @app.post("/api/v2/config/apikey")
 async def set_api_key(req: ApiKeyRequest):
     key = (req.api_key or "").strip()
-    if len(key) < 16 or not key.startswith("sk-"):
+    if not key or len(key) > 512:
         raise HTTPException(status_code=400,
-                            detail="Key 格式不正确（应为 sk- 开头的 API Key）")
+                            detail="API Key 不能为空且不能超过 512 个字符")
     # 连通性校验：GET {base}/models
     try:
         import httpx
@@ -807,6 +678,23 @@ async def set_api_key(req: ApiKeyRequest):
     return {"status": "ok", "has_api_key": True}
 
 
+class WebSearchApiKeyRequest(BaseModel):
+    api_key: str
+
+
+@app.post("/api/v2/config/web-apikey")
+async def set_web_search_api_key(req: WebSearchApiKeyRequest):
+    """Save the DeepSeek Search/Fetch key independently from the main Provider key."""
+    key = (req.api_key or "").strip()
+    if not key or len(key) > 512:
+        raise HTTPException(status_code=400,
+                            detail="DeepSeek Search/Fetch Key 不能为空且不能超过 512 个字符")
+    if not settings.save_runtime_deepseek_web_api_key(key):
+        raise HTTPException(status_code=500, detail="Search/Fetch Key 保存失败")
+    logger.info("[API] runtime DeepSeek Search/Fetch key configured via WebUI")
+    return {"status": "ok", "configured": True}
+
+
 # ── v8.14.1 运行时底座模型切换（前端设置面板）──
 # 主/快模型 ID + API 地址，留空 = 恢复默认（yaml/env）；
 # 持久化到 state/model_config.json（gitignore 内），跨重启保留。
@@ -815,6 +703,7 @@ class ModelConfigRequest(BaseModel):
     fast_model: str = ""
     main_base_url: str = ""
     fast_base_url: str = ""
+    context_window_tokens: int = Field(default=0, ge=0, le=1_000_000)
 
 
 @app.post("/api/v2/config/model")
@@ -852,7 +741,8 @@ async def set_model_config(req: ModelConfigRequest):
                                 detail=f"无法连接 {main_base_url}（请检查地址是否拼写正确）: {e}")
     if not settings.save_runtime_model_config(
             main=req.main_model, fast=req.fast_model,
-            main_base_url=req.main_base_url, fast_base_url=req.fast_base_url):
+            main_base_url=req.main_base_url, fast_base_url=req.fast_base_url,
+            context_window_tokens=req.context_window_tokens):
         raise HTTPException(status_code=500, detail="模型配置保存失败")
     logger.info("[API] runtime model config saved: %s", settings._runtime_model_cfg)
     return {
@@ -863,6 +753,7 @@ async def set_model_config(req: ModelConfigRequest):
             "fast": settings.RESOLVED_FAST_MODEL,
             "main_base_url": settings.RESOLVED_MAIN_BASE_URL,
             "fast_base_url": settings.RESOLVED_FAST_BASE_URL,
+            "context_window_tokens": settings.RESOLVED_CONTEXT_BUDGET_MAX_TOKENS,
             "runtime_overrides": settings.has_model_overrides,
         },
     }
@@ -878,6 +769,13 @@ async def serve_frontend():
         # （前端修复必须即时可见；静态文件带 Last-Modified/ETag，命中未变更
         # 时仅回 304，代价是一次条件请求而非全量下载）
         "Cache-Control": "no-cache, must-revalidate"})
+
+
+# Frontend assets are split from index.html to keep the page maintainable.
+_frontend_assets = WEB_DIR / "assets"
+if _frontend_assets.exists():
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/assets", StaticFiles(directory=str(_frontend_assets)), name="frontend-assets")
 
 
 # v8.9 工作区静态服务（会话侧栏"工作区"文件可点击打开；只读）
@@ -1172,20 +1070,29 @@ async def session_messages(session_id: str, limit: int = 200):
                 out.append({"role": "user", "content": _user_display_text(content)})
         elif isinstance(m, AIMessage):
             content = str(getattr(m, "content", "") or "").strip()
-            # 纯工具轮（只有 tool_calls 无文本）不渲染；合成收尾指令已由读路径过滤
+            # Restore a safe, human-readable trace of each tool operation.
+            # Provider reasoning_content is deliberately never returned.
+            tool_calls = getattr(m, "tool_calls", None) or []
+            if tool_calls:
+                from src.core.progress_bus import _safe_tool_summary
+                out.append({"role": "tool_calls", "calls": [{
+                    "id": str(tc.get("id") or ""),
+                    "name": str(tc.get("name") or "tool"),
+                    "summary": _safe_tool_summary(
+                        str(tc.get("name") or "tool"), tc.get("args") or {}),
+                } for tc in tool_calls]})
             if content:
-                item: dict = {"role": "assistant", "content": content}
-                # v8.10l: 深度思考随历史返回（退出会话再回来可恢复思考过程）
-                rc = (getattr(m, "additional_kwargs", None) or {}).get("reasoning_content")
-                if rc:
-                    item["reasoning"] = rc
-                out.append(item)
+                out.append({"role": "assistant", "content": content})
         elif isinstance(m, ToolMessage):
             # v8.10l: 工具调用结果随历史返回（前端恢复工具链折叠块）
             tcontent = str(getattr(m, "content", "") or "")
+            tool_name = getattr(m, "name", "") or "tool"
+            if tool_name in {"local_bm25_search", "local_dense_search", "local_hybrid_search"}:
+                tcontent = "本地检索已执行；文献原文不在历史轨迹中展示。"
             out.append({
                 "role": "tool",
-                "name": getattr(m, "name", "") or "tool",
+                "name": tool_name,
+                "tool_call_id": getattr(m, "tool_call_id", "") or "",
                 "content": tcontent[:500],
                 "truncated": len(tcontent) > 500,
             })
@@ -1223,7 +1130,7 @@ def _build_context_snapshot(msgs: list, session_id: str = "") -> dict:
         "history_msgs": len(msgs),
         "history_chars": hist_chars,
         "estimated_tokens": est,
-        "max_tokens": settings.CONTEXT_BUDGET_MAX_TOKENS,
+        "max_tokens": settings.RESOLVED_CONTEXT_BUDGET_MAX_TOKENS,
         "soft_threshold": settings.CONTEXT_BUDGET_SOFT_THRESHOLD,
         "hard_threshold": settings.CONTEXT_BUDGET_HARD_THRESHOLD,
         "compressed": compressed,

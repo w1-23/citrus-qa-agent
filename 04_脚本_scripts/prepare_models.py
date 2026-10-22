@@ -72,7 +72,7 @@ def prepare_skill_index() -> None:
 
 
 if __name__ == "__main__":
-    print("Citrus QA Agent 模型准备（v8.5.0）", flush=True)
+    print("CitrusQA 模型准备（v8.5.0）", flush=True)
     prepare_embedding()
     if not SKIP_RERANKER:
         prepare_reranker()

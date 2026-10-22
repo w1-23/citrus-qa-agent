@@ -32,13 +32,8 @@ ROLE_SOURCE_FILES: dict[str, list[str]] = {
     "supervisor": [
         "01_global_role_domain.md",
         "02_global_data_fidelity_citation.md",
-        "03_supervisor_routing_fusion.md",
-        # v10.0（2026-09-11 用户决策）: 原 09~15 七份格式模板合并为一份精简输出规范，
-        # 旧版留在 src/prompts/_backup_20260911/（详见该目录 README）
         "09_output_style.md",
         "16_tool_usage_file_rules.md",
-        "17_data_source_boundaries.md",
-        "18_evidence_arbitration_citation.md",
         "20_terminology_domain.md",
     ],
     # Retrieve-Agent（检索子代理：只检索 + 一句话总结论，无格式模板）

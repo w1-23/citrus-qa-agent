@@ -338,7 +338,13 @@ def _rag_cache_put(key: str, results: list) -> None:
 
 def citrus_rag_search(query: str) -> tuple[str, dict]:
 
-    """在柑橘科研文献库中检索与问题相关的论文片段。支持中文输入，系统自动生成英文假想答案提升召回。返回带 DOI 和置信度的结果"""
+    """Supplement web research by semantically searching the local citrus corpus.
+
+    Use only after DeepSeek Search/Fetch when a material evidence gap remains,
+    or when local full-text comparison is specifically useful. Do not use as a
+    default first lookup. Supports Chinese and returns paper excerpts, DOI and
+    relevance scores.
+    """
 
     if not query or not query.strip():
 
