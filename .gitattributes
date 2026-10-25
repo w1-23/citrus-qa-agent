@@ -1,0 +1,2 @@
+01_源码_src/scripts/*.sh text eol=lf
+01_源码_src/scripts/*.service text eol=lf
