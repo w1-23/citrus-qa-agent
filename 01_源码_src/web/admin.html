@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex,nofollow">
+  <title>CitrusQA 管理后台</title>
+  <link rel="stylesheet" href="/assets/admin.css?v=1">
+  <script src="/assets/admin.js?v=1" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">C</span><div><strong>CitrusQA</strong><small>管理员后台</small></div></div>
+    <div class="top-actions"><span id="adminName"></span><a class="button secondary" href="/">返回问答</a><button class="button secondary" id="logoutButton">退出登录</button></div>
+  </header>
+  <main class="layout">
+    <section class="welcome"><div><p class="eyebrow">ADMINISTRATION</p><h1>服务管理</h1><p>账号、使用情况、请求记录与运行状态</p></div><button class="button primary" id="refreshButton">刷新数据</button></section>
+    <section class="stats" aria-label="使用概况">
+      <article class="stat"><span>注册账号</span><strong id="userCount">—</strong></article>
+      <article class="stat"><span>今日请求</span><strong id="requestCount">—</strong></article>
+      <article class="stat"><span>正在处理</span><strong id="activeCount">—</strong></article>
+      <article class="stat"><span>排队等待</span><strong id="queuedCount">—</strong></article>
+    </section>
+    <section class="panel">
+      <div class="panel-heading"><div><h2>模型与服务</h2><p id="modelStatus">正在读取当前配置…</p></div><a class="button secondary" id="modelSettingsLink" href="/?adminSettings=1">配置模型服务</a></div>
+      <div class="service-summary" id="serviceSummary"></div>
+    </section>
+    <section class="panel">
+      <div class="panel-heading"><div><h2>账号管理</h2><p>查看每日请求量、调整额度、停用账号或重置密码</p></div></div>
+      <div class="table-scroll"><table><thead><tr><th>用户名</th><th>状态</th><th>今日用量</th><th>操作</th></tr></thead><tbody id="usersTable"><tr><td colspan="4" class="muted">正在加载…</td></tr></tbody></table></div>
+    </section>
+    <section class="panel">
+      <div class="panel-heading audit-heading"><div><h2>请求记录</h2><p>问题、回答与工具执行摘要；附件仅显示元信息</p></div><form id="auditSearch"><input id="auditQuery" type="search" placeholder="搜索问题或用户名"><button class="button secondary" type="submit">搜索</button></form></div>
+      <div class="audit-list" id="auditList"><p class="muted">正在加载…</p></div>
+      <div class="audit-pager"><button class="button secondary" id="olderButton">更早记录</button><span id="auditPageLabel"></span><button class="button secondary" id="newerButton">更新记录</button></div>
+    </section>
+    <p class="footnote">管理页面只对已登录管理员开放。审计记录按服务配置保留；请通过安全渠道交付重置密码。</p>
+  </main>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

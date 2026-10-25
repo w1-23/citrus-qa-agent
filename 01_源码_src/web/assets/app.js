@@ -18,67 +18,6 @@ function showAuthGate(show) {
   var logout = document.getElementById('logoutBtn');
   if (logout) logout.hidden = !currentAccount;
 }
-async function openAdminUsers() {
-  if (!currentAccount || currentAccount.role !== 'admin') return;
-  document.getElementById('adminUsersModal').hidden = false;
-  var host = document.getElementById('adminUsersList'); host.textContent = '正在加载…';
-  try {
-    var response = await fetch('/api/v2/admin/users'); var data = await response.json();
-    if (!response.ok) throw new Error(data.detail || '加载失败');
-    host.innerHTML = (data.users || []).map(function(user) {
-      return '<article class="admin-user-row"><div><b>' + escapeHtml(user.username) + '</b> · ' + escapeHtml(user.role) +
-        ' · 今日 ' + user.requests_today + '/' + user.daily_limit + ' · ' + (user.active ? '启用' : '停用') + '</div>' +
-        '<div class="admin-user-actions"><button onclick="resetAccountPassword(' + user.user_id + ')">重置密码</button>' +
-        (user.role !== 'admin' ? '<button onclick="toggleAccountActive(' + user.user_id + ',' + (!user.active) + ')">' + (user.active ? '停用' : '启用') + '</button><button onclick="changeAccountLimit(' + user.user_id + ',' + user.daily_limit + ')">设置限额</button>' : '') +
-        '</div></article>';
-    }).join('') || '暂无账号';
-    await loadAdminAudit();
-  } catch (e) { host.textContent = e.message; }
-}
-async function loadAdminAudit() {
-  if (!currentAccount || currentAccount.role !== 'admin') return;
-  var host = document.getElementById('adminAuditList');
-  var queueHost = document.getElementById('adminQueueStatus');
-  if (host) host.textContent = '正在加载…';
-  try {
-    var responses = await Promise.all([
-      fetch('/api/v2/admin/requests?limit=30'),
-      fetch('/api/v2/admin/queue')
-    ]);
-    var audit = await responses[0].json();
-    var queue = await responses[1].json();
-    if (!responses[0].ok) throw new Error(audit.detail || '日志加载失败');
-    if (!responses[1].ok) throw new Error(queue.detail || '队列状态加载失败');
-    if (queueHost) queueHost.textContent = '处理中 ' + queue.active + '/' + queue.max_active + ' · 排队 ' + queue.queued + '/' + queue.max_pending;
-    host.innerHTML = (audit.items || []).map(function(item) {
-      var tools = (item.tools || []).map(function(tool) { return typeof tool === 'string' ? tool : (tool.name || tool.tool || JSON.stringify(tool)); }).join('、');
-      var files = (item.attachments || []).map(function(file) { return file.name + ' (' + Math.max(1, Math.round((file.approx_bytes || 0) / 1024)) + ' KB)'; }).join('、');
-      var when = item.created_at ? new Date(item.created_at).toLocaleString() : '';
-      return '<details class="admin-audit-row"><summary><b>' + escapeHtml(item.username) + '</b> · ' + escapeHtml(item.status) + ' · ' + escapeHtml(when) + ' · ' + escapeHtml(item.query.slice(0, 120)) + '</summary>' +
-        '<p><b>问题</b><br>' + escapeHtml(item.query) + '</p>' +
-        '<p><b>回答</b><br>' + escapeHtml(item.answer || '尚未完成') + '</p>' +
-        '<p><b>工具</b> ' + escapeHtml(tools || '无') + '</p>' +
-        '<p><b>附件元信息</b> ' + escapeHtml(files || '无') + '</p>' +
-        '<p><b>会话</b> ' + escapeHtml(item.session_id) + ' · <b>耗时</b> ' + escapeHtml(item.elapsed_ms == null ? '—' : item.elapsed_ms + ' ms') + '</p></details>';
-    }).join('') || '暂无提问记录';
-  } catch (e) { if (host) host.textContent = e.message; }
-}
-function closeAdminUsers() { document.getElementById('adminUsersModal').hidden = true; }
-async function resetAccountPassword(id) {
-  if (!confirm('重置此账号密码？新密码只显示一次。')) return;
-  var response = await fetch('/api/v2/admin/users/' + id + '/reset-password', {method:'POST'});
-  var data = await response.json(); if (!response.ok) return alert(data.detail || '重置失败');
-  alert('临时密码：' + data.temporary_password); openAdminUsers();
-}
-async function toggleAccountActive(id, active) {
-  var response = await fetch('/api/v2/admin/users/' + id + '/active', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({active:active})});
-  var data = await response.json(); if (!response.ok) alert(data.detail || '操作失败'); else openAdminUsers();
-}
-async function changeAccountLimit(id, previous) {
-  var value = Number(prompt('每日请求上限（1–10000）', previous)); if (!Number.isInteger(value) || value < 1 || value > 10000) return;
-  var response = await fetch('/api/v2/admin/users/' + id + '/daily-limit', {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({daily_limit:value})});
-  var data = await response.json(); if (!response.ok) alert(data.detail || '操作失败'); else openAdminUsers();
-}
 async function authenticate(mode) {
   var username = (document.getElementById('authUsername').value || '').trim();
   var password = document.getElementById('authPassword').value || '';
@@ -90,6 +29,11 @@ async function authenticate(mode) {
     if (!response.ok) throw new Error(data.detail || '登录失败');
     currentAccount = data.user;
     localStorage.removeItem('citrus_session_id');
+    var next = new URLSearchParams(location.search).get('next');
+    if (next === '/admin') {
+      if (currentAccount.role !== 'admin') throw new Error('此页面仅管理员可访问。');
+      location.replace('/admin'); return;
+    }
     await startAuthenticatedApp();
   } catch (e) { error.textContent = e.message || '请求失败'; }
 }
@@ -102,11 +46,18 @@ async function logoutAccount() {
 async function startAuthenticatedApp() {
   showAuthGate(false);
   sessionId = localStorage.getItem(sessionStorageKey());
-  if (currentAccount && currentAccount.role === 'admin') loadRuntimeConfig();
-  else fetch('/api/v2/config').then(function(r) { return r.json(); }).then(function(cfg) {
+  var configReady;
+  if (currentAccount && currentAccount.role === 'admin') configReady = loadRuntimeConfig();
+  else configReady = fetch('/api/v2/config').then(function(r) { return r.json(); }).then(function(cfg) {
     _runtimeConfig = cfg; applyAppVersion();
   }).catch(function(){});
   await ensureSession();
+  if (currentAccount && currentAccount.role === 'admin' &&
+      new URLSearchParams(location.search).get('adminSettings') === '1') {
+    if (configReady) await configReady;
+    history.replaceState(null, '', '/');
+    openSettingsModal();
+  }
 }
 async function bootstrapAccount() {
   try {
@@ -766,7 +717,7 @@ function closeSettingsModal() {
 }
 function loadRuntimeConfig() {
   loadProviderCatalog();
-  fetch('/api/v2/config').then(function(r) { return r.json(); })
+  return fetch('/api/v2/config').then(function(r) { return r.json(); })
     .then(function(cfg) {
       _runtimeConfig = cfg;
       if (cfg.permission_wait_sec) _permWaitSec = cfg.permission_wait_sec;

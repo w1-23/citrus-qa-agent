@@ -26,7 +26,7 @@ from xml.etree import ElementTree
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, HTMLResponse
 from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel, Field
 
@@ -222,6 +222,19 @@ class CredentialsRequest(BaseModel):
     password: str = Field(..., min_length=1, max_length=256)
 
 
+def _client_ip(request: Request) -> str:
+    """Use Cloudflare's visitor address only when the deployment enables it."""
+    if os.getenv("CITRUS_TRUST_CLOUDFLARE_PROXY", "0").strip().lower() in {"1", "true", "yes"}:
+        candidate = (request.headers.get("cf-connecting-ip") or "").strip()
+        if candidate:
+            import ipaddress
+            try:
+                return str(ipaddress.ip_address(candidate))
+            except ValueError:
+                logger.warning("Ignoring invalid CF-Connecting-IP header")
+    return request.client.host if request.client else "unknown"
+
+
 class AccountDeleteRequest(BaseModel):
     password: str = Field(..., min_length=1, max_length=256)
 
@@ -254,7 +267,7 @@ def _set_auth_cookie(response: Response, token: str) -> None:
 @app.post("/api/v2/auth/register")
 async def register_account(req: CredentialsRequest, request: Request, response: Response):
     from src.auth import check_rate_limit, register
-    remote = request.client.host if request.client else "unknown"
+    remote = _client_ip(request)
     if not check_rate_limit("register", remote, limit=8, window_seconds=3600):
         raise HTTPException(status_code=429, detail="注册请求过于频繁，请稍后再试。")
     user, token, error = register(req.username, req.password)
@@ -268,7 +281,7 @@ async def register_account(req: CredentialsRequest, request: Request, response: 
 @app.post("/api/v2/auth/login")
 async def login_account(req: CredentialsRequest, request: Request, response: Response):
     from src.auth import check_rate_limit, login
-    remote = request.client.host if request.client else "unknown"
+    remote = _client_ip(request)
     key = remote + "|" + req.username.strip().casefold()
     if not check_rate_limit("login", key, limit=12, window_seconds=900):
         raise HTTPException(status_code=429, detail="登录尝试过多，请 15 分钟后再试。")
@@ -1486,6 +1499,32 @@ async def set_model_config(req: ModelConfigRequest):
             "runtime_overrides": settings.has_model_overrides,
         },
     }
+
+
+@app.get("/admin")
+async def serve_admin_dashboard(request: Request):
+    """Serve the separate admin UI only to an authenticated active admin."""
+    from src.auth import user_for_token, require_admin as is_admin
+    user = user_for_token(request.cookies.get("citrus_auth", ""))
+    if not user:
+        return RedirectResponse(url="/?next=%2Fadmin", status_code=303)
+    if not is_admin(user):
+        return HTMLResponse(
+            "<!doctype html><html lang='zh-CN'><meta charset='utf-8'>"
+            "<title>无权访问</title><body><main><h1>仅管理员可访问此页面</h1>"
+            "<a href='/'>返回 CitrusQA</a></main></body></html>",
+            status_code=403,
+            headers={"Cache-Control": "no-store"},
+        )
+    html_path = WEB_DIR / "admin.html"
+    if not html_path.exists():
+        raise HTTPException(status_code=404, detail="管理员后台页面未部署。")
+    return FileResponse(html_path, headers={
+        "Cache-Control": "no-store",
+        "X-Robots-Tag": "noindex, nofollow",
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "same-origin",
+    })
 
 
 @app.get("/")

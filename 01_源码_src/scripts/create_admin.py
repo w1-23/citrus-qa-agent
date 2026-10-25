@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+"""Interactively create the first CitrusQA administrator on a private server session."""
+from __future__ import annotations
+
+import getpass
+import sys
+from pathlib import Path
+
+SOURCE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(SOURCE_ROOT))
+
+from src.auth import init_store, list_users, register  # noqa: E402
+
+
+def main() -> int:
+    init_store()
+    if list_users():
+        print("账号库已经有账号。为避免通过公开注册流程误建管理员，本脚本只用于空账号库的首次初始化。")
+        return 2
+
+    username = input("管理员用户名（3–32 位）: ").strip()
+    password = getpass.getpass("管理员密码（至少 10 位，不会回显）: ")
+    confirmation = getpass.getpass("再次输入管理员密码: ")
+    if password != confirmation:
+        print("两次密码不一致，没有创建账号。")
+        return 2
+
+    user, _session_token, error = register(username, password)
+    if error or not user:
+        print(error or "管理员账号创建失败。")
+        return 2
+    if user.get("role") != "admin":
+        print("注册未获得管理员身份；请联系服务器管理员检查账号库。")
+        return 3
+    print(f"管理员账号 {user['username']} 已创建。请在 HTTPS 网站上登录；临时地址发布前不要开放注册。")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

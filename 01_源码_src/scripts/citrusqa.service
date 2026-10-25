@@ -9,6 +9,9 @@ User=wangziqiang
 Group=wangziqiang
 WorkingDirectory=/home/WZQ/CitrusQA/01_源码_src
 ExecStart=/home/WZQ/CitrusQA/04_脚本_scripts/run_server.sh
+Environment=CITRUS_COOKIE_SECURE=1
+Environment=CITRUS_TRUST_CLOUDFLARE_PROXY=1
+Environment=CITRUSQA_TRUSTED_PROXY_IPS=127.0.0.1
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGINT

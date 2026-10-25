@@ -25,4 +25,6 @@ cd "$ROOT/01_源码_src"
 exec "$ROOT/.venv/bin/python" -m uvicorn src.api.main:app \
   --host "${CITRUSQA_HOST:-127.0.0.1}" \
   --port "${CITRUSQA_PORT:-8000}" \
+  --proxy-headers \
+  --forwarded-allow-ips="${CITRUSQA_TRUSTED_PROXY_IPS:-127.0.0.1}" \
   --workers 1

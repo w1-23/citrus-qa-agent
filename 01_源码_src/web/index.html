@@ -22,7 +22,7 @@
   <h1>CitrusQA</h1>
   <div class="header-actions">
     <span id="accountLabel" class="account-label"></span>
-    <button id="adminUsersBtn" class="theme-btn" onclick="openAdminUsers()" title="账号管理" hidden>用户</button>
+    <a id="adminUsersBtn" class="theme-btn admin-nav-link" href="/admin" title="管理员后台" hidden>管理后台</a>
     <button id="logoutBtn" class="theme-btn" onclick="logoutAccount()" title="退出登录" hidden>退出</button>
     <button class="ctx-circle-btn" id="ctxCircleBtn" onclick="toggleCtxDrawer()" title="上下文用量">
       <svg viewBox="0 0 36 36" width="22" height="22">
@@ -44,21 +44,8 @@
     <select id="authMode"><option value="login">登录</option><option value="register">创建账号</option></select>
     <div class="auth-error" id="authError"></div>
     <button class="api-save" type="submit">继续</button>
-    <p>账号数据彼此隔离。问题、回答和工具执行摘要会供管理员排障，保留一年；附件只记录文件名、类型和大小。对话与附件内容可能发送给管理员配置的模型和联网服务。</p>
+    <p>账号数据彼此隔离。问题、回答和工具执行摘要会供管理员排障，保留一年；附件只记录文件名、类型和大小。对话与附件内容可能发送给管理员配置的模型和联网服务。公开访问时，连接还会经过 Cloudflare 转发。</p>
   </form>
-</div>
-
-<div class="admin-users-modal" id="adminUsersModal" hidden>
-  <section class="admin-users-card">
-    <header><strong>管理面板</strong><button type="button" onclick="closeAdminUsers()">关闭</button></header>
-    <details open><summary>账号</summary>
-    <div id="adminUsersList">正在加载…</div>
-    </details>
-    <details open><summary>队列 <span id="adminQueueStatus"></span></summary>
-      <div class="admin-audit-list" id="adminAuditList">正在加载…</div>
-      <button type="button" onclick="loadAdminAudit()">刷新记录</button>
-    </details>
-  </section>
 </div>
 
 <!-- v8.5.0 开源版：首次启动 API Key 引导（未配置时全屏遮罩，配置后隐藏） -->

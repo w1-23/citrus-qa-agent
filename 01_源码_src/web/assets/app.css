@@ -161,6 +161,7 @@ header h1 { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
   transition: all 0.2s var(--ease-out-quint);
 }
 .theme-btn:hover { background: var(--bg-hover); border-color: var(--border-hover); }
+.admin-nav-link { width:auto; min-width:70px; padding:0 9px; text-decoration:none; font-size:12px; }
 
 .main-container {
   display: flex;
@@ -1317,27 +1318,16 @@ footer {
 }
 
 .account-label { color: var(--text-muted); font-size: 12px; }
-.auth-gate, .admin-users-modal { position: fixed; inset: 0; z-index: 10000; display: grid; place-items: center; padding: 18px; background: color-mix(in srgb, var(--bg-app) 86%, #000 14%); }
-.auth-gate[hidden], .admin-users-modal[hidden] { display: none; }
-.auth-card, .admin-users-card { width: min(420px, 100%); padding: 24px; border: 1px solid var(--border-hairline); border-radius: 18px; background: var(--bg-surface); box-shadow: 0 20px 70px #0002; }
+.auth-gate { position: fixed; inset: 0; z-index: 10000; display: grid; place-items: center; padding: 18px; background: color-mix(in srgb, var(--bg-app) 86%, #000 14%); }
+.auth-gate[hidden] { display: none; }
+.auth-card { width: min(420px, 100%); padding: 24px; border: 1px solid var(--border-hairline); border-radius: 18px; background: var(--bg-surface); box-shadow: 0 20px 70px #0002; }
 .auth-brand { color: var(--accent); font-weight: 700; font-size: 20px; }
 .auth-title { margin: 18px 0 14px; font-size: 16px; font-weight: 600; }
 .auth-card input, .auth-card select { box-sizing: border-box; width: 100%; margin: 6px 0; padding: 11px 12px; border: 1px solid var(--border-hairline); border-radius: 10px; background: var(--bg-app); color: var(--text-primary); font: inherit; }
 .auth-card .api-save { width: 100%; margin-top: 12px; }
 .auth-card p { color: var(--text-muted); font-size: 11px; line-height: 1.6; }
 .auth-error { min-height: 18px; color: var(--error); font-size: 12px; }
-.admin-users-card { width: min(620px, 100%); max-height: 80vh; overflow: auto; }
-.admin-users-card > header { display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; }
-.admin-user-row { display:flex; justify-content:space-between; gap:12px; align-items:center; padding:12px 0; border-top:1px solid var(--border-hairline); font-size:12px; }
-.admin-user-actions { display:flex; gap:5px; }
-.admin-user-actions button, .admin-users-card header button { border:1px solid var(--border-hairline); border-radius:8px; background:transparent; color:var(--text-primary); padding:6px 8px; cursor:pointer; }
-.admin-users-card > details { border-top:1px solid var(--border-hairline); padding:12px 0; }
-.admin-users-card > details > summary { cursor:pointer; font-weight:600; margin-bottom:10px; }
-.admin-audit-list { max-height:46vh; overflow:auto; }
-.admin-audit-row { padding:10px 0; border-top:1px solid var(--border-hairline); font-size:12px; line-height:1.55; }
-.admin-audit-row summary { cursor:pointer; }
-.admin-audit-row p { white-space:pre-wrap; overflow-wrap:anywhere; margin:8px 0; }
-@media (max-width: 640px) { .account-label { display:none; } .admin-user-row { align-items:flex-start; flex-direction:column; } }
+@media (max-width: 640px) { .account-label { display:none; } }
 .paper-review-btn, .paper-review-result button { border:1px solid var(--border-hairline); border-radius:7px; background:var(--bg-app); color:var(--text-primary); padding:5px 8px; font:inherit; font-size:11px; cursor:pointer; }
 .paper-review-result { flex-basis:100%; max-width:min(650px, 80vw); max-height:340px; overflow:auto; padding:10px; border-top:1px solid var(--border-hairline); color:var(--text-secondary); font-size:11px; line-height:1.55; }
 .paper-review-result > a { display:inline-block; margin:8px 0; color:var(--accent); }
