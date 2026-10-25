@@ -210,26 +210,34 @@ def emit_reasoning(content: str) -> None:
 
 
 _TOOL_LABELS = {
-    "deepseek_search": "Web Search",
-    "deepseek_fetch": "Web Fetch",
-    "deepseek_fetch_paper": "Web Fetch (paper full text)",
-    "local_bm25_search": "本地关键词核对",
-    "local_dense_search": "本地语义检索",
-    "local_hybrid_search": "本地混合检索",
-    "draw_svg": "draw",
-    "citrus_rag_search": "本地语义检索",
+    "deepseek_search": "网页搜索",
+    "deepseek_fetch": "读取网页",
+    "deepseek_fetch_paper": "获取论文全文",
+    "local_bm25_search": "本地检索",
+    "local_dense_search": "本地检索",
+    "local_hybrid_search": "本地检索",
+    "draw_svg": "绘图",
+    "citrus_rag_search": "本地检索",
     "pdf_read": "读取 PDF",
     "read_local_file": "读取文件",
     "write_local_file": "写入文件",
     "statistical_analysis": "统计分析",
     "experimental_design": "实验设计",
-    "inspect_uploaded_table": "读取表格结构",
-    "audit_uploaded_table": "审查表格数据",
-    "audit_uploaded_data_bundle": "跨表数据审查",
-    "verify_uploaded_references": "核验文献元数据",
-    "fetch_and_audit_open_supplements": "获取并审查公开补充数据",
-    "call_write_agent": "写作助手",
-    "call_analyze_agent": "分析助手",
+    "inspect_uploaded_table": "读取表格",
+    "audit_uploaded_table": "数据审查",
+    "audit_uploaded_data_bundle": "数据审查",
+    "audit_uploaded_data": "数据审查",
+    "verify_uploaded_references": "文献核验",
+    "fetch_and_audit_open_supplements": "获取补充数据",
+    "export_literature_evidence": "导出文献证据",
+    "export_paper_analysis": "导出论文解读",
+    "export_experiment_design": "导出实验方案",
+    "save_research_note": "保存课题记录",
+    "recall_research_notes": "查阅课题记录",
+    "export_research_notes": "导出课题记录",
+    "export_corpus_gap_report": "导出语料清单",
+    "call_write_agent": "写作",
+    "call_analyze_agent": "分析",
 }
 
 
@@ -259,7 +267,9 @@ def _safe_tool_summary(tool_name: str, args: dict | None = None,
         return f"{label}：{detail}" if detail else label
     if output:
         text = " ".join(str(output).split())
-        if text.startswith(("[WEB_TOOL_ERROR]", "[LOCAL_SEARCH_ERROR]", "[TOOL_ERROR]")):
+        if text.startswith(("[WEB_TOOL_ERROR]", "[LOCAL_SEARCH_ERROR]",
+                            "[LOCAL_SEARCH_TRANSLATION_ERROR]", "[ERR_TIMEOUT]",
+                            "[ERR_NETWORK]", "[ERR_MISSING_DEP]", "[TOOL_ERROR]")):
             return f"{label}：{text[:180]}"
         match = re.search(r"Search returned (\d+) result", text, re.I)
         if match:
@@ -313,7 +323,8 @@ def emit_tool_result(tool_name: str, output: str, tool_call_id: str = "",
         mark_tool_end(tool_call_id)
     is_error = bool(is_error or str(output).startswith((
         "[WEB_TOOL_ERROR]", "[WEB_DISABLED]", "[WEB_FETCH_EMPTY]",
-        "[LOCAL_SEARCH_ERROR]", "[TOOL_ERROR]", "[ERR_REQUEST_DEADLINE]")))
+        "[LOCAL_SEARCH_ERROR]", "[LOCAL_SEARCH_TRANSLATION_ERROR]", "[TOOL_ERROR]",
+        "[ERR_REQUEST_DEADLINE]", "[ERR_TIMEOUT]", "[ERR_NETWORK]", "[ERR_MISSING_DEP]")))
     summary = summary or _safe_tool_summary(tool_name, output=output)
     emit_encoded("tool_result", {
         "tool_name": tool_name,

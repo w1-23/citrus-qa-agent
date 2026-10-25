@@ -34,10 +34,9 @@ def normalize_local_query(query: object) -> tuple[str | None, dict[str, object]]
         return original, info
 
     try:
-        # Lazy import avoids a module cycle: search.py owns the configured,
-        # cached translator while this module is also used by MultiRetriever.
-        from src.tools.search import _cached_translation
-        translated = str(_cached_translation(original) or "").strip()
+        # Import lazily to keep query validation independent of model startup.
+        from src.retrieval.query_translation import cached_translation
+        translated = str(cached_translation(original) or "").strip()
     except Exception as exc:  # noqa: BLE001
         translated = ""
         info["error"] = f"translation failed: {type(exc).__name__}: {exc}"

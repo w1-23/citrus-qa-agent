@@ -7,10 +7,7 @@ logger = logging.getLogger(__name__)
 
 
 def eager_load_rag():
-    """Preload embedder, retriever, reranker, and SkillTree at app startup.
-    MultiBatchRetriever is a singleton — instantiation triggers _load_data() once.
-    SkillTree is also preloaded so its vectors are cached/loaded from disk.
-    """
+    """Preload the shared retriever, embedder, and reranker once per process."""
     t0 = time.perf_counter()
     try:
         MultiBatchRetriever()  # singleton __init__ → _load_data() → Qdrant + BM25 + Models
@@ -18,13 +15,6 @@ def eager_load_rag():
     except Exception as e:
         logger.error(f"[RAG] MultiBatchRetriever preload failed: {e}")
         raise
-
-    try:
-        from src.core.skill_tree import SkillTree
-        st = SkillTree()
-        logger.info(f"[RAG] SkillTree loaded ({time.perf_counter()-t0:.1f}s)")
-    except Exception as e:
-        logger.warning(f"[RAG] SkillTree preload skipped: {e}")
 
     # v8.10k: 预热 memory 语义召回用的 Embedder（e5-large 共享单例）——
     # 启动即加载，首个请求不再现场加载模型（"每次首问 30s+ 慢"的根因之一）

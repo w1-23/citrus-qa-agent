@@ -10,6 +10,8 @@ import threading
 import time
 from pathlib import Path
 
+from src.config import MODEL_CACHE_ROOT
+
 # 默认离线模式：不连 HuggingFace，直接用本地缓存。设 HF_HUB_OFFLINE=0 可联网检查模型更新。
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 from typing import List, Dict, Tuple, Optional
@@ -20,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 _SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
 _INDEX_PATH = _SKILLS_DIR / "skills_index.json"
-_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / ".hf_cache"
+_CACHE_DIR = MODEL_CACHE_ROOT
 _CACHE_VECTORS = _CACHE_DIR / "skill_vectors.npy"
 _CACHE_HASH = _CACHE_DIR / "skill_texts_hash.txt"
 

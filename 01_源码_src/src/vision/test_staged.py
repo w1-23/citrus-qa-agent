@@ -144,17 +144,33 @@ def test_image_context_isolated_and_reset_per_request():
     assert second_context.run(get_request_images) == ()
 
 
-def test_primary_model_image_capability_is_configurable_and_fails_closed(monkeypatch):
+def test_primary_model_image_capability_comes_from_selected_model(monkeypatch):
     from src.graph import general_agent_graph as graph
 
-    monkeypatch.setattr(graph.settings, "VISION_MAIN_MODEL_IMAGE_INPUT", None)
     monkeypatch.setattr(graph.settings, "_runtime_model_cfg",
-                        {"main_base_url": "https://api.deepseek.com"})
+                        {"provider_id": "aliyun_bailian",
+                         "main_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"})
     monkeypatch.setattr(graph, "get_deepseek_model", lambda: "deepseek-flash")
     assert graph._main_model_supports_image_input() is True
 
     monkeypatch.setattr(graph, "get_deepseek_model", lambda: "text-only-model")
     assert graph._main_model_supports_image_input() is False
 
-    monkeypatch.setattr(graph.settings, "VISION_MAIN_MODEL_IMAGE_INPUT", True)
+    monkeypatch.setattr(graph.settings, "_runtime_model_cfg",
+                        {"provider_id": "aliyun_bailian",
+                         "main_model": "deepseek-v4.1-flash-1017",
+                         "main_model_image_input": "false"})
+    monkeypatch.setattr(graph, "get_deepseek_model", lambda: "deepseek-v4.1-flash-1017")
+    assert graph._main_model_supports_image_input() is True
+    assert graph.settings.RESOLVED_MAIN_MODEL_IMAGE_INPUT is True
+
+    monkeypatch.setattr(graph.settings, "_runtime_model_cfg",
+                        {"provider_id": "aliyun_bailian",
+                         "main_model": "custom-text-model",
+                         "main_model_image_input": "true"})
+    monkeypatch.setattr(graph, "get_deepseek_model", lambda: "custom-text-model")
+    assert graph._main_model_supports_image_input() is False
+    assert graph.settings.RESOLVED_MAIN_MODEL_IMAGE_INPUT is False
+
+    monkeypatch.setattr(graph, "get_deepseek_model", lambda: "qwen3-vl-plus")
     assert graph._main_model_supports_image_input() is True

@@ -10,7 +10,7 @@
 <script src="https://cdn.jsdelivr.net/npm/marked@4.3.0/marked.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/assets/app.css?v=9">
+<link rel="stylesheet" href="/assets/app.css?v=10">
 </head>
 <body>
 
@@ -21,17 +21,12 @@
   <div class="logo-mark">C</div>
   <h1>CitrusQA</h1>
   <div class="header-actions">
-    <span id="accountLabel" class="account-label"></span>
-    <a id="adminUsersBtn" class="theme-btn admin-nav-link" href="/admin" title="管理员后台" hidden>管理后台</a>
-    <button id="logoutBtn" class="theme-btn" onclick="logoutAccount()" title="退出登录" hidden>退出</button>
     <button class="ctx-circle-btn" id="ctxCircleBtn" onclick="toggleCtxDrawer()" title="上下文用量">
       <svg viewBox="0 0 36 36" width="22" height="22">
         <circle class="ctx-btn-bg" cx="18" cy="18" r="15" />
         <circle class="ctx-btn-fg" id="ctxBtnFg" cx="18" cy="18" r="15" />
       </svg>
     </button>
-    <button class="theme-btn" id="themeBtn" onclick="toggleTheme()" title="切换主题">⊙</button>
-    <button class="theme-btn" id="modelSettingsBtn" onclick="openSettingsModal()" title="设置（API Key / 模型切换）" hidden>⚙</button>
   </div>
 </header>
 
@@ -124,6 +119,22 @@
       <span id="citation-count">0</span>
       <div class="sidebar-content collapsed" id="sidebar-content"></div>
     </div>
+    <div class="sidebar-account" id="sidebarAccount" hidden>
+      <div class="account-menu" id="accountMenu" hidden>
+        <div class="account-menu-heading">账户与设置</div>
+        <a id="adminUsersBtn" class="account-menu-item" href="/admin" hidden><span aria-hidden="true">▦</span> 管理后台</a>
+        <button id="modelSettingsBtn" class="account-menu-item" onclick="setAccountMenuOpen(false); openSettingsModal()" hidden><span aria-hidden="true">⚙</span> 模型与服务设置</button>
+        <button id="themeBtn" class="account-menu-item" onclick="toggleTheme(); setAccountMenuOpen(false)"><span aria-hidden="true">◐</span> 切换主题</button>
+        <div class="account-menu-divider"></div>
+        <button id="logoutBtn" class="account-menu-item danger" onclick="logoutAccount()"><span aria-hidden="true">↪</span> 退出登录</button>
+      </div>
+      <button class="account-trigger" id="accountTrigger" onclick="toggleAccountMenu()" aria-haspopup="menu" aria-expanded="false">
+        <span class="account-avatar" id="accountAvatar">?</span>
+        <span class="account-trigger-name" id="accountLabel"></span>
+        <span class="account-trigger-role" id="accountRole"></span>
+        <span class="account-trigger-chevron" aria-hidden="true">⌃</span>
+      </button>
+    </div>
   </div>
   <div class="chat-panel">
     <div id="chat-container">
@@ -155,7 +166,7 @@
             <div class="perm-menu-note">重启后回落到 config.yaml 配置值</div>
           </div>
           <div class="input-actions">
-            <input id="attachment-input" type="file" accept="image/jpeg,image/png,image/webp,image/gif,.pdf,.docx,.csv,.tsv,.xlsx,.xls,.xlsm" multiple hidden onchange="handleAttachmentSelection(this.files)">
+            <input id="attachment-input" type="file" accept="image/jpeg,image/png,image/webp,image/gif,.pdf,.docx,.csv,.tsv,.xlsx,.xls,.xlsm,.xlsb" multiple hidden onchange="handleAttachmentSelection(this.files)">
             <button type="button" id="attachment-btn" class="attach-btn" onclick="document.getElementById('attachment-input').click()" title="附加图片、PDF、Word 或 CSV/XLSX 表格">＋ 附件</button>
             <!-- v8.7: 小巧圆形图标按钮；运行中由 JS 隐藏本按钮、显示停止按钮 -->
             <button class="send-btn" id="send-btn" onclick="sendMsg()" title="发送 (Enter)">↑</button>
@@ -194,7 +205,7 @@
 </div>
 
 
-<script src="/assets/app.js?v=14"></script>
+<script src="/assets/app.js?v=15"></script>
 </body>
 </html>
 

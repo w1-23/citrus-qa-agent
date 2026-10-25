@@ -149,6 +149,7 @@ class SessionManager:
                     tool_call_id TEXT,
                     tool_calls_json TEXT,
                     name TEXT,
+                    generation_ms INTEGER,
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (session_id) REFERENCES sessions(session_id)
                 )
@@ -198,6 +199,7 @@ class SessionManager:
                     ("tool_call_id", "TEXT"),
                     ("tool_calls_json", "TEXT"),
                     ("name", "TEXT"),
+                    ("generation_ms", "INTEGER"),
                     ("client_request_id", "TEXT"),   # v8.3.7 M1
                     ("idempotency_key", "TEXT"),     # v8.3.7 M1
                     ("reasoning", "TEXT"),           # v8.10l 深度思考持久化
@@ -421,7 +423,7 @@ class SessionManager:
         with _connect_db(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.execute(
-                "SELECT id, msg_type, content, tool_call_id, tool_calls_json, name, reasoning "
+                "SELECT id, msg_type, content, tool_call_id, tool_calls_json, name, reasoning, generation_ms "
                 "FROM messages WHERE session_id = ? ORDER BY id ASC",
                 (session_id,),
             )
@@ -433,6 +435,7 @@ class SessionManager:
                 tool_calls_json = row["tool_calls_json"]
                 name = row["name"]
                 reasoning = row["reasoning"] if "reasoning" in row.keys() else None
+                generation_ms = row["generation_ms"] if "generation_ms" in row.keys() else None
 
                 try:
                     if msg_type == "human":
@@ -452,6 +455,13 @@ class SessionManager:
                         # Provider reasoning is private internal model output;
                         # do not restore it into conversation context.
                         kw = {"content": content, "name": name or None}
+                        try:
+                            persisted_generation_ms = int(generation_ms or 0)
+                        except (TypeError, ValueError):
+                            persisted_generation_ms = 0
+                        if persisted_generation_ms > 0:
+                            kw["response_metadata"] = {
+                                "citrus_generation_ms": persisted_generation_ms}
                         if tool_calls_json:
                             try:
                                 tool_calls = [
@@ -551,14 +561,14 @@ class SessionManager:
             return False
 
     def _serialize_message(self, msg: BaseMessage) -> tuple:
-        """Extract (msg_type, content, tool_call_id, tool_calls_json, name, reasoning)
-        from a message."""
+        """Extract the persisted fields from a conversation message."""
         msg_type = ""
         content = ""
         tool_call_id = None
         tool_calls_json = None
         name = None
         reasoning = None
+        generation_ms = None
 
         if hasattr(msg, "type"):
             msg_type = msg.type
@@ -595,10 +605,20 @@ class SessionManager:
         if hasattr(msg, "name"):
             name = msg.name
 
+        metadata = getattr(msg, "response_metadata", None)
+        if isinstance(metadata, dict):
+            try:
+                value = int(metadata.get("citrus_generation_ms") or 0)
+                if 0 < value <= 7 * 24 * 60 * 60 * 1000:
+                    generation_ms = value
+            except (TypeError, ValueError):
+                pass
+
         # Provider reasoning_content is private internal model output. Never
         # persist it as part of a user-visible conversation trace.
 
-        return (msg_type, content, tool_call_id, tool_calls_json, name, reasoning)
+        return (msg_type, content, tool_call_id, tool_calls_json, name, reasoning,
+                generation_ms)
 
     def _save_messages_sync(self, session_id: str, messages: List[BaseMessage],
                             idempotency_key: str = "") -> bool:
@@ -619,8 +639,8 @@ class SessionManager:
                     conn.execute(
                         "INSERT INTO messages "
                         "(session_id, msg_type, content, tool_call_id, tool_calls_json, "
-                        "name, reasoning, client_request_id, idempotency_key) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "name, reasoning, generation_ms, client_request_id, idempotency_key) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (session_id, *self._serialize_message(msg),
                          idempotency_key if (idx == 0 and idempotency_key.startswith("crid:")) else None,
                          row_key),
@@ -662,8 +682,8 @@ class SessionManager:
                 for msg in messages:
                     conn.execute(
                         "INSERT INTO messages "
-                        "(session_id, msg_type, content, tool_call_id, tool_calls_json, name, reasoning) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        "(session_id, msg_type, content, tool_call_id, tool_calls_json, name, reasoning, generation_ms) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         (session_id, *self._serialize_message(msg)),
                     )
                 conn.execute(

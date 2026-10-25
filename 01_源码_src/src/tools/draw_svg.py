@@ -64,8 +64,22 @@ def _sanitize_svg(source: str) -> str:
 
 
 @tool
-def draw_svg(svg: str, alt_text: str = "图形") -> str:
+def draw_svg(svg: str = "", alt_text: str = "图形") -> str:
     """Validate and return an SVG diagram for the final answer. Use only when visualization is enabled and a diagram materially helps."""
-    safe = _sanitize_svg(svg)
+    source = str(svg or "").strip()
+    fenced = re.fullmatch(r"```(?:svg|xml)?\s*([\s\S]*?)\s*```", source, re.I)
+    if fenced:
+        source = fenced.group(1).strip()
+    else:
+        start = source.lower().find("<svg")
+        end = source.lower().rfind("</svg>")
+        if start >= 0 and end >= start:
+            source = source[start:end + len("</svg>")]
+    if not source:
+        return "[SVG_INPUT_MISSING] 请提供完整的 SVG 文档；需要以 <svg> 开始并以 </svg> 结束。"
+    try:
+        safe = _sanitize_svg(source)
+    except (ET.ParseError, ValueError) as exc:
+        return f"[SVG_FORMAT_ERROR] SVG 未通过安全校验：{exc}。请修正结构后重试。"
     label = re.sub(r"[\r\n<>]", " ", str(alt_text or "图形")).strip()[:160] or "图形"
     return f"SVG 已通过安全校验。请在最终回答中按原样嵌入以下可视化代码块（可加简短说明）：\n\n```svg\n{safe}\n```\n\n图示说明：{label}"

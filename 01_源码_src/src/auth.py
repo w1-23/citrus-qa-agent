@@ -1,8 +1,8 @@
 """Small account/auth store for the public CitrusQA web service.
 
-Passwords are PBKDF2-HMAC-SHA256 hashed, browser sessions are opaque random
-tokens stored only as SHA-256 digests, and account creation is serialized in
-SQLite so the first account becomes the bootstrap administrator exactly once.
+Passwords are PBKDF2-HMAC-SHA256 hashed and browser sessions are opaque random
+tokens stored only as SHA-256 digests. Public registration always creates a
+regular account; the first administrator is created through a private CLI.
 """
 from __future__ import annotations
 
@@ -141,7 +141,8 @@ def validate_credentials(username: str, password: str) -> str | None:
     return None
 
 
-def register(username: str, password: str) -> tuple[dict[str, Any] | None, str | None, str | None]:
+def _create_account(username: str, password: str, *, bootstrap_admin: bool
+                    ) -> tuple[dict[str, Any] | None, str | None, str | None]:
     username = str(username or "").strip()
     error = validate_credentials(username, password)
     if error:
@@ -151,8 +152,11 @@ def register(username: str, password: str) -> tuple[dict[str, Any] | None, str |
     with _lock, _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
-            admin_exists = conn.execute("SELECT 1 FROM users WHERE role='admin' LIMIT 1").fetchone()
-            role = "user" if admin_exists else "admin"
+            if bootstrap_admin and conn.execute(
+                    "SELECT 1 FROM users WHERE role='admin' LIMIT 1").fetchone():
+                conn.rollback()
+                return None, None, "管理员账号已存在；拒绝再次初始化。"
+            role = "admin" if bootstrap_admin else "user"
             try:
                 cur = conn.execute(
                     "INSERT INTO users(username,salt,password_hash,role,active,daily_limit,created_at) VALUES(?,?,?,?,1,30,?)",
@@ -173,6 +177,17 @@ def register(username: str, password: str) -> tuple[dict[str, Any] | None, str |
     if role == "admin":
         assign_legacy_sessions_to_admin(user_id)
     return _public_user(row), token, None
+
+
+def register(username: str, password: str) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    """Public self-service registration; never grants administrator rights."""
+    return _create_account(username, password, bootstrap_admin=False)
+
+
+def create_first_admin(username: str, password: str
+                       ) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    """Create an administrator from a private local CLI, never from HTTP."""
+    return _create_account(username, password, bootstrap_admin=True)
 
 
 def login(username: str, password: str) -> tuple[dict[str, Any] | None, str | None]:

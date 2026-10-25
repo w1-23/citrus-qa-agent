@@ -7,17 +7,39 @@ function showAuthGate(show) {
   if (gate) gate.hidden = !show;
   var app = document.getElementById('mainContainer');
   if (app) app.style.visibility = show ? 'hidden' : '';
+  var account = document.getElementById('sidebarAccount');
+  if (account) account.hidden = !currentAccount;
   var settings = document.getElementById('modelSettingsBtn');
   if (settings) settings.hidden = !currentAccount || currentAccount.role !== 'admin';
   var who = document.getElementById('accountLabel');
   if (who) who.textContent = currentAccount ? currentAccount.username : '';
+  var avatar = document.getElementById('accountAvatar');
+  if (avatar) avatar.textContent = currentAccount && currentAccount.username
+    ? Array.from(currentAccount.username.trim())[0].toLocaleUpperCase() : '?';
+  var role = document.getElementById('accountRole');
+  if (role) role.textContent = currentAccount && currentAccount.role === 'admin' ? '管理员' : '账户';
   var admin = document.getElementById('adminUsersBtn');
   if (admin) admin.hidden = !currentAccount || currentAccount.role !== 'admin';
   var permission = document.getElementById('permBadge');
   if (permission) permission.hidden = !currentAccount || currentAccount.role !== 'admin';
   var logout = document.getElementById('logoutBtn');
   if (logout) logout.hidden = !currentAccount;
+  if (show) setAccountMenuOpen(false);
 }
+function setAccountMenuOpen(open) {
+  var menu = document.getElementById('accountMenu');
+  var trigger = document.getElementById('accountTrigger');
+  if (menu) menu.hidden = !open;
+  if (trigger) trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+function toggleAccountMenu() {
+  var menu = document.getElementById('accountMenu');
+  setAccountMenuOpen(!menu || menu.hidden);
+}
+document.addEventListener('click', function(event) {
+  var area = document.getElementById('sidebarAccount');
+  if (area && !area.contains(event.target)) setAccountMenuOpen(false);
+});
 async function authenticate(mode) {
   var username = (document.getElementById('authUsername').value || '').trim();
   var password = document.getElementById('authPassword').value || '';
@@ -104,7 +126,7 @@ function handleAttachmentSelection(fileList) {
   var dropped = Array.from(fileList || []);
   var allowed = dropped.filter(function(file) {
     var name = String(file.name || '').toLowerCase();
-    return /^image\/(jpeg|png|webp|gif)$/.test(file.type || '') || /\.(jpe?g|png|webp|gif|pdf|docx|csv|tsv|xlsx|xls|xlsm)$/.test(name);
+    return /^image\/(jpeg|png|webp|gif)$/.test(file.type || '') || /\.(jpe?g|png|webp|gif|pdf|docx|csv|tsv|xlsx|xls|xlsm|xlsb)$/.test(name);
   });
   if (allowed.length !== dropped.length) {
     var rejected = dropped.filter(function(file) { return allowed.indexOf(file) < 0; });
@@ -181,7 +203,7 @@ function renderAttachmentSelection() {
       var icon = document.createElement('span');
       icon.className = 'attachment-preview-icon';
       icon.textContent = /\.pdf$/i.test(file.name || '') ? 'PDF' :
-        /\.xlsx$/i.test(file.name || '') ? 'XLSX' : /\.xlsm?$/i.test(file.name || '') ? 'XLS' : /\.tsv$/i.test(file.name || '') ? 'TSV' : /\.csv$/i.test(file.name || '') ? 'CSV' : 'DOC';
+        /\.xlsx$/i.test(file.name || '') ? 'XLSX' : /\.xlsb$/i.test(file.name || '') ? 'XLSB' : /\.xlsm?$/i.test(file.name || '') ? 'XLS' : /\.tsv$/i.test(file.name || '') ? 'TSV' : /\.csv$/i.test(file.name || '') ? 'CSV' : 'DOC';
       card.appendChild(icon);
     }
     var label = document.createElement('span');
@@ -220,7 +242,7 @@ function appendSentAttachmentPreviews(contentEl, files) {
       var icon = document.createElement('span');
       icon.className = 'sent-attachment-icon';
       icon.textContent = /\.pdf$/i.test(file.name || '') ? 'PDF' :
-        /\.xlsx$/i.test(file.name || '') ? 'XLSX' : /\.xlsm?$/i.test(file.name || '') ? 'XLS' : /\.tsv$/i.test(file.name || '') ? 'TSV' : /\.csv$/i.test(file.name || '') ? 'CSV' : 'DOC';
+        /\.xlsx$/i.test(file.name || '') ? 'XLSX' : /\.xlsb$/i.test(file.name || '') ? 'XLSB' : /\.xlsm?$/i.test(file.name || '') ? 'XLS' : /\.tsv$/i.test(file.name || '') ? 'TSV' : /\.csv$/i.test(file.name || '') ? 'CSV' : 'DOC';
       card.appendChild(icon);
     }
     var label = document.createElement('span');
@@ -295,18 +317,25 @@ function escapeHtml(s) {
    全量转义会把代码里的 ' 显示成 &#39;，如 5'上游调控区） */
 function displayToolName(name) {
   var names = {
-    deepseek_search: 'Web Search', deepseek_fetch: 'Web Fetch',
-    deepseek_fetch_paper: 'Web Fetch (paper full text)',
-    local_hybrid_search: '本地混合检索', local_bm25_search: '本地关键词检索',
-    local_dense_search: '本地语义检索', citrus_rag_search: '本地语义检索',
-    draw_svg: 'draw',
-    inspect_uploaded_table: '表格结构识别', audit_uploaded_table: '原始数据审查',
-    export_literature_evidence: '导出文献证据表', export_paper_analysis: '导出论文解读',
-    export_experiment_design: '导出实验设计', save_research_note: '保存课题记录',
-    recall_research_notes: '回顾课题记录', export_research_notes: '导出课题记录',
-    export_corpus_gap_report: '导出语料缺口清单'
+    deepseek_search: '网页搜索', deepseek_fetch: '读取网页',
+    deepseek_fetch_paper: '获取论文全文',
+    local_hybrid_search: '本地检索', local_bm25_search: '本地检索',
+    local_dense_search: '本地检索', citrus_rag_search: '本地检索',
+    draw_svg: '绘图',
+    inspect_uploaded_table: '读取表格', audit_uploaded_table: '数据审查',
+    audit_uploaded_data_bundle: '数据审查', audit_uploaded_data: '数据审查',
+    verify_uploaded_references: '文献核验', fetch_and_audit_open_supplements: '获取补充数据',
+    export_literature_evidence: '导出文献证据', export_paper_analysis: '导出论文解读',
+    export_experiment_design: '导出实验方案', save_research_note: '保存课题记录',
+    recall_research_notes: '查阅课题记录', export_research_notes: '导出课题记录',
+    export_corpus_gap_report: '导出语料清单'
   };
   return names[name] || String(name || 'tool').replace(/_/g, ' ');
+}
+function toolSummaryDetail(name, summary) {
+  var text = String(summary || '');
+  var prefix = displayToolName(name) + '：';
+  return text.indexOf(prefix) === 0 ? text.slice(prefix.length) : text;
 }
 function escapeHtmlCode(s) {
   return String(s == null ? '' : s)
@@ -1873,9 +1902,10 @@ async function sendMsg(isFollowUp) {
       case 'tool_result':
         updateContextTokens((data.output || '').length * 0.7);
         var _summary = data.summary || (data.is_error ? '执行失败' : '完成');
+        var _detailSummary = toolSummaryDetail(data.tool_name, _summary);
         var _line = data.tool_call_id && _toolTraceLines && _toolTraceLines[data.tool_call_id];
         if (_line) {
-          _line.querySelector('.term-msg').textContent = (data.is_error ? ' ⚠ ' : ' ✓ ') + displayToolName(data.tool_name) + ' · ' + _summary;
+          _line.querySelector('.term-msg').textContent = (data.is_error ? ' ⚠ ' : ' ✓ ') + displayToolName(data.tool_name) + (_detailSummary ? ' · ' + _detailSummary : '');
           var _detailText = String(data.output || '').substring(0, 1800);
           if (_detailText) {
             var _details = document.createElement('details'); _details.className = 'term-line'; _details.style.cssText = 'padding-left:52px;color:var(--text-muted)';
@@ -1884,7 +1914,7 @@ async function sendMsg(isFollowUp) {
             _bodyEl.style.cssText = 'white-space:pre-wrap;max-height:220px;overflow:auto;margin:4px 0;font:inherit';
             _details.appendChild(_summaryEl); _details.appendChild(_bodyEl); _line.after(_details);
           }
-        } else appendTerminal((data.is_error ? '⚠ ' : '✓ ') + displayToolName(data.tool_name) + ' · ' + _summary);
+        } else appendTerminal((data.is_error ? '⚠ ' : '✓ ') + displayToolName(data.tool_name) + (_detailSummary ? ' · ' + _detailSummary : ''));
         break;
       case 'agent_switch':
         updateStatus('agent', '启动: '+(data.agent_name||'')); updateContextTokens(50);
@@ -2062,8 +2092,7 @@ async function sendMsg(isFollowUp) {
           ub.onclick=function(){userInput.value=currentQuery;sendMsg()};
           uc.appendChild(ub);botContent.appendChild(uc);
         }
-        var s=(data.gen_time_ms/1000).toFixed(1);
-        var td=document.createElement('div');td.style.cssText='margin-top:8px;font-size:11px;color:var(--text-muted);font-family:var(--font-mono)';td.textContent='⏱ '+s+'s';botContent.appendChild(td);
+        botContent.appendChild(createElapsedBadge(data.gen_time_ms));
         sessionId=data.session_id;if(sessionId)localStorage.setItem(sessionStorageKey(),sessionId);
         // v8.10: 回答完整生成后才显示 👍/👎 反馈栏（主流时序）
         appendFeedback(answerDiv.closest('.message'));
@@ -2413,6 +2442,9 @@ async function restoreSessionHistory() {
         // Render the answer, then place the safe tool trace above it.
         // （此前 append 到 .message 外层会被 flex 排到对话区右侧——位置错乱）
         contentEl.innerHTML = renderMarkdownSafe(m.content);
+        if (Number(m.gen_time_ms) > 0) {
+          contentEl.appendChild(createElapsedBadge(m.gen_time_ms));
+        }
         // Restore visible tool names, query summaries, and result snippets.
         if (pendingTools.length > 0) {
           var tid = 'terminal_hist_' + (++histSeq);
@@ -2448,6 +2480,13 @@ async function restoreSessionHistory() {
 
 /* v8.10: 无会话时自动创建默认会话（主流行为）——打开即有一个会话，历史回答有处可存，
    不再依赖用户手动点 ＋ 新建 */
+function createElapsedBadge(milliseconds) {
+  var badge = document.createElement('div');
+  badge.style.cssText = 'margin-top:8px;font-size:11px;color:var(--text-muted);font-family:var(--font-mono)';
+  badge.textContent = '⏱ ' + (Math.max(0, Number(milliseconds) || 0) / 1000).toFixed(1) + 's';
+  return badge;
+}
+
 async function ensureSession() {
   if (!sessionId) {
     try {

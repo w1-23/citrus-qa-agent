@@ -505,19 +505,6 @@ def build_human_message(
 
     blocks.append(f"<user_query>\n{ctx.query}\n</user_query>")
 
-    # 阶段1 静态前缀: format 指南/策略卡片等动态内容追加到末尾
-    # (不在 SystemMessage 中 → 前缀字节级稳定，缓存跨请求命中)
-    try:
-        from src.prompts.loader import build_dynamic_blocks
-        dynamic = build_dynamic_blocks(
-            format_hint=ctx.format_hint,
-            query=ctx.query,
-        )
-        if dynamic:
-            blocks.append(dynamic)
-    except Exception:
-        pass
-
     return HumanMessage(content="\n\n".join(blocks))
 
 

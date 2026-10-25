@@ -45,16 +45,12 @@ flowchart TD
 - 图片作为本轮视觉输入交给配置的主模型；PDF / DOCX 会提取文本，扫描版 PDF 可将少量页面作为图像输入。附件仅用于当前请求，不写入共享知识库或会话原文历史。
 - 用户可开启“可视化”。主模型认为图示有帮助时可调用 `draw` 生成经校验的 SVG；简单问题不会被强制配图。
 
-## 病害图像初筛（可选模块）
+## 柑橘病害图片判断
 
-用户上传柑橘叶片或果实照片并询问「这是什么病」时，主模型可以调用 `disease_diagnose` 做一次图像初筛，再结合症状描述、知识库与联网证据作答。
+用户上传柑橘叶片或果实照片并询问病害时，由支持图像输入的主模型直接检查原图；当前运行链路不调用旧的固定类别病害分类器，也没有专用病害图片库。实际判断能力取决于所选主模型是否支持图片输入。
 
-- **覆盖**：10 类柑橘（溃疡病、黄龙病、黑斑病、黑点病、煤烟病、叶片枯焦、叶卷曲病毒、红蜘蛛、细菌性疫病、健康）+ 1 个弱参考标签（白粉病）；另有 16 类明确声明「不在范围内」。范围外一律拒答，报告固定附覆盖范围与「不是诊断结论、需专家复核」。
-- **预处理不居中裁剪**：EXIF 校正 → 长边限 1600 → HSV 叶片前景检测 → letterbox 等比补边；大图再切 2×2 重叠子图，按视图取最高分，避免病斑被切掉或缩到看不见。
-- **模型**：三个公开预训练权重导出 ONNX（ConvNeXt-Small / ViT-B/16 / PlantVillage MobileNetV2），CPU 可跑，DirectML 加速下三模型约 90–140 ms。
-- **模型文件不进仓库**：首次运行 `python 04_脚本_scripts/prepare_models.py --vision`，从 GitHub Release 下载到 `agent/models/vision`。
-- **许可**：`unknown` / `other` 的权重默认不加载，需要黑点病、黄龙病与白粉病弱标签时在 `config.yaml` 打开 `vision.allow_unlicensed_models: true`。
-- **状态**：`GET /api/v2/vision/status` 报告模型文件、许可、实际 ONNX provider 与覆盖类别。设计与实测见 [docs/vision.md](docs/vision.md)。
+回答应简洁给出最可能判断和高/中/低把握（不是校准概率），指出一个关键鉴别点；把握中低时给一项优先筛查建议。照片不足以判断时明确说明不确定，不把图像判断写成确诊，不根据照片给出农药用量。
+
 ### 准备本地语料（可选）
 
 把有权使用的文献放进一个目录，再按批次入库；索引产物落在 `agent/`，不随仓库分发：
@@ -66,7 +62,7 @@ python 04_脚本_scripts\reindex_lance.py --batch mycorpus                # 生�
 
 重排模型损坏或想强制重嵌入时加 `--no-qdrant` 整体重建。模型权重由 `prepare_models.py` 下载（默认走
 `HF_ENDPOINT=https://hf-mirror.com`，缓存落在 `agent/.hf_cache/`）；只要向量模型、跳过 1–2 GB 重排模型用
-`--skip-reranker`，要一并下载病害图像模型用 `--vision`。
+`--skip-reranker`。
 ## 代码结构
 
 - `01_源码_src/`：API、检索、证据处理、智能体和 Web 界面。
@@ -97,4 +93,4 @@ powershell -ExecutionPolicy Bypass -File .\run.ps1
 
 代码许可见 [`LICENSE`](LICENSE)。本仓库不授权使用第三方论文、数据库、模型或数据集；请在取得相应许可后下载、处理或分发这些材料。请勿提交 API 密钥、用户数据或未获分发许可的全文文献。
 
-病害图像初筛使用的三个权重来自公开模型仓库，许可分别为 Apache-2.0、未标注、other（详见 [docs/vision.md](docs/vision.md)）；权重不随仓库分发，`unknown`/`other` 的模型默认不加载。
+病害图片判断由配置的多模态主模型完成；本仓库当前不分发或加载专用病害分类器权重。

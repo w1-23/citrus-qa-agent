@@ -97,6 +97,18 @@ def finish_request(*, request_id: str, answer: str = "", tool_trace: list[Any] |
         conn.commit()
 
 
+def mark_interrupted_requests() -> int:
+    """Close audit rows left running when the single service process restarted."""
+    with _lock, _connect() as conn:
+        cursor = conn.execute(
+            "UPDATE request_audit SET status='failed', answer=?, finished_at=? "
+            "WHERE status='running'",
+            ("服务进程在请求完成前停止；请重新提交。", time.time()),
+        )
+        conn.commit()
+        return int(cursor.rowcount or 0)
+
+
 def list_requests(*, limit: int = 50, offset: int = 0, user_id: int | None = None,
                   query: str = "") -> dict[str, Any]:
     limit = max(1, min(int(limit), 100))

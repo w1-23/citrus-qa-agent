@@ -1,0 +1,935 @@
+"""HTML report renderer for paperconan scan results.
+
+Renders a single self-contained HTML file (inline CSS + vanilla JS, no external
+deps, no CDN) showing every finding with its evidence table. Designed to be
+emailed, attached to a PubPeer post, or saved alongside scan.json.
+"""
+from __future__ import annotations
+
+import html
+import os
+from typing import Any, Iterable
+
+from ._finding_groups import BLOCK_FINDING_GROUPS
+from .image._budget import report_image_evidence_bytes
+from .image._evidence import (
+    _BoundedBytesIO,
+    EvidenceBudget,
+    _base64_encoded_size,
+    _max_image_bytes,
+    _max_image_pixels,
+    _max_raw_size_for_base64_budget,
+    registered_native_crop_data_uri,
+    registered_preview_data_uri,
+)
+
+
+# ---------- value formatting ----------
+
+def _fmt_cell(v: Any) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return "TRUE" if v else "FALSE"
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        if v != v or v in (float("inf"), float("-inf")):
+            return ""
+        if abs(v) < 1e-12:
+            return "0"
+        if v == int(v) and abs(v) < 1e15:
+            return f"{int(v)}"
+        return f"{v:.8g}"
+    return html.escape(str(v))
+
+
+def _esc(s: Any) -> str:
+    return html.escape("" if s is None else str(s))
+
+
+# ---------- finding extraction ----------
+
+def _iter_block_findings(
+    scan: dict,
+    *,
+    per_block_groups: tuple[str, ...] = BLOCK_FINDING_GROUPS,
+) -> Iterable[tuple[dict, dict]]:
+    for blk in scan.get("relations_blocks", []) or []:
+        for group in per_block_groups:
+            for f in blk.get(group, []) or []:
+                yield blk, f
+
+
+def _all_findings(
+    scan: dict,
+    *,
+    per_block_groups: tuple[str, ...] = BLOCK_FINDING_GROUPS,
+) -> list[dict]:
+    out = []
+    for blk, f in _iter_block_findings(scan, per_block_groups=per_block_groups):
+        out.append({
+            "scope": "block",
+            "file": blk["file"],
+            "sheet": blk["sheet"],
+            "block_rows": blk["block"]["rows"],
+            "block_cols": blk["block"]["cols"],
+            "header": blk["block"].get("header") or [],
+            "finding": f,
+        })
+    for cf in scan.get("cross_sheet_findings", []) or []:
+        out.append({
+            "scope": "cross_sheet",
+            "file": cf.get("file", ""),
+            "sheet": f"{cf.get('sheet_a', '?')} ↔ {cf.get('sheet_b', '?')}",
+            "block_rows": "—",
+            "block_cols": "—",
+            "header": [],
+            "finding": cf,
+        })
+    assets = {
+        str(asset.get("asset_id")): asset
+        for asset in scan.get("image_assets", []) or []
+        if asset.get("asset_id")
+    }
+    for image_finding in scan.get("image_findings", []) or []:
+        asset_ids = [str(x) for x in image_finding.get("asset_ids", []) or []]
+        files = [assets[x].get("file", x) for x in asset_ids if x in assets]
+        out.append({
+            "scope": "image",
+            "file": " / ".join(files) or "registered image asset",
+            "sheet": "image",
+            "block_rows": "native pixels",
+            "block_cols": "native pixels",
+            "header": [],
+            "finding": image_finding,
+            "image_assets": [assets[x] for x in asset_ids if x in assets],
+        })
+    return out
+
+
+def _severity_counts(findings: list[dict]) -> dict[str, int]:
+    c = {"high": 0, "medium": 0, "low": 0}
+    for item in findings:
+        if item["finding"].get("profile_action") == "hidden":
+            continue
+        sev = (item["finding"].get("severity") or "low").lower()
+        c[sev] = c.get(sev, 0) + 1
+    return c
+
+
+# ---------- evidence table rendering ----------
+
+def _render_evidence_table(ev: dict | None) -> str:
+    if not ev or not ev.get("rows"):
+        return '<p class="no-evidence">no evidence table</p>'
+    headers = ev.get("headers") or []
+    col_offset = int(ev.get("col_offset") or 0)
+    hi_cols = set(int(c) for c in ev.get("highlight_cols") or [])
+    hi_rows = set(int(r) for r in ev.get("highlight_rows") or [])
+
+    # Header row: empty corner, then each header cell. Highlight matching columns.
+    head_cells = ['<th class="row-label">row</th>']
+    for i, h in enumerate(headers):
+        abs_col = col_offset + i
+        cls = "hi-col" if abs_col in hi_cols else ""
+        label = _esc(h) if h not in (None, "") else f"<span class='muted'>col {abs_col + 1}</span>"
+        head_cells.append(f'<th class="{cls}">{label}</th>')
+
+    body_rows = []
+    for row in ev["rows"]:
+        row_idx = int(row.get("row_idx") or 0)
+        is_ctx = bool(row.get("is_context"))
+        is_hi_row = row_idx in hi_rows
+        tr_cls_parts = []
+        if is_ctx:
+            tr_cls_parts.append("ctx")
+        if is_hi_row:
+            tr_cls_parts.append("hi-row")
+        tr_cls = " ".join(tr_cls_parts)
+        cells = [f'<td class="row-label">{row_idx}</td>']
+        for i, v in enumerate(row.get("values") or []):
+            abs_col = col_offset + i
+            cls = "hi-col" if abs_col in hi_cols else ""
+            cells.append(f'<td class="{cls}">{_fmt_cell(v)}</td>')
+        body_rows.append(f'<tr class="{tr_cls}">{"".join(cells)}</tr>')
+
+    # A trimmed window with no notice reads as the whole block. This table is
+    # what a reader checks against the paper, and it reaches them through the
+    # adjudicated report too, so the scale has to travel with it.
+    cut = ev.get("truncated")
+    caption = ""
+    if isinstance(cut, dict):
+        caption = (
+            f'<caption class="ev-cut">'
+            f'{_esc(cut.get("rows_shown"))}×{_esc(cut.get("cols_shown"))} / '
+            f'{_esc(cut.get("rows_total"))}×{_esc(cut.get("cols_total"))} '
+            f'· 此表为窗口,非整块 · window, not the whole block</caption>'
+        )
+    elif cut:
+        caption = ('<caption class="ev-cut">窗口已被扫描裁剪 · '
+                   'this window was trimmed by the scan</caption>')
+
+    return (
+        '<div class="ev-wrap"><table class="ev">'
+        + caption
+        + f'<thead><tr>{"".join(head_cells)}</tr></thead>'
+        f'<tbody>{"".join(body_rows)}</tbody>'
+        '</table></div>'
+    )
+
+
+def _render_cross_sheet_examples(cf: dict) -> str:
+    examples = cf.get("examples") or []
+    if not examples:
+        return ""
+    # within-row shared-fraction form: each example is a shared tail with the values sharing it
+    if examples and isinstance(examples[0], dict) and "tail" in examples[0]:
+        rows = []
+        for ex in examples[:10]:
+            vals = " , ".join(f"{v:.10g}" for v in ex.get("values") or [])
+            rows.append(
+                f'<tr><td>.{_esc(ex.get("tail"))}</td><td>{_esc(vals)}</td></tr>'
+            )
+        return (
+            '<div class="ev-wrap"><table class="ev">'
+            '<thead><tr><th>shared fractional tail</th><th>values (integer part differs)</th></tr></thead>'
+            f'<tbody>{"".join(rows)}</tbody></table></div>'
+        )
+    if examples and isinstance(examples[0], dict):
+        rows = []
+        for ex in examples[:10]:
+            rows.append(
+                f'<tr><td>{_esc(ex.get("row"))}</td>'
+                f'<td>{_esc(ex.get("col"))}</td>'
+                f'<td>{_fmt_cell(ex.get("value"))}</td></tr>'
+            )
+        return (
+            '<div class="ev-wrap"><table class="ev">'
+            '<thead><tr><th>row</th><th>col</th><th>value</th></tr></thead>'
+            f'<tbody>{"".join(rows)}</tbody></table></div>'
+        )
+    # value-overlap form: list of floats
+    chips = "".join(f'<span class="val-chip">{_fmt_cell(v)}</span>' for v in examples[:12])
+    return f'<div class="shared-values"><span class="muted">shared values: </span>{chips}</div>'
+
+
+# ---------- per-section rendering ----------
+
+def _registered_pair_preview_data_uri(
+    item: dict,
+    artifact_dir: str | None,
+    budget: EvidenceBudget,
+) -> str | None:
+    import base64
+    import io
+
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+
+    assets = {
+        str(asset.get("asset_id")): asset
+        for asset in item.get("image_assets", []) or []
+        if asset.get("asset_id")
+    }
+    regions = item["finding"].get("regions") or []
+    if not regions:
+        return None
+
+    remaining_encoded_bytes = max(
+        0,
+        budget.max_bytes - budget.used_bytes,
+    )
+    validation_budget = EvidenceBudget(remaining_encoded_bytes)
+    previews = []
+    canvas = None
+    try:
+        for region in regions:
+            if not isinstance(region, dict):
+                return None
+            asset = assets.get(str(region.get("asset_id")))
+            if asset is None:
+                return None
+            uri = registered_native_crop_data_uri(
+                asset,
+                region.get("box"),
+                artifact_dir,
+                validation_budget,
+            )
+            marker = "data:image/png;base64,"
+            if uri is None or not uri.startswith(marker):
+                return None
+            payload = base64.b64decode(
+                uri[len(marker):],
+                validate=True,
+            )
+            with Image.open(io.BytesIO(payload)) as crop:
+                crop.load()
+                preview = crop.copy()
+            preview.thumbnail((760, 760))
+            converted = preview.convert("RGB")
+            if converted is not preview:
+                preview.close()
+            previews.append(converted)
+
+        gap = 20
+        width = sum(image.width for image in previews)
+        width += gap * max(0, len(previews) - 1)
+        height = max(image.height for image in previews)
+        if (
+            width <= 0
+            or height <= 0
+            or width * height > _max_image_pixels()
+        ):
+            return None
+        canvas = Image.new("RGB", (width, height), "white")
+        offset = 0
+        for preview in previews:
+            canvas.paste(preview, (offset, 0))
+            offset += preview.width + gap
+
+        remaining_encoded_bytes = max(
+            0,
+            budget.max_bytes - budget.used_bytes,
+        )
+        payload_limit = min(
+            _max_image_bytes(),
+            _max_raw_size_for_base64_budget(remaining_encoded_bytes),
+        )
+        if payload_limit <= 0:
+            return None
+        output = _BoundedBytesIO(payload_limit)
+        canvas.save(output, format="JPEG", quality=88, optimize=True)
+        payload = output.getvalue()
+        encoded_size = _base64_encoded_size(len(payload))
+        if not budget.can_consume(encoded_size):
+            return None
+        encoded = base64.b64encode(payload).decode("ascii")
+        if len(encoded) != encoded_size or not budget.consume(encoded_size):
+            return None
+        return f"data:image/jpeg;base64,{encoded}"
+    except Exception:
+        return None
+    finally:
+        if canvas is not None:
+            canvas.close()
+        for preview in previews:
+            preview.close()
+
+
+def _render_finding_card(
+    item: dict,
+    *,
+    artifact_dir: str | None = None,
+    image_budget: EvidenceBudget | None = None,
+) -> str:
+    f = item["finding"]
+    sev = (f.get("severity") or "low").lower()
+    kind = f.get("kind", "?")
+    rule = f.get("rule", "")
+    n = f.get("n", f.get("n_cells", ""))
+    file_ = item["file"]
+    sheet = item["sheet"]
+    block_rows = item["block_rows"]
+    profile_action = (f.get("profile_action") or "kept").lower()
+
+    if item["scope"] == "image":
+        regions = f.get("regions") or []
+        chips = "".join(
+            f'<span class="val-chip">{_esc(r.get("asset_id"))} '
+            f'{_esc(r.get("box"))}</span>'
+            for r in regions
+        )
+        preview_uri = None
+        if image_budget is not None:
+            if regions:
+                preview_uri = _registered_pair_preview_data_uri(
+                    item,
+                    artifact_dir,
+                    image_budget,
+                )
+            else:
+                for asset in item.get("image_assets", []) or []:
+                    preview_uri = registered_preview_data_uri(
+                        asset,
+                        artifact_dir,
+                        image_budget,
+                    )
+                    if preview_uri is not None:
+                        break
+        chips_html = (
+            f'<div class="shared-values">{chips}</div>'
+            if chips else ""
+        )
+        if preview_uri:
+            evidence_html = (
+                f'<img class="image-pair-preview" src="{_esc(preview_uri)}" '
+                f'alt="registered image pair evidence">{chips_html}'
+            )
+        else:
+            evidence_html = (
+                chips_html
+                + (
+                    '<p class="no-evidence">registered image evidence unavailable</p>'
+                    if regions else ""
+                )
+                or '<p class="no-evidence">no registered image region</p>'
+            )
+        loc = _esc(file_)
+        extra_meta = (
+            f' · score={_esc(f.get("score"))}'
+            f' · transform={_esc(f.get("transform"))}'
+        )
+    elif item["scope"] == "cross_sheet":
+        evidence_html = _render_cross_sheet_examples(f)
+        loc = f"{_esc(file_)} :: {_esc(sheet)}"
+        extra_meta = ""
+        if f.get("same_position_count") is not None:
+            extra_meta = (
+                f' · same-pos={_esc(f.get("same_position_count"))}'
+                f'/{_esc(min(f.get("size_a", 0), f.get("size_b", 0)))}'
+            )
+        if kind == "within_row_repeated_segment" and f.get("row") is not None:
+            ranges = " ↔ ".join(
+                str(occurrence.get("range"))
+                for occurrence in f.get("occurrences") or []
+                if occurrence.get("range")
+            )
+            extra_meta += f' · row {_esc(f.get("row"))}'
+            if ranges:
+                extra_meta += f' · {_esc(ranges)}'
+    else:
+        evidence_html = _render_evidence_table(f.get("evidence"))
+        loc = f"{_esc(file_)} :: {_esc(sheet)} · rows {_esc(block_rows)}"
+        extra_meta = f" · n={_esc(n)}" if n != "" else ""
+
+    searchable = " ".join([
+        str(file_), str(sheet), str(kind), str(rule),
+    ]).lower()
+
+    benign = f.get("likely_benign")
+    benign_html = (f'<p class="benign">↳ likely benign: {_esc(benign)}</p>'
+                   if benign else "")
+    contexts = f.get("false_positive_context") or []
+    ctx_html = ""
+    if contexts:
+        chips = "".join(f'<span class="ctx-chip">{_esc(c)}</span>' for c in contexts)
+        ctx_html = f'<div class="profile-context">profile: {_esc(profile_action)} {chips}</div>'
+
+    open_attr = " open" if sev == "high" else ""
+    hidden_style = ' style="display:none"' if profile_action == "hidden" else ""
+    scope = item.get("scope", "block")
+    return (
+        f'<details class="finding" data-severity="{sev}" data-scope="{_esc(scope)}" '
+        f'data-kind="{_esc(kind)}" '
+        f'data-file="{_esc(file_)}" data-profile-action="{_esc(profile_action)}" '
+        f'data-searchable="{_esc(searchable)}"{open_attr}{hidden_style}>'
+        '<summary>'
+        f'<span class="badge sev-{sev}">{sev}</span>'
+        f'<span class="badge kind">{_esc(kind)}</span>'
+        f'<span class="loc">{loc}{extra_meta}</span>'
+        '</summary>'
+        f'<p class="rule"><code>{_esc(rule)}</code></p>'
+        f'{ctx_html}'
+        f'{benign_html}'
+        f'{evidence_html}'
+        '</details>'
+    )
+
+
+def _render_filter_sidebar(findings: list[dict]) -> str:
+    kinds = sorted({item["finding"].get("kind", "?") for item in findings})
+    files = sorted({item["file"] for item in findings if item["file"]})
+
+    def cb(cls: str, value: str, label: str, checked: bool = True) -> str:
+        checked_attr = " checked" if checked else ""
+        return (
+            f'<label><input type="checkbox" class="{cls}" value="{_esc(value)}"{checked_attr}>'
+            f' {_esc(label)}</label>'
+        )
+
+    # low-severity is false-positive-heavy (within-column repeats, derived columns, rounded
+    # grids…), so it is hidden by default to keep the initial view triage-worthy. The "How to
+    # read" banner tells the reader it is one click away.
+    sev_box = "".join(cb("f-sev", s, s, checked=(s != "low")) for s in ("high", "medium", "low"))
+    kind_box = "".join(cb("f-kind", k, k) for k in kinds) or '<span class="muted">none</span>'
+    file_box = "".join(cb("f-file", f, f) for f in files) or '<span class="muted">none</span>'
+
+    return (
+        '<aside class="filters">'
+        '<input type="search" id="filter-search" placeholder="search file / sheet / rule…">'
+        '<label class="show-noisy"><input type="checkbox" id="show-noisy"> show noisy / hidden findings</label>'
+        f'<fieldset><legend>severity</legend>{sev_box}</fieldset>'
+        f'<fieldset><legend>detector</legend>{kind_box}</fieldset>'
+        f'<fieldset><legend>file</legend>{file_box}</fieldset>'
+        '<button type="button" id="reset-filters">reset</button>'
+        '</aside>'
+    )
+
+
+def _render_digit_section(scan: dict) -> str:
+    def _sig(d):  # prefer BH-FDR flag; fall back to raw p for pre-FDR scan.json
+        return d["fdr_significant"] if "fdr_significant" in d else d.get("p", 1) < 1e-6
+    items = sorted(
+        [d for d in scan.get("digit_distribution") or [] if _sig(d)],
+        key=lambda d: d.get("p_adj", d.get("p", 1)),
+    )
+    if not items:
+        return ""
+    cards = []
+    for d in items:
+        counts = d.get("counts") or {}
+        # Sum over digits 1..9 (skip 0 which often dominates artificially).
+        values = [int(counts.get(str(k), 0)) for k in range(0, 10)]
+        max_v = max(values[1:]) or 1
+        bars = []
+        avg = (sum(values[1:]) / 9) if sum(values[1:]) > 0 else 0
+        for digit in range(0, 10):
+            v = values[digit]
+            pct = (v / max_v * 100) if max_v else 0
+            cls = "bar"
+            if digit != 0 and v > avg * 1.6 and avg > 0:
+                cls += " over"
+            bars.append(
+                f'<div class="bar-row"><span class="bar-label">{digit}</span>'
+                f'<div class="{cls}" style="width:{pct:.1f}%"></div>'
+                f'<span class="bar-val">{v}</span></div>'
+            )
+        top = ", ".join(f"{k}×{v}" for k, v in (d.get("top") or [])[:5])
+        cards.append(
+            '<div class="dig-card">'
+            f'<header><span class="badge sev-medium">χ²</span> '
+            f'<span class="loc">{_esc(d.get("label"))}</span> · '
+            f'n={_esc(d.get("n"))} · χ²={float(d.get("chi2", 0)):.1f} · '
+            f'p={float(d.get("p", 1)):.1e}'
+            + (f' · q={float(d["p_adj"]):.1e}' if "p_adj" in d else "")
+            + '</header>'
+            f'<div class="bars">{"".join(bars)}</div>'
+            f'<p class="meta">top: {_esc(top)}</p>'
+            '</div>'
+        )
+    return (
+        f'<section id="sec-digit" class="section">'
+        f'<h2>Last-digit χ² anomalies ({len(items)} sheets, BH-FDR q ≤ 0.05)</h2>'
+        f'<p class="hint">真实测量末位数字应近似均匀分布；偏离表示数字可能是人工构造。</p>'
+        f'{"".join(cards)}</section>'
+    )
+
+
+def _render_decimal_section(scan: dict) -> str:
+    items = [d for d in scan.get("decimal_endings") or [] if d.get("top")]
+    if not items:
+        return ""
+    rows = []
+    for d in items[:30]:
+        top = ", ".join(f".{e}×{c}" for e, c in (d.get("top") or [])[:6])
+        rows.append(
+            f'<tr><td class="loc">{_esc(d.get("label"))}</td>'
+            f'<td>{_esc(d.get("n"))}</td>'
+            f'<td>{_esc(d.get("n_unique"))}</td>'
+            f'<td class="ends">{_esc(top)}</td></tr>'
+        )
+    return (
+        f'<section id="sec-decimal" class="section">'
+        f'<h2>Over-represented two-decimal endings ({len(items)} sheets)</h2>'
+        f'<p class="hint">某些末两位异常频繁出现，可能是编造数字的指纹。</p>'
+        f'<div class="ev-wrap"><table class="ev meta-table">'
+        '<thead><tr><th>sheet</th><th>n</th><th>unique endings</th>'
+        '<th>top endings</th></tr></thead>'
+        f'<tbody>{"".join(rows)}</tbody></table></div>'
+        '</section>'
+    )
+
+
+def _render_tail_cluster_section(scan: dict) -> str:
+    items = scan.get("decimal_tail_clusters") or []
+    if not items:
+        return ""
+    rows = []
+    for d in items[:30]:
+        top = ", ".join(f".…{t}×{c}" for t, c in (d.get("top") or [])[:6])
+        comp = d.get("complementary_pairs") or 0
+        rows.append(
+            f'<tr><td class="loc">{_esc(d.get("label"))}</td>'
+            f'<td>{_esc(d.get("n"))}</td>'
+            f'<td>{_esc(round(100 * (d.get("top_share") or 0)))}%</td>'
+            # Below about twenty values the share is arithmetically forced, so
+            # the Poisson result is the whole case and has to travel with it.
+            f'<td>{_esc(d.get("collision_pairs"))} / {_esc(d.get("expected_pairs"))}</td>'
+            f'<td>{_esc(comp)}</td>'
+            f'<td class="ends">{_esc(top)}</td></tr>'
+        )
+    return (
+        f'<section id="sec-tail-cluster" class="section">'
+        f'<h2>Clustered high-precision fractional tails ({len(items)} sheets)</h2>'
+        f'<p class="hint">少数几个多位小数尾数在大量不同数值中高度集中，'
+        f'与独立测量的均匀尾数分布不符，属待解释异常。</p>'
+        f'<div class="ev-wrap"><table class="ev meta-table">'
+        '<thead><tr><th>sheet</th><th>hi-prec n</th><th>top-6 share</th>'
+        '<th>碰撞/期望 obs/exp</th><th>compl. pairs</th><th>top tails</th></tr></thead>'
+        f'<tbody>{"".join(rows)}</tbody></table></div>'
+        '</section>'
+    )
+
+
+# ---------- top-level template ----------
+
+_CSS = """
+:root {
+  --bg:#101317; --panel:#181c22; --panel-2:#1f242c; --border:#2a3038;
+  --text:#e6ebf2; --muted:#8a93a0; --accent:#60a5fa;
+  --high:#dc2626; --medium:#d97706; --low:#64748b; --hi-cell:#facc15;
+}
+* { box-sizing:border-box; }
+html, body { background:var(--bg); color:var(--text); margin:0;
+  font:14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial,
+       "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+code, .ev td, .ev th { font-family: "SF Mono", Menlo, Consolas, monospace; font-size:12.5px; }
+header.top { padding:18px 24px; border-bottom:1px solid var(--border); background:var(--panel); }
+.brand { font-weight:700; font-size:18px; letter-spacing:.5px; }
+.brand-sub { color:var(--muted); font-weight:400; margin-left:10px; font-size:12.5px; }
+.stats { margin-top:8px; display:flex; gap:14px; flex-wrap:wrap; }
+.stat { padding:4px 10px; background:var(--panel-2); border:1px solid var(--border);
+  border-radius:6px; color:var(--muted); font-size:12.5px; }
+.stat strong { color:var(--text); margin-right:4px; }
+.stat.sev-high strong { color:var(--high); }
+.stat.sev-medium strong { color:var(--medium); }
+.stat.sev-low strong { color:var(--low); }
+.warn { margin-top:10px; font-size:12px; color:var(--muted); }
+.coverage-status { margin-top:10px; font-size:12px; }
+.coverage-list { margin:6px 0 0; padding-left:18px; max-height:180px; overflow-y:auto; }
+.coverage-list li { font-size:11px; color:var(--muted); }
+.warn::before { content:"⚠ "; color:var(--medium); }
+.how-to-read { background:var(--panel-2); border:1px solid var(--border); border-left:3px solid var(--accent);
+  border-radius:6px; padding:12px 16px; margin:0 0 22px; font-size:13px; line-height:1.6; color:var(--text); }
+.how-to-read h3 { margin:0 0 6px; font-size:13.5px; color:var(--accent); font-weight:600; }
+.how-to-read p { margin:0 0 6px; color:var(--muted); }
+.how-to-read strong { color:var(--text); }
+.how-to-read code { background:var(--panel); padding:1px 5px; border-radius:3px; }
+.layout { display:grid; grid-template-columns:240px 1fr; min-height:calc(100vh - 110px); }
+aside.filters { border-right:1px solid var(--border); padding:16px;
+  background:var(--panel); position:sticky; top:0; align-self:start;
+  max-height:100vh; overflow:auto; }
+aside fieldset { border:1px solid var(--border); border-radius:6px; padding:8px 10px;
+  margin:12px 0; background:var(--panel-2); }
+aside legend { color:var(--muted); padding:0 6px; font-size:11.5px; text-transform:uppercase;
+  letter-spacing:.5px; }
+aside label { display:block; padding:2px 0; color:var(--text); cursor:pointer; font-size:12.5px;
+  word-break:break-all; }
+aside label input { margin-right:6px; }
+#filter-search { width:100%; padding:6px 8px; background:var(--panel-2);
+  border:1px solid var(--border); color:var(--text); border-radius:4px; }
+#reset-filters { width:100%; padding:6px; background:var(--panel-2); color:var(--text);
+  border:1px solid var(--border); border-radius:4px; cursor:pointer; }
+#reset-filters:hover { background:var(--border); }
+main { padding:18px 26px 40px; min-width:0; }
+.section { margin:0 0 28px; }
+.section h2 { font-size:15px; margin:0 0 4px; color:var(--text);
+  border-bottom:1px solid var(--border); padding-bottom:6px; }
+.section .hint { color:var(--muted); font-size:12px; margin:4px 0 14px; }
+details.finding { background:var(--panel); border:1px solid var(--border); border-radius:6px;
+  margin:8px 0; padding:0; overflow:hidden; }
+details.finding[data-severity="high"] { border-left:3px solid var(--high); }
+details.finding[data-severity="medium"] { border-left:3px solid var(--medium); }
+details.finding[data-severity="low"] { border-left:3px solid var(--low); }
+details.finding summary { padding:10px 14px; cursor:pointer; list-style:none;
+  display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+details.finding summary::-webkit-details-marker { display:none; }
+details.finding > p, details.finding > .ev-wrap, details.finding > .shared-values { margin:0 14px 14px; }
+.image-pair-preview { display:block; max-width:calc(100% - 28px); height:auto;
+  margin:0 14px 14px; border:1px solid var(--border); }
+.badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px;
+  font-weight:600; letter-spacing:.3px; text-transform:uppercase; }
+.badge.sev-high { background:rgba(220,38,38,.15); color:var(--high); border:1px solid rgba(220,38,38,.4); }
+.badge.sev-medium { background:rgba(217,119,6,.15); color:var(--medium); border:1px solid rgba(217,119,6,.4); }
+.badge.sev-low { background:rgba(100,116,139,.18); color:var(--low); border:1px solid rgba(100,116,139,.4); }
+.badge.kind { background:var(--panel-2); color:var(--text); border:1px solid var(--border); text-transform:none; }
+.loc { color:var(--muted); font-size:12.5px; }
+p.rule { padding:8px 12px; background:var(--panel-2); border-radius:4px; margin:8px 14px; }
+p.rule code { color:var(--text); }
+p.benign { margin:6px 14px; padding:6px 12px; font-size:13px; color:var(--low);
+           border-left:3px solid var(--low); background:rgba(100,116,139,.08); }
+.profile-context { margin:6px 14px; color:var(--muted); font-size:12px; display:flex;
+  gap:6px; flex-wrap:wrap; align-items:center; }
+.ctx-chip { display:inline-block; padding:1px 7px; border-radius:10px;
+  background:rgba(100,116,139,.14); border:1px solid rgba(100,116,139,.35);
+  color:var(--muted); font-size:11px; }
+.show-noisy { margin:10px 0 2px; padding:6px 8px; border:1px solid var(--border);
+  border-radius:4px; background:var(--panel-2); }
+.ev-cut { caption-side:top; text-align:left; padding:5px 8px; font-size:11.5px; color:var(--muted); }
+.ev-wrap { overflow-x:auto; border:1px solid var(--border); border-radius:4px; background:var(--panel-2); }
+table.ev { width:100%; border-collapse:collapse; }
+table.ev th, table.ev td { padding:5px 9px; border-bottom:1px solid var(--border);
+  text-align:left; white-space:nowrap; }
+table.ev th { background:var(--panel); color:var(--muted); font-weight:500; position:sticky; top:0; }
+table.ev td { color:var(--text); }
+table.ev .row-label { color:var(--muted); background:var(--panel); width:1%; text-align:right; padding-right:12px; }
+table.ev tr.ctx td { color:var(--muted); background:rgba(255,255,255,.015); }
+table.ev tr.hi-row td:first-child + td { box-shadow:inset 3px 0 0 var(--high); }
+table.ev td.hi-col { background:rgba(250,204,21,.18); color:#fde68a; }
+table.ev th.hi-col { background:rgba(250,204,21,.10); color:#fde68a;
+  border-bottom:2px solid rgba(250,204,21,.4); }
+.no-evidence { color:var(--muted); margin:0 14px 12px; font-size:12px; }
+.muted { color:var(--muted); }
+.dig-card { background:var(--panel); border:1px solid var(--border); border-radius:6px;
+  margin:10px 0; padding:12px 14px; }
+.dig-card header { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:8px; }
+.bars { display:flex; flex-direction:column; gap:3px; max-width:520px; }
+.bar-row { display:grid; grid-template-columns:18px 1fr 40px; align-items:center; gap:8px;
+  font-size:11.5px; }
+.bar-label { color:var(--muted); text-align:right; }
+.bar { height:14px; background:var(--accent); border-radius:2px; min-width:1px; }
+.bar.over { background:var(--medium); }
+.bar-val { color:var(--muted); font-variant-numeric:tabular-nums; }
+.dig-card .meta { color:var(--muted); font-size:12px; margin:8px 0 0; }
+.shared-values { padding:10px 12px; background:var(--panel-2); border-radius:4px;
+  margin:8px 14px; display:flex; gap:6px; flex-wrap:wrap; }
+.val-chip { padding:2px 8px; border:1px solid var(--border); border-radius:10px;
+  font-family:"SF Mono", Menlo, monospace; font-size:12px; color:var(--text); background:var(--panel); }
+.empty { color:var(--muted); padding:40px 20px; text-align:center; border:1px dashed var(--border);
+  border-radius:6px; }
+.section h2 .count { color:var(--muted); font-weight:400; margin-left:6px; }
+footer.foot { grid-column:1 / -1; padding:16px 26px 28px; border-top:1px solid var(--border);
+  color:var(--muted); font-size:11.5px; }
+footer.foot code { color:var(--text); }
+"""
+
+_JS = """
+(function() {
+  const findings = document.querySelectorAll('details.finding');
+  const search = document.getElementById('filter-search');
+  const reset = document.getElementById('reset-filters');
+  const showNoisy = document.getElementById('show-noisy');
+
+  function getChecked(cls) {
+    return new Set(Array.from(document.querySelectorAll('input.' + cls + ':checked'))
+                        .map(i => i.value));
+  }
+
+  function applyFilters() {
+    const sev = getChecked('f-sev');
+    const kinds = getChecked('f-kind');
+    const files = getChecked('f-file');
+    const q = (search.value || '').trim().toLowerCase();
+    findings.forEach(el => {
+      // Cross-sheet collisions are the flagship section and stay visible regardless of the
+      // severity filter — otherwise a low/blank-severity collision would hide the whole
+      // "most worth reviewing" section on load (low is unchecked by default).
+      const matchSev = el.dataset.scope === 'cross_sheet' || sev.has(el.dataset.severity);
+      const matchKind = kinds.has(el.dataset.kind);
+      const matchFile = files.has(el.dataset.file);
+      const matchQ = !q || (el.dataset.searchable || '').indexOf(q) !== -1;
+      const matchProfile = showNoisy.checked || el.dataset.profileAction !== 'hidden';
+      el.style.display = (matchSev && matchKind && matchFile && matchQ && matchProfile) ? '' : 'none';
+    });
+    document.querySelectorAll('.section').forEach(sec => {
+      const visible = Array.from(sec.querySelectorAll('details.finding'))
+                           .some(d => d.style.display !== 'none');
+      const hasFindings = sec.querySelector('details.finding') !== null;
+      sec.style.display = (!hasFindings || visible) ? '' : 'none';
+    });
+  }
+
+  document.querySelectorAll('input.f-sev, input.f-kind, input.f-file')
+          .forEach(i => i.addEventListener('change', applyFilters));
+  search.addEventListener('input', applyFilters);
+  showNoisy.addEventListener('change', applyFilters);
+  reset.addEventListener('click', () => {
+    document.querySelectorAll('input.f-kind, input.f-file')
+            .forEach(i => i.checked = true);
+    // Restore the initial triage view exactly: low severity stays unchecked on reset
+    // (it is hidden by default), so reset matches a fresh page load rather than showing more.
+    document.querySelectorAll('input.f-sev')
+            .forEach(i => i.checked = (i.value !== 'low'));
+    showNoisy.checked = false;
+    search.value = '';
+    applyFilters();
+  });
+  applyFilters();
+})();
+"""
+
+
+_STATUS_LABELS = {
+    "partial": ("warn", "部分输入未检测(见下)· partial coverage"),
+    "failed": ("warn", "没有可检测的输入 · no input analyzed"),
+}
+_MAX_RENDERED_LIMITATIONS = 50
+
+
+def _render_scan_status(scan: dict) -> str:
+    """A bounded coverage banner: what the scan did and did not examine.
+
+    Rendered only when a scan is not fully complete, so a partial or failed run
+    is never read as a clean one. Purely descriptive of scanner reach — no
+    judgement about the data.
+    """
+    coverage = scan.get("coverage")
+    status = scan.get("scan_status")
+    if not isinstance(coverage, dict) or status not in _STATUS_LABELS:
+        return ""
+
+    tone, label = _STATUS_LABELS[status]
+    counts = (
+        f'{coverage.get("files_succeeded", 0)}/{coverage.get("files_discovered", 0)} files, '
+        f'{coverage.get("sheets_succeeded", 0)} sheets analyzed, '
+        f'{coverage.get("sheets_skipped", 0)} sheets skipped, '
+        f'{coverage.get("blocks_skipped", 0)} blocks truncated'
+    )
+    limitations = coverage.get("limitations") or []
+    rows = "".join(
+        f'<li>{_esc(item.get("scope"))} · {_esc(item.get("reason"))}'
+        + (f' · <code>{_esc(item.get("file"))}</code>' if item.get("file") else "")
+        + (f' · {_esc(item.get("sheet"))}' if item.get("sheet") else "")
+        # Detector records carry no file/sheet — without the detector name every
+        # capped detector renders as an identical row the reader cannot tell apart.
+        + (f' · <code>{_esc(item.get("detector"))}</code>' if item.get("detector") else "")
+        + (f' · {_esc(item.get("candidates"))} candidates'
+           if item.get("candidates") else "")
+        + (f' · limit={_esc(item.get("limit"))}' if item.get("limit") else "")
+        + (f' · ×{_esc(item.get("count"))}' if item.get("count") else "")
+        + "</li>"
+        for item in limitations[:_MAX_RENDERED_LIMITATIONS]
+    )
+    hidden = max(0, len(limitations) - _MAX_RENDERED_LIMITATIONS)
+    omitted = int(coverage.get("limitations_omitted") or 0)
+    more = hidden + omitted
+    more_html = f'<li class="muted">… and {more:,} more</li>' if more else ""
+    detail = f'<ul class="coverage-list">{rows}{more_html}</ul>' if rows else ""
+    return (
+        f'<div class="{tone} coverage-status">'
+        f'<strong>Scan coverage: {_esc(label)}</strong> — {_esc(counts)}.'
+        f'{detail}</div>'
+    )
+
+
+def write_html_report(scan: dict, out_path: str) -> None:
+    input_dir = scan.get("input_dir", "")
+    input_label = os.path.basename(os.path.normpath(input_dir)) or input_dir or "audit"
+    artifact_dir = os.path.dirname(os.path.abspath(out_path))
+    image_budget = EvidenceBudget(report_image_evidence_bytes())
+    findings = _all_findings(scan)
+    n_sheets = len({(it["file"], it["sheet"]) for it in findings if it["scope"] == "block"})
+    sev = _severity_counts(findings)
+
+    cross = [it for it in findings if it["scope"] == "cross_sheet"]
+    images = [it for it in findings if it["scope"] == "image"]
+    high = [it for it in findings if it["scope"] == "block" and it["finding"].get("severity") == "high"]
+    medium = [it for it in findings if it["scope"] == "block" and it["finding"].get("severity") == "medium"]
+    low = [it for it in findings if it["scope"] == "block" and it["finding"].get("severity") == "low"]
+
+    def section(title: str, items: list[dict], id_: str, hint: str = "") -> str:
+        if not items:
+            return ""
+        body = "".join(
+            _render_finding_card(
+                it,
+                artifact_dir=artifact_dir,
+                image_budget=image_budget,
+            )
+            for it in items
+        )
+        hint_html = f'<p class="hint">{_esc(hint)}</p>' if hint else ""
+        return (
+            f'<section id="{id_}" class="section">'
+            f'<h2>{_esc(title)}<span class="count">({len(items)})</span></h2>'
+            f'{hint_html}{body}'
+            '</section>'
+        )
+
+    sections = "".join([
+        section("Cross-sheet bit-identical collisions", cross, "sec-cross",
+                "同一文件的两张 sheet 在同位置出现高度一致的数值 — 最值得人工复核。"),
+        section("Optional deterministic image signals", images, "sec-images",
+                "Non-gating hints only; semantic image review remains external."),
+        section("High-severity findings", high, "sec-high"),
+        section("Medium-severity findings", medium, "sec-medium"),
+        section("Low-severity findings", low, "sec-low"),
+        _render_digit_section(scan),
+        _render_decimal_section(scan),
+        _render_tail_cluster_section(scan),
+    ])
+    if not sections:
+        sections = '<p class="empty">no findings — nothing flagged in this dataset.</p>'
+
+    how_to_read = (
+        '<div class="how-to-read">'
+        '<h3>如何阅读本报告 · How to read this</h3>'
+        '<p>这是 paperconan 检测器的<strong>原始信号</strong>,不是结论,也不是经过人工/AI 判定的报告。'
+        '每条 finding 只是一个统计异常,<strong>大多数都有良性解释</strong>'
+        '(共享对照、重绘坐标轴、单位换算、派生列、固定分母比值、边界值、四舍五入网格…)。</p>'
+        '<p>请把它当作<strong>待逐条人工复核的线索清单</strong>:对照原始表格、图注与 Methods 之后再判断,'
+        '不要据此对论文或作者下任何结论。经判定的正式报告(含逐条裁决)是另一份单独产物。</p>'
+        '<p>为便于分诊,<strong>low 级信号默认隐藏</strong>(误报偏多);在左侧勾选 <code>low</code> 可显示。'
+        '优先看 cross-sheet 与 high。</p>'
+        '</div>'
+    )
+
+    sidebar = _render_filter_sidebar(findings) if findings else \
+        '<aside class="filters"><p class="muted">no findings</p></aside>'
+
+    stats = "".join([
+        f'<span class="stat"><strong>{scan.get("n_files", 0)}</strong> files</span>',
+        f'<span class="stat"><strong>{n_sheets}</strong> sheets w/ findings</span>',
+        f'<span class="stat sev-high"><strong>{sev["high"]}</strong> high</span>',
+        f'<span class="stat sev-medium"><strong>{sev["medium"]}</strong> medium</span>',
+        f'<span class="stat sev-low"><strong>{sev["low"]}</strong> low</span>',
+    ])
+
+    omitted = int(scan.get("findings_omitted") or 0)
+    omitted_html = ""
+    if omitted:
+        omitted_html = (
+            f'<div class="warn">{omitted:,} lower-severity findings were omitted to bound '
+            'report size (dense/correlated blocks emit thousands of near-duplicate pairwise '
+            'signals). The highest-severity findings per block are kept; raise '
+            '<code>PAPERCONAN_MAX_FINDINGS_PER_BLOCK</code> / '
+            '<code>PAPERCONAN_MAX_TOTAL_FINDINGS</code> to see more.</div>'
+        )
+
+    status_html = _render_scan_status(scan)
+
+    ver = scan.get("tool_version", "")
+    ts = scan.get("scanned_at", "")
+    prov = " · ".join(p for p in [
+        f'paperconan v{_esc(ver)}' if ver else "paperconan",
+        _esc(ts) if ts else "",
+        f'input: <code>{_esc(scan.get("input_dir", ""))}</code>',
+    ] if p)
+    footer = (
+        f'<footer class="foot">generated by {prov}<br>'
+        'Statistical anomalies — signal, not verdict. Final adjudication belongs to the '
+        'original authors and journal editors. Route findings through PubPeer / journal '
+        'ethics inquiry / research integrity office.</footer>'
+    )
+
+    html_doc = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>paperconan audit · {_esc(input_label)}</title>
+<style>{_CSS}</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand">paperconan<span class="brand-sub">paper data audit · {_esc(input_label)}</span></div>
+  <div class="stats">{stats}</div>
+  <div class="warn">Statistical anomalies — signal, not verdict. Take findings to PubPeer / journal editor / research integrity office, not social media.</div>
+  {omitted_html}
+  {status_html}
+</header>
+<div class="layout">
+  {sidebar}
+  <main>{how_to_read}{sections}</main>
+  {footer}
+</div>
+<script>{_JS}</script>
+</body>
+</html>
+"""
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as fh:
+        fh.write(html_doc)

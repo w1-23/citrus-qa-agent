@@ -284,7 +284,8 @@ def fetch_texts_for_items(items: list[dict], *, max_items: int = 0,
     stat = {"n_need": len(todo), "n_ok": 0, "n_fail": 0, "n_timeout": 0, "ms": 0.0}
     if not todo:
         return stat
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import as_completed
+    from src.core.executors import WEB_FETCH_EXECUTOR
 
     def _one(pair):
         _i, it = pair
@@ -294,29 +295,37 @@ def fetch_texts_for_items(items: list[dict], *, max_items: int = 0,
             return it, None
 
     t0 = time.perf_counter()
-    ex = ThreadPoolExecutor(max_workers=max(1, WEB_PIPELINE.fetch_workers))
+    fetch_workers = max(1, min(int(WEB_PIPELINE.fetch_workers or 1), 12))
+    futs = {WEB_FETCH_EXECUTOR.submit(_one, p): p for p in todo[:fetch_workers]}
+    pending_items = iter(todo[fetch_workers:])
+    done = set()
+    deadline = time.monotonic() + max(0.1, budget_s or 20.0)
     try:
-        futs = {ex.submit(_one, p): p for p in todo}
-        done = set()
-        try:
-            for fut in as_completed(futs, timeout=max(0.1, budget_s or 20.0)):
+        while futs and time.monotonic() < deadline:
+            timeout = max(0.1, deadline - time.monotonic())
+            for fut in as_completed(tuple(futs), timeout=timeout):
                 it, body = fut.result()
-                done.add(id(fut))
-                if not body:
+                done.add(fut)
+                futs.pop(fut, None)
+                if body:
+                    chunks = chunk_text(body) or [body]
+                    it["text"] = max(chunks, key=len)
+                    # Keep all relevant chunks for later evidence selection.
+                    it["_chunks"] = list(chunks)[:8]
+                    it["text_kind"] = "fulltext"
+                    it["text_chars"] = len(body)
+                    stat["n_ok"] += 1
+                else:
                     stat["n_fail"] += 1
+                try:
+                    next_item = next(pending_items)
+                except StopIteration:
                     continue
-                chunks = chunk_text(body) or [body]
-                it["text"] = max(chunks, key=len)
-                # v10.5（F11）: 保留全部块，供"取与问题最相关的一块"作为注入片段
-                it["_chunks"] = list(chunks)[:8]
-                it["text_kind"] = "fulltext"
-                it["text_chars"] = len(body)
-                stat["n_ok"] += 1
-        except Exception:
-            pass
-        stat["n_timeout"] = sum(1 for f in futs if id(f) not in done)
-    finally:
-        ex.shutdown(wait=False)
+                futs[WEB_FETCH_EXECUTOR.submit(_one, next_item)] = next_item
+                break
+    except TimeoutError:
+        pass
+    stat["n_timeout"] = len(todo) - stat["n_ok"] - stat["n_fail"]
     stat["ms"] = round((time.perf_counter() - t0) * 1000, 1)
     return stat
 

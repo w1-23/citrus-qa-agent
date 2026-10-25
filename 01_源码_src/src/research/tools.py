@@ -399,12 +399,12 @@ def _load_frame(file_index: int, sheet_name: str = "", header_row: int = 1,
         meta = {"name": name, "sheet": "", "encoding": encoding, "delimiter": "auto",
                 "raw_preview": raw_preview, "header_row": max(used_header_rows),
                 "header_rows": used_header_rows, "truncated": truncated}
-    elif suffix in {".xlsx", ".xlsm", ".xls"}:
+    elif suffix in {".xlsx", ".xlsm", ".xls", ".xlsb"}:
         try:
             used_header_rows = sorted(set(header_rows or [header_row]))
             if not used_header_rows or any(row < 1 or row > 20 for row in used_header_rows):
                 raise ValueError("header_row 必须在 1 到 20 之间")
-            if suffix == ".xls":
+            if suffix in {".xls", ".xlsb"}:
                 try:
                     import python_calamine
                     reader = python_calamine.CalamineWorkbook.from_filelike(io.BytesIO(data))
@@ -414,14 +414,15 @@ def _load_frame(file_index: int, sheet_name: str = "", header_row: int = 1,
                         raise ValueError("工作簿中没有可读取的工作表")
                     data_rows = reader.get_sheet_by_name(chosen).to_python()
                 except ImportError as exc:
-                    raise ValueError("读取 XLS 需要安装 python-calamine；文件未被判定为无异常") from exc
+                    raise ValueError(f"读取 {suffix.upper()} 需要安装 python-calamine；文件未被判定为无异常") from exc
             else:
                 import openpyxl
                 from zipfile import ZipFile
+                from src.core.file_safety import validate_zip_bytes
+                validate_zip_bytes(data, label=name)
                 with ZipFile(io.BytesIO(data)) as archive:
-                    expanded = sum(info.file_size for info in archive.infolist())
-                    if expanded > 100 * 1024 * 1024:
-                        raise ValueError("工作簿解压后超过 100 MB，已停止读取")
+                    if "xl/workbook.xml" not in archive.namelist():
+                        raise ValueError("工作簿缺少必要的 OOXML 结构")
                 wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True,
                                             keep_vba=False)
                 names = wb.sheetnames
@@ -481,9 +482,9 @@ def _load_frame(file_index: int, sheet_name: str = "", header_row: int = 1,
             raise ValueError(f"无法提取 PDF 表格：{exc}") from exc
     elif suffix == ".docx":
         try:
+            from src.core.file_safety import validate_zip_bytes
+            validate_zip_bytes(data, label=name)
             with zipfile.ZipFile(io.BytesIO(data)) as archive:
-                if sum(info.file_size for info in archive.infolist()) > 100 * 1024 * 1024:
-                    raise ValueError("Word 解压后超过 100 MB，已停止读取")
                 root = ET.fromstring(archive.read("word/document.xml"))
             ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
             word_tables = []
@@ -525,9 +526,13 @@ def _load_frame(file_index: int, sheet_name: str = "", header_row: int = 1,
     return frame, meta
 
 
-def _json_arg(raw: str, expected: type, default):
-    if not str(raw or "").strip():
+def _json_arg(raw: Any, expected: type, default):
+    if isinstance(raw, expected):
+        return raw
+    if raw is None or not str(raw or "").strip():
         return default
+    if not isinstance(raw, str):
+        raise ValueError(f"参数需要 JSON {expected.__name__} 格式")
     value = json.loads(raw)
     if not isinstance(value, expected):
         raise ValueError(f"参数需要 JSON {expected.__name__} 格式")
@@ -754,13 +759,20 @@ def _write_audit_xlsx(filename: str, meta: dict, findings: list[dict]):
     ws.append(["异常与提示数", len(findings)])
     ws.append(["说明", "离群与组间不平衡为复核提示，不等于错误；原始数据未修改。"])
     detail = wb.create_sheet("发现明细")
-    headers = ["级别", "检查项", "字段", "原始行号", "说明"]
+    headers = ["级别", "检查项", "文件", "工作表", "位置", "字段", "说明", "证据与复核上下文"]
     detail.append(headers)
     for item in findings:
+        evidence = item.get("evidence", "")
+        if not isinstance(evidence, str):
+            evidence = json.dumps(evidence, ensure_ascii=False, default=str)
         detail.append([_safe_spreadsheet_value(item.get("severity")),
                        _safe_spreadsheet_value(item.get("check")),
+                       _safe_spreadsheet_value(item.get("file")),
+                       _safe_spreadsheet_value(item.get("sheet")),
+                       _safe_spreadsheet_value(item.get("location") or item.get("row")),
                        _safe_spreadsheet_value(item.get("field")),
-                       item.get("row"), _safe_spreadsheet_value(item.get("detail"))])
+                       _safe_spreadsheet_value(item.get("detail")),
+                       _safe_spreadsheet_value(evidence)])
     for sheet in wb.worksheets:
         sheet.freeze_panes = "A2"
         sheet.auto_filter.ref = sheet.dimensions
@@ -786,8 +798,8 @@ def audit_uploaded_table(file_index: int = 0, sheet_name: str = "", header_row: 
                          header_rows_json: str = "",
                          column_mapping_json: str = "{}", group_columns_json: str = "[]",
                          value_columns_json: str = "[]", integer_data_confirmed: bool = False,
-                         sd_kind: str = "") -> str:
-    """对本轮 CSV/TSV/Excel/PDF/Word 提取表执行可解释审查，不改原件。先调用 inspect_uploaded_table；只传有依据的字段映射、分组与测量列。整数均值/SD检查仅在 integer_data_confirmed=true 且数据确为整数粒度时启用；sd_kind 可选 sample/population。"""
+                         sd_kind: str = "", include_report: bool = False) -> str:
+    """对本轮 CSV/TSV/Excel/PDF/Word 提取表执行可解释审查，不改原件。先调用 inspect_uploaded_table；只传有依据的字段映射、分组与测量列。按复杂度设置 include_report；明确要求报告或需逐行复核时设 true。整数均值/SD检查仅在 integer_data_confirmed=true 且数据确为整数粒度时启用；sd_kind 可选 sample/population。"""
     mapping = _json_arg(column_mapping_json, dict, {})
     groups = _json_arg(group_columns_json, list, [])
     values = _json_arg(value_columns_json, list, [])
@@ -802,9 +814,12 @@ def audit_uploaded_table(file_index: int = 0, sheet_name: str = "", header_row: 
                                         integer_data_confirmed=bool(integer_data_confirmed),
                                         sd_kind=str(sd_kind or "").lower())
     meta.update(_profile(frame))
-    xlsx_bytes = _write_audit_xlsx(Path(meta["name"]).stem + "_数据审查.xlsx", meta, findings)
-    xlsx_url = _save_artifact(Path(meta["name"]).stem + "_数据审查.xlsx", xlsx_bytes,
-                              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    include_report = bool(include_report or len(findings) > 12 or meta.get("truncated"))
+    report_links = ""
+    if include_report:
+        xlsx_bytes = _write_audit_xlsx(Path(meta["name"]).stem + "_数据审查.xlsx", meta, findings)
+        xlsx_url = _save_artifact(Path(meta["name"]).stem + "_数据审查.xlsx", xlsx_bytes,
+                                  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     flagged = sorted(issue_rows)
     csv_buffer = io.StringIO(newline="")
     writer = csv.writer(csv_buffer)
@@ -813,8 +828,10 @@ def audit_uploaded_table(file_index: int = 0, sheet_name: str = "", header_row: 
         raw_values = [_safe_spreadsheet_value(v) for v in frame.iloc[idx].where(frame.iloc[idx].notna(), "").tolist()]
         writer.writerow([idx + int(meta.get("header_row", 1)) + 1,
                          ";".join(sorted(issue_rows[idx])), *raw_values])
-    csv_url = _save_artifact(Path(meta["name"]).stem + "_异常行.csv",
-                             csv_buffer.getvalue().encode("utf-8-sig"), "text/csv; charset=utf-8")
+    if include_report:
+        csv_url = _save_artifact(Path(meta["name"]).stem + "_异常行.csv",
+                                 csv_buffer.getvalue().encode("utf-8-sig"), "text/csv; charset=utf-8")
+        report_links = f"\n\n- [下载 XLSX 审查报告]({xlsx_url})\n- [下载异常行 CSV]({csv_url})"
     severe = sum(1 for f in findings if f["severity"] == "error")
     review = sum(1 for f in findings if f["severity"] == "review")
     summary = (f"已审查 {meta['name']}（{meta.get('sheet') or 'CSV'}，{frame.shape[0]} 行 × {frame.shape[1]} 列）。"
@@ -828,8 +845,7 @@ def audit_uploaded_table(file_index: int = 0, sheet_name: str = "", header_row: 
         for item in findings[:30])
     if len(findings) > 30:
         details += f"\n- 其余 {len(findings) - 30} 项见完整报告。"
-    return (summary + ("\n\n发现明细：\n" + details if details else "") +
-            f"\n\n- [下载 XLSX 审查报告]({xlsx_url})\n- [下载异常行 CSV]({csv_url})")
+    return summary + ("\n\n发现明细：\n" + details if details else "") + report_links
 
 
 _DOI_PATTERN = re.compile(r"(?i)(?:https?://(?:dx\.)?doi\.org/)?\b10\.\d{4,9}/[^\s<>\[\]{}\"']+")
@@ -986,7 +1002,7 @@ def _verify_reference_record(raw: dict[str, Any]) -> dict[str, Any]:
 
 @tool
 def verify_uploaded_references(file_index: int = 0, references_json: str = "") -> str:
-    """核验本轮论文/参考文献附件中的 DOI 与登记元数据。可传 references_json=[{"doi":"...","title":"...","authors":"...","year":"..."}]；不传则从指定附件提取 DOI。未检索到不等于文献不存在。"""
+    """核验本轮论文/参考文献附件中的 DOI 与登记元数据。可传 references_json=[{"doi":"...","title":"...","authors":"...","year":"..."}]，支持没有 DOI 的题名记录；不传时仅从附件自动提取 DOI。未检索到不等于文献不存在。"""
     supplied = _json_arg(references_json, list, [])
     files = get_request_tables()
     item = files[file_index] if 0 <= file_index < len(files) else {"name": "references", "data": b""}
@@ -995,6 +1011,8 @@ def verify_uploaded_references(file_index: int = 0, references_json: str = "") -
         if not item.get("data"):
             return "请提供带 DOI 的参考文献清单，或上传论文/文献表；当前请求没有可提取的来源。"
         text = _extract_attachment_text(item)
+        if not text.strip():
+            return "附件没有可搜索文本（可能是扫描版 PDF）；参考文献核验未完成。请上传可复制文本的 PDF/Word，或提供 DOI/题名。"
         seen = set()
         references = []
         for match in _DOI_PATTERN.findall(text):
@@ -1004,11 +1022,18 @@ def verify_uploaded_references(file_index: int = 0, references_json: str = "") -
                 line = next((line.strip() for line in text.splitlines() if doi.lower() in line.lower()), "")
                 references.append({"doi": doi, "citation": line[:500]})
     if not references:
-        return "未能从该附件提取 DOI；请提供参考文献列表或 DOI。当前只自动核验 DOI，不会据此判定无 DOI 的文献不存在。"
-    from concurrent.futures import ThreadPoolExecutor
+        if text.startswith("[文本提取失败："):
+            return f"{text}；附件核验未完成。请重新上传可复制文本的 PDF/Word，或提供参考文献 DOI/题名。"
+        return ("附件文本已读取，但未自动提取到 DOI。请从正文参考文献中提取 DOI；无 DOI 条目请传入 references_json，"
+                "格式为 [{\"title\":\"题名\",\"authors\":\"作者\",\"year\":\"年份\"}] 再核验。"
+                "这不代表文献不存在。")
+    from src.core.executors import AUDIT_NETWORK_EXECUTOR
     selected = [raw for raw in references[:100] if isinstance(raw, dict)]
-    with ThreadPoolExecutor(max_workers=20) as pool:
-        rows = list(pool.map(_verify_reference_record, selected))
+    rows = []
+    # Bound queued work per request as well as global active threads.
+    for start in range(0, len(selected), 16):
+        rows.extend(AUDIT_NETWORK_EXECUTOR.map(
+            _verify_reference_record, selected[start:start + 16]))
     if len(references) > len(selected):
         rows.append({"doi": "", "status": "not_checked", "detail": f"另有 {len(references) - len(selected)} 条未核验（单次上限 100 条）。"})
     from openpyxl import Workbook
@@ -1031,8 +1056,8 @@ def verify_uploaded_references(file_index: int = 0, references_json: str = "") -
 
 
 @tool
-def audit_uploaded_data_bundle(file_indexes_json: str = "") -> str:
-    """跨本轮上传的 CSV/TSV/Excel/PDF/Word 表格执行通用数值审查，并查找跨工作表/文件完全重复的数值列。先 inspect_uploaded_table 确认表头；此工具不推断实验组语义、不修改文件，发现均是人工复核线索。"""
+def audit_uploaded_data_bundle(file_indexes_json: str | list[int] = "", include_report: bool = True) -> str:
+    """跨本轮上传的 CSV/TSV/Excel/PDF/Word 表格执行通用数值审查，并查找跨工作表/文件完全重复的数值列。先 inspect_uploaded_table 确认表头；此工具不推断实验组语义、不修改文件，发现均是人工复核线索。多表审查通常保留 XLSX 报告；include_report=false 仅用于简短快速核对。"""
     requested = _json_arg(file_indexes_json, list, list(range(len(get_request_tables()))))
     if any(type(index) is not int for index in requested):
         raise ValueError("file_indexes_json 必须是整数数组")
@@ -1081,16 +1106,256 @@ def audit_uploaded_data_bundle(file_indexes_json: str = "") -> str:
             "rows": sum(int(frame.shape[0]) for _, frame, _, _ in entries),
             "columns": sum(int(frame.shape[1]) for _, frame, _, _ in entries),
             "scan_errors": skipped}
-    report = _write_audit_xlsx("跨文件数据审查.xlsx", meta, all_findings)
-    report_url = _save_artifact("跨文件数据审查.xlsx", report,
-                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    report_link = ""
+    if include_report or len(all_findings) > 12 or skipped:
+        report = _write_audit_xlsx("跨文件数据审查.xlsx", meta, all_findings)
+        report_url = _save_artifact("跨文件数据审查.xlsx", report,
+                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        report_link = f"\n\n[下载 XLSX 审查报告]({report_url})"
     statuses = f"已解析 {len(entries)} 个表/工作表，发现 {len(all_findings)} 项复核线索，其中跨表/跨文件重复数值列 {len(cross_findings)} 项。"
     if skipped:
         statuses += f"另有 {len(skipped)} 个对象未完成解析；审查不完整，不代表未发现异常。"
     details = "\n".join(f"- {f['severity']} · {f['check']} · {f['field']}：{f['detail']}"
                        for f in all_findings[:30])
-    return (statuses + ("\n\n" + details if details else "\n没有触发已实现的数值线索规则；这不证明数据无问题。") +
-            f"\n\n[下载 XLSX 审查报告]({report_url})")
+    return statuses + ("\n\n" + details if details else "\n没有触发已实现的数值线索规则；这不证明数据无问题。") + report_link
+
+
+_AUDIT_MARKDOWN_CATEGORIES = (
+    ("缺失值与数据格式", {"missing_values", "mixed_numeric_text", "empty_table",
+                           "constant_field", "invalid_group_mapping", "invalid_value_mapping"}),
+    ("重复值与数据复用", {"duplicate_row", "identical_columns", "identical_row_reuse",
+                           "cross_sheet_column_duplicate", "cross_file_identical_numeric_column",
+                           "identical_after_rounding", "block_value_duplication",
+                           "within_col_duplicate", "equal_pair", "equal_pairs"}),
+    ("异常值", {"iqr_outlier", "outlier", "range_outlier"}),
+    ("组别与重复数", {"unequal_group_size", "unequal_replicates", "design_checks_skipped"}),
+    ("行列关系与局部数值模式", {"constant_offset_columns", "constant_ratio_columns",
+                              "exact_linear_columns", "constant_offset", "constant_ratio",
+                              "exact_linear", "sum_constant", "small_diff_set",
+                              "partial_constant_offset", "partial_constant_ratio",
+                              "local_offset_run", "local_ratio_run", "partial_value_overlap",
+                              "offset_row_reuse", "ratio_row_reuse", "row_relation",
+                              "row_pairs", "row_relations"}),
+    ("数字分布与小数尾", {"decimal_ending_concentration", "last_digit_distribution",
+                          "repeated_decimal_endings", "decimal_tail_clustering",
+                          "within_col_decimal_repetition", "digit_distribution"}),
+    ("均值与标准差自洽性", {"integer_mean_inconsistent", "integer_summary_inconsistent",
+                           "grim_inconsistent", "grimmer_inconsistent", "grim_sd_skipped"}),
+    ("其他审查线索", set()),
+)
+
+
+def _render_audit_markdown(findings: list[dict[str, Any]], *, scan: dict[str, Any],
+                           inspected_rows: int, inspected_cols: int,
+                           skipped: list[str]) -> bytes:
+    """Render an at-a-glance Markdown report with an explicit row for every check category."""
+    grouped: dict[str, list[dict[str, Any]]] = {label: [] for label, _ in _AUDIT_MARKDOWN_CATEGORIES}
+    not_run: list[str] = []
+    known = {kind: label for label, kinds in _AUDIT_MARKDOWN_CATEGORIES for kind in kinds}
+    for finding in findings:
+        kind = str(finding.get("check") or finding.get("kind") or "")
+        if kind in {"design_checks_skipped", "grim_sd_skipped"}:
+            not_run.append(str(finding.get("detail") or kind))
+            continue
+        label = known.get(kind)
+        if label is None:
+            lowered = kind.lower()
+            if any(token in lowered for token in ("duplicate", "reuse", "identical", "repeat", "block_dup")):
+                label = "重复值与数据复用"
+            elif any(token in lowered for token in ("outlier", "anomal", "range")):
+                label = "异常值"
+            elif any(token in lowered for token in ("grim", "mean", "sd", "summary")):
+                label = "均值与标准差自洽性"
+            elif any(token in lowered for token in ("digit", "decimal", "tail", "ending")):
+                label = "数字分布与小数尾"
+            elif any(token in lowered for token in ("row", "relation", "offset", "ratio", "linear", "sum", "diff", "progression")):
+                label = "行列关系与局部数值模式"
+            else:
+                label = "其他审查线索"
+        grouped[label].append(finding)
+
+    coverage = scan.get("coverage") or {}
+    sheets = len((scan.get("scan_stats") or {}).get("sheets") or [])
+    n_files = int(scan.get("n_files") or coverage.get("files_succeeded") or 0)
+    status = str(scan.get("scan_status") or "partial")
+    lines = [
+        "# 科研数据审查报告", "",
+        f"- **状态：** {status}",
+        f"- **文件 / 工作表：** {n_files} 个文件 / {sheets} 张工作表",
+        f"- **基础表格检查：** {inspected_rows} 行 × {inspected_cols} 列",
+        f"- **复核线索：** {sum(map(len, grouped.values()))} 项",
+        "- **说明：** 命中仅表示需要结合原始记录、图注、Methods 或实验设计复核，不代表数据错误或研究不端。",
+        "",
+    ]
+    if not_run:
+        lines.extend(["## 未执行的检查", ""])
+        lines.extend(f"- {note}" for note in dict.fromkeys(not_run))
+        lines.append("")
+    if status != "complete":
+        limits = (coverage.get("limitations") or [])
+        lines.extend(["## 覆盖情况", "", "**扫描未完整结束；未检查范围不能写作‘无异常’。**"])
+        for limitation in limits:
+            lines.append(f"- {limitation}")
+        for error in skipped:
+            lines.append(f"- 未完成：{error}")
+        lines.append("")
+
+    for label, _ in _AUDIT_MARKDOWN_CATEGORIES:
+        items = grouped[label]
+        lines.extend([f"## {label}", ""])
+        if not items:
+            lines.extend(["无", ""])
+            continue
+        # Avoid an unbounded Markdown artifact for very large files. The full
+        # machine-readable report still contains every finding.
+        for index, finding in enumerate(items[:500], 1):
+            kind = str(finding.get("check") or finding.get("kind") or "复核线索")
+            severity = str(finding.get("severity") or "待复核")
+            details = [str(finding.get(key) or "") for key in ("file", "sheet", "location", "field")]
+            place = "；".join(dict.fromkeys(part for part in details if part))
+            detail = str(finding.get("detail") or finding.get("rule") or "需结合实验背景复核")
+            prefix = f"**{kind}**（{severity}）"
+            if place:
+                prefix += f"｜{place}"
+            lines.append(f"{index}. {prefix}：{detail}")
+        if len(items) > 500:
+            lines.append(f"- 本类另有 {len(items) - 500} 项未在 Markdown 中展开；完整列表见机器可读 JSON 和详细 HTML。")
+        lines.append("")
+    lines.extend(["---", "本报告由规则扫描生成。异常值、重复关系和数字模式均为筛查线索；是否合理需结合实验设计和原始记录判断。", ""])
+    return "\n".join(lines).encode("utf-8")
+
+
+@tool
+def audit_uploaded_data(file_indexes_json: str | list[int] = "",
+                        column_mapping_json: str | dict[str, str] = "{}",
+                        group_columns_json: str | list[str] = "[]",
+                        value_columns_json: str | list[str] = "[]",
+                        header_row: int = 1, header_rows_json: str | list[int] = "",
+                        integer_data_confirmed: bool = False, sd_kind: str = "",
+                        include_report: bool = True) -> str:
+    """统一审查本轮上传的一份或多份表格/论文附件。先 inspect_uploaded_table 理解复杂表头和字段；本工具调用 PaperConan 数值检测全套并补充缺失、类型混杂、重复行、IQR 离群、分组/重复数平衡等通用检查。支持跨工作表/文件关系、行列/局部/块级/小数尾/末位模式及整数摘要统计。所有命中只是复核线索，不推断意图、不修改原件；默认生成可下载报告，并报告完整/部分覆盖状态。"""
+    tables = get_request_tables()
+    requested = _json_arg(file_indexes_json, list, list(range(len(tables))))
+    if any(type(index) is not int for index in requested):
+        raise ValueError("file_indexes_json 必须是整数数组")
+    if not requested:
+        return "审查未启动：当前轮没有选择附件。"
+    mapping = _json_arg(column_mapping_json, dict, {})
+    groups = _json_arg(group_columns_json, list, [])
+    values = _json_arg(value_columns_json, list, [])
+    if any(not isinstance(k, str) or not isinstance(v, str) for k, v in mapping.items()):
+        raise ValueError("column_mapping_json 需要字符串到字符串的字段映射")
+    if any(not isinstance(v, str) for v in groups + values):
+        raise ValueError("group_columns_json 和 value_columns_json 需要字符串数组")
+    header_rows = _parse_header_rows(header_rows_json, int(header_row))
+
+    from src.research.paperconan_adapter import scan_request_tables
+    numeric = scan_request_tables(tables, requested)
+    scan = numeric["scan"]
+    findings = list(numeric["findings"])
+    skipped = list(scan.get("scan_errors") or [])
+    inspected_rows = 0
+    inspected_cols = 0
+    # Keep general table-quality checks that complement PaperConan. Relation and
+    # digit-pattern duplicates are intentionally omitted here; PaperConan owns them.
+    upstream_checks = {"identical_columns", "constant_offset_columns", "constant_ratio_columns",
+                       "exact_linear_columns", "decimal_ending_concentration"}
+    for index in requested:
+        if index < 0 or index >= len(tables):
+            raise ValueError(f"附件序号无效：{index}")
+        item = tables[index]
+        try:
+            _, first_meta = _load_frame(index, header_row=int(header_row), header_rows=header_rows)
+            sheet_names = first_meta.get("sheets") or [first_meta.get("sheet") or ""]
+            for sheet in sheet_names:
+                try:
+                    frame, meta = _load_frame(index, sheet_name=str(sheet or ""),
+                                               header_row=int(header_row), header_rows=header_rows)
+                    inspected_rows += int(frame.shape[0])
+                    inspected_cols += int(frame.shape[1])
+                    base_findings, _ = _audit_frame(
+                        frame, mapping, groups, values,
+                        row_offset=max(meta.get("header_rows") or [1]) + 1,
+                        integer_data_confirmed=bool(integer_data_confirmed),
+                        sd_kind=str(sd_kind or "").lower())
+                    source_name = str(item.get("name") or f"附件 {index + 1}")
+                    source_sheet = str(meta.get("sheet") or "CSV")
+                    for finding in base_findings:
+                        if finding.get("check") in upstream_checks:
+                            continue
+                        finding.update(file=source_name, sheet=source_sheet,
+                                       location=(f"第 {finding['row']} 行" if finding.get("row") else ""),
+                                       evidence="", prefilter="")
+                        findings.append(finding)
+                except Exception as exc:
+                    skipped.append(f"{item.get('name')} · {sheet}: {type(exc).__name__}: {exc}")
+        except Exception as exc:
+            skipped.append(f"{item.get('name')}: {type(exc).__name__}: {exc}")
+    status = str(scan.get("scan_status") or "partial")
+    coverage = scan.get("coverage") or {}
+    if skipped and status == "complete":
+        status = "partial"
+    source_names = [str(tables[index].get("name") or f"附件{index + 1}") for index in requested]
+    report_stem = _safe_name(Path(source_names[0]).stem if source_names else "", "科研数据")
+    display_name = "、".join(source_names[:3]) + (f" 等 {len(source_names)} 个文件" if len(source_names) > 3 else "")
+    safe_skipped = [value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+                    for value in skipped]
+    scan_meta = {
+        "name": display_name,
+        "sheet": f"PaperConan 扫描 {scan.get('n_files', 0)} 个文件、{len(scan.get('scan_stats', {}).get('sheets', []))} 张工作表",
+        "rows": inspected_rows,
+        "columns": inspected_cols,
+        "scan_errors": safe_skipped,
+    }
+    non_finding_statuses = {"design_checks_skipped", "grim_sd_skipped"}
+    chat_findings = [finding for finding in findings
+                     if str(finding.get("check") or finding.get("kind") or "") not in non_finding_statuses]
+
+    report_links = ""
+    need_report = bool(include_report or len(findings) > 8 or len(requested) > 1 or status != "complete")
+    if need_report:
+        xlsx_name = f"{report_stem}_科研数据审查.xlsx"
+        html_name = f"{report_stem}_科研数据审查_详细视图.html"
+        json_name = f"{report_stem}_科研数据审查_机器可读结果.json"
+        markdown_name = f"{report_stem}_科研数据审查.md"
+        scan["name"] = display_name
+        numeric["scan"]["name"] = display_name
+        xlsx = _write_audit_xlsx(xlsx_name, scan_meta, findings)
+        xlsx_url = _save_artifact(xlsx_name, xlsx,
+                                  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        html_url = _save_artifact(html_name, numeric["html_report"], "text/html; charset=utf-8")
+        json_url = _save_artifact(json_name, numeric["json_report"], "application/json; charset=utf-8")
+        markdown = _render_audit_markdown(findings, scan=scan, inspected_rows=inspected_rows,
+                                          inspected_cols=inspected_cols, skipped=safe_skipped)
+        markdown_url = _save_artifact(markdown_name, markdown, "text/markdown; charset=utf-8")
+        report_links = (f"\n\n下载：\n- [Markdown 分类审查报告]({markdown_url})"
+                        f"\n- [XLSX 审查总表]({xlsx_url})"
+                        f"\n- [HTML 详细报告]({html_url})"
+                        f"\n- [JSON 完整扫描结果]({json_url})")
+    if status == "complete":
+        if chat_findings:
+            summary = f"数据审查已完成，发现 {len(chat_findings)} 条待复核线索："
+            priority = {"high": 0, "error": 0, "warning": 1, "medium": 2, "review": 3, "info": 4}
+            ordered = sorted(chat_findings, key=lambda item: priority.get(str(item.get("severity") or "review").lower(), 3))
+            for finding in ordered[:3]:
+                location = " · ".join(str(finding.get(key) or "") for key in
+                                       ("file", "sheet", "location", "field") if finding.get(key))
+                detail = str(finding.get("detail") or finding.get("rule") or "需结合实验背景复核")
+                if len(detail) > 180:
+                    detail = detail[:177].rstrip() + "..."
+                summary += f"\n- {finding.get('check') or finding.get('kind') or '复核线索'}"
+                summary += f"{(' · ' + location) if location else ''}：{detail}"
+            if len(chat_findings) > 3:
+                summary += f"\n其余 {len(chat_findings) - 3} 条及各类别结果见审查报告。"
+        else:
+            summary = "数据审查已完成，当前规则未发现需要复核的异常线索；这不等于证明数据完全无问题。详情见报告。"
+    else:
+        summary = "数据审查未完整完成，未完成范围不能判断为无异常。"
+        if chat_findings:
+            summary += f"已发现 {len(chat_findings)} 条待复核线索；详情见报告。"
+        if safe_skipped:
+            summary += " 未完成项：" + "；".join(safe_skipped[:3])
+    return summary + report_links
 
 
 @tool
@@ -1228,15 +1493,42 @@ def export_literature_evidence(title: str, evidence_rows_json: str) -> str:
 
 
 def _export_markdown(title: str, content: str, kind: str, svg_code: str = "") -> str:
-    if not str(content or "").strip():
-        return "[ERR_PARSE] 导出内容不能为空"
+    body = str(content or "").strip()
+    svg_source = str(svg_code or "").strip()
+    if not svg_source:
+        svg_block = re.search(r"```(?:svg|xml)\s*\n([\s\S]*?)```", body, re.I)
+        if svg_block:
+            svg_source = svg_block.group(1).strip()
+        else:
+            inline_svg = re.search(r"<svg\b[\s\S]*?</svg\s*>", body, re.I)
+            if inline_svg:
+                svg_source = inline_svg.group(0)
+    if svg_source:
+        fenced = re.fullmatch(r"```(?:svg|xml)?\s*([\s\S]*?)\s*```", svg_source, re.I)
+        if fenced:
+            svg_source = fenced.group(1).strip()
+        else:
+            start = svg_source.lower().find("<svg")
+            end = svg_source.lower().rfind("</svg>")
+            if start >= 0 and end >= start:
+                svg_source = svg_source[start:end + len("</svg>")]
+        svg_code = _sanitize_svg_for_export(svg_source)
+        if not svg_code:
+            return "[SVG_FORMAT_ERROR] SVG 不完整或未通过安全校验，未生成图形文件。"
+    if not body and svg_code:
+        body = f"## 图示\n\n```svg\n{svg_code}\n```"
+    if not body:
+        return "[ERR_PARSE] 导出内容不能为空；请提供正文或有效 SVG。"
     supplied_title = str(title or "").strip()
-    heading = re.search(r"^#\s+(.+)$", str(content), re.M)
+    heading = re.search(r"^#\s+(.+)$", body, re.M)
     generic = {"汇总", "导出文件", "课题记录", "文件", "结果", "报告"}
     if (not supplied_title or supplied_title in generic) and heading:
         supplied_title = heading.group(1).strip()
+    if not supplied_title or supplied_title in generic:
+        svg_title = re.search(r"<title\b[^>]*>([\s\S]*?)</title>", svg_code, re.I)
+        if svg_title:
+            supplied_title = html.unescape(re.sub(r"<[^>]+>", "", svg_title.group(1))).strip()
     final_title = supplied_title or kind
-    body = str(content).strip()
     if svg_code and "<svg" not in body.lower():
         body += "\n\n## 配图\n\n" + str(svg_code).strip()
     rendered = _markdown_to_safe_html(body)
@@ -1252,17 +1544,23 @@ a{{color:#d97706}} .figure{{max-width:100%;overflow:auto;margin:20px 0}} .figure
 </style></head><body><h1>{html.escape(final_title)}</h1>{rendered}</body></html>'''
     filename = _safe_name(final_title, kind) + ".html"
     url = _save_artifact(filename, document.encode("utf-8"), "text/html; charset=utf-8")
-    return f"{kind}已生成 HTML 文件（可包含内嵌 SVG）。[下载 HTML]({url})"
+    links = [f"[下载 HTML]({url})"]
+    if svg_code:
+        svg_filename = _safe_name(final_title, kind) + ".svg"
+        svg_url = _save_artifact(svg_filename, svg_code.encode("utf-8"), "image/svg+xml; charset=utf-8")
+        links.append(f"[下载 SVG]({svg_url})")
+    suffix = "（SVG 已内嵌）" if svg_code else ""
+    return f"{kind}已生成 HTML{suffix}：" + " ｜ ".join(links)
 
 
 @tool
-def export_paper_analysis(title: str, analysis_markdown: str, svg_code: str = "") -> str:
-    """导出本轮论文解读为 HTML。若本轮已生成且适合随文呈现 SVG，将代码放入 svg_code 自动内嵌。"""
+def export_paper_analysis(analysis_markdown: str = "", title: str = "", svg_code: str = "") -> str:
+    """将本轮论文解读或绘图导出为 HTML；title 可省略并根据正文标题或 SVG 标题自动命名，svg_code 可单独用于导出绘图。"""
     return _export_markdown(title, analysis_markdown, "论文解读", svg_code)
 
 
 @tool
-def export_experiment_design(title: str, design_markdown: str, svg_code: str = "") -> str:
+def export_experiment_design(design_markdown: str = "", title: str = "", svg_code: str = "") -> str:
     """导出实验设计 HTML；注明待确认假设。适合随文呈现的 SVG 可放入 svg_code 自动内嵌。"""
     return _export_markdown(title, design_markdown, "实验设计草案", svg_code)
 

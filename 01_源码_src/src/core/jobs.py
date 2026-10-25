@@ -98,6 +98,29 @@ def update_job(job_id: str, **fields) -> None:
         logger.warning(f"[Jobs] update_job failed: {e}")
 
 
+def mark_interrupted_jobs() -> int:
+    """Close request jobs left running by a process restart or crash."""
+    now = datetime.now().isoformat()
+    try:
+        with _write_lock:
+            with _connect() as conn:
+                cursor = conn.execute(
+                    "UPDATE task_jobs SET status='failed', current_step='interrupted', "
+                    "progress_summary='服务进程在任务完成前停止；请重新提交。', "
+                    "error='service_restart', updated_at=?, finished_at=? "
+                    "WHERE status='running'",
+                    (now, now),
+                )
+                conn.commit()
+                count = int(cursor.rowcount or 0)
+        if count:
+            logger.warning("[Jobs] marked %d stale running jobs as interrupted", count)
+        return count
+    except Exception as exc:
+        logger.warning("[Jobs] failed to reconcile interrupted jobs: %s", exc)
+        return 0
+
+
 def get_job(job_id: str) -> Optional[dict]:
     try:
         with _connect() as conn:

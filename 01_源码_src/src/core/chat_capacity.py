@@ -26,9 +26,9 @@ class ChatCapacity:
                 position = self._queued
             else:
                 position = 0
-        if counted and on_wait:
-            await on_wait(position, self.max_active, self.max_pending)
         try:
+            if counted and on_wait:
+                await on_wait(position, self.max_active, self.max_pending)
             await asyncio.wait_for(self._semaphore.acquire(), timeout=self.wait_timeout)
         except asyncio.TimeoutError as exc:
             raise TimeoutError("排队等待超过 15 分钟，请稍后重试。") from exc

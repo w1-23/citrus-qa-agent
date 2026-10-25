@@ -12,6 +12,7 @@ class AgentState(TypedDict, total=False):
     attachment_context: str
     image_attachments: list[dict]
     request_deadline: float
+    request_started_at: float
     agent_no_prefetch_hints: bool
     session_id: str
     mode: str

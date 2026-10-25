@@ -39,6 +39,51 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 
+class _RequestBodyTooLarge(Exception):
+    pass
+
+
+class RequestBodyLimitMiddleware:
+    """Reject oversized bodies before FastAPI/Pydantic buffers or parses JSON."""
+
+    def __init__(self, app, max_bytes: int = 28 * 1024 * 1024):
+        self.app = app
+        self.max_bytes = max(1024, int(max_bytes))
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or scope.get("method") in {"GET", "HEAD", "OPTIONS"}:
+            await self.app(scope, receive, send)
+            return
+        headers = {k.lower(): v for k, v in scope.get("headers", [])}
+        raw_length = headers.get(b"content-length", b"")
+        try:
+            if raw_length and int(raw_length) > self.max_bytes:
+                response = JSONResponse({"detail": "请求体超过 28 MiB 限制。"}, status_code=413)
+                await response(scope, receive, send)
+                return
+        except ValueError:
+            response = JSONResponse({"detail": "请求体长度无效。"}, status_code=400)
+            await response(scope, receive, send)
+            return
+
+        received = 0
+
+        async def limited_receive():
+            nonlocal received
+            message = await receive()
+            if message.get("type") == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_bytes:
+                    raise _RequestBodyTooLarge
+            return message
+
+        try:
+            await self.app(scope, limited_receive, send)
+        except _RequestBodyTooLarge:
+            response = JSONResponse({"detail": "请求体超过 28 MiB 限制。"}, status_code=413)
+            await response(scope, receive, send)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("[Lifespan] starting...")
@@ -47,6 +92,10 @@ async def lifespan(app: FastAPI):
         init_store()
         from src.admin_audit import init_store as init_admin_audit
         init_admin_audit()
+        from src.admin_audit import mark_interrupted_requests
+        mark_interrupted_requests()
+        from src.core.jobs import mark_interrupted_jobs
+        mark_interrupted_jobs()
     except Exception as exc:
         logger.exception("[Lifespan] account store initialization failed: %s", exc)
         raise
@@ -148,14 +197,20 @@ def require_owned_session(session_id: str, user: dict) -> None:
 @app.middleware("http")
 async def account_auth_guard(request: Request, call_next):
     path = request.url.path
+    public_auth_paths = {
+        "/api/v2/auth/register", "/api/v2/auth/login", "/api/v2/auth/logout",
+    }
     if request.method not in {"GET", "HEAD", "OPTIONS"}:
         origin = request.headers.get("origin")
+        has_auth_cookie = bool(request.cookies.get("citrus_auth"))
+        if not origin and has_auth_cookie and path not in public_auth_paths:
+            return JSONResponse({"detail": "缺少同源请求校验信息，请刷新页面后重试。"}, status_code=403)
         if origin:
             from urllib.parse import urlsplit
             parsed = urlsplit(origin)
             if parsed.netloc.lower() != request.headers.get("host", "").lower():
                 return JSONResponse({"detail": "跨站请求已拒绝。"}, status_code=403)
-    if (path.startswith("/api/v2/auth/") or path == "/health"
+    if (path in public_auth_paths or path == "/health"
             or (not path.startswith("/api/")
                 and not path.startswith(("/jobs/", "/sessions/")))):
         return await call_next(request)
@@ -214,7 +269,7 @@ class ChatRequest(BaseModel):
     visualization_enabled: bool = False
     # Per-request attachments. Payloads are processed in memory and are never
     # ingested into the shared RAG corpus.
-    attachments: list[dict[str, str]] = Field(default_factory=list)
+    attachments: list[dict[str, str]] = Field(default_factory=list, max_length=8)
 
 
 class CredentialsRequest(BaseModel):
@@ -225,13 +280,18 @@ class CredentialsRequest(BaseModel):
 def _client_ip(request: Request) -> str:
     """Use Cloudflare's visitor address only when the deployment enables it."""
     if os.getenv("CITRUS_TRUST_CLOUDFLARE_PROXY", "0").strip().lower() in {"1", "true", "yes"}:
+        remote = request.client.host if request.client else ""
+        trusted = {value.strip() for value in os.getenv(
+            "CITRUS_TRUSTED_PROXY_IPS", "127.0.0.1,::1").split(",") if value.strip()}
         candidate = (request.headers.get("cf-connecting-ip") or "").strip()
-        if candidate:
+        if candidate and remote in trusted:
             import ipaddress
             try:
                 return str(ipaddress.ip_address(candidate))
             except ValueError:
                 logger.warning("Ignoring invalid CF-Connecting-IP header")
+        elif candidate:
+            logger.warning("Ignoring CF-Connecting-IP from untrusted proxy %s", remote)
     return request.client.host if request.client else "unknown"
 
 
@@ -376,15 +436,28 @@ async def admin_set_user_limit(user_id: int, req: AccountLimitRequest, request: 
     return {"status": "ok", "daily_limit": req.daily_limit}
 
 
+def _attachment_excerpt(text: str, max_chars: int = 80_000) -> str:
+    """Keep both the opening and ending of long papers so references survive truncation."""
+    text = str(text or "")
+    if len(text) <= max_chars:
+        return text
+    tail_chars = min(16_000, max_chars // 4)
+    head_chars = max_chars - tail_chars
+    return (text[:head_chars] + "\n[中间正文为控制上下文已省略；以下保留文档末尾，可能包含参考文献。]\n"
+            + text[-tail_chars:])
+
+
 def _prepare_chat_attachments(items: list[dict[str, str]]) -> tuple[str, list[dict[str, str]], list[dict[str, object]]]:
     """Extract text / prepare image blocks in memory for this request only."""
     if not items:
         return "", [], []
+    if len(items) > 8:
+        raise HTTPException(status_code=413, detail="每轮最多上传 8 个附件。")
     total_bytes = 0
     text_parts: list[str] = []
     images: list[dict[str, str]] = []
     tables: list[dict[str, object]] = []
-    for item in items[:8]:
+    for item in items:
         name = str(item.get("name") or "attachment")[:180]
         declared_type = str(item.get("type") or "application/octet-stream").lower()
         raw_data = str(item.get("data") or "")
@@ -415,19 +488,25 @@ def _prepare_chat_attachments(items: list[dict[str, str]]) -> tuple[str, list[di
             images.append({"name": name, "url": f"data:{mime};base64,{encoded}"})
             continue
 
-        if suffix in {"csv", "tsv", "xlsx", "xls", "xlsm", "pdf", "docx"}:
-            if suffix in {"xlsx", "xlsm", "docx"} and not content.startswith(b"PK"):
+        if suffix in {"csv", "tsv", "xlsx", "xls", "xlsm", "xlsb", "pdf", "docx"}:
+            if suffix in {"xlsx", "xlsm", "xlsb", "docx"} and not content.startswith(b"PK"):
                 raise HTTPException(status_code=400, detail=f"{suffix.upper()} 文件格式与内容不匹配：{name}")
+            if suffix in {"xlsx", "xlsm", "xlsb", "docx"}:
+                try:
+                    from src.core.file_safety import validate_zip_bytes
+                    validate_zip_bytes(content, label=name)
+                except ValueError as exc:
+                    raise HTTPException(status_code=413, detail=str(exc)) from exc
             if suffix == "xls" and not content.startswith(b"\xd0\xcf\x11\xe0"):
                 raise HTTPException(status_code=400, detail=f"XLS 文件格式与内容不匹配：{name}")
             if suffix == "pdf" and not content.startswith(b"%PDF"):
                 raise HTTPException(status_code=400, detail=f"PDF 文件格式与内容不匹配：{name}")
             tables.append({"name": name, "data": content})
-            if suffix in {"csv", "tsv", "xlsx", "xls", "xlsm"}:
+            if suffix in {"csv", "tsv", "xlsx", "xls", "xlsm", "xlsb"}:
                 text_parts.append(
                     f"[表格附件：{name}；审查文件序号 {len(tables) - 1}。"
                     "原始数据不会自动展开到上下文；用户要求数据审查时先调用 inspect_uploaded_table，"
-                    "确认字段语义后再调用 audit_uploaded_table。]")
+                    "确认字段语义后再调用统一审查工具 audit_uploaded_data。]")
             else:
                 # Keep original bytes request-local for structured-table/image audit.
                 # The normal document path below still extracts text for ordinary Q&A.
@@ -450,8 +529,6 @@ def _prepare_chat_attachments(items: list[dict[str, str]]) -> tuple[str, list[di
                 else:
                     try:
                         with zipfile.ZipFile(BytesIO(content)) as archive:
-                            if sum(info.file_size for info in archive.infolist()) > 100 * 1024 * 1024:
-                                raise HTTPException(status_code=413, detail=f"Word 文件解压后过大：{name}")
                             xml = ElementTree.fromstring(archive.read("word/document.xml"))
                         ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
                         extracted = "\n".join("".join(node.text or "" for node in p.findall(".//w:t", ns))
@@ -464,7 +541,7 @@ def _prepare_chat_attachments(items: list[dict[str, str]]) -> tuple[str, list[di
                 text_parts.append(
                     f"[论文附件：{name}；审查文件序号 {len(tables) - 1}。"
                     "正文文本已提取；结构化表格与图像仅在用户明确要求审查时读取。]")
-                text_parts.append(f"[附件正文：{name}]\n{extracted[:80000] or '未提取到文本。'}")
+                text_parts.append(f"[附件正文：{name}]\n{_attachment_excerpt(extracted) or '未提取到文本。'}")
             continue
 
         try:
@@ -504,7 +581,7 @@ def _prepare_chat_attachments(items: list[dict[str, str]]) -> tuple[str, list[di
         except Exception as exc:
             logger.info("Attachment text extraction failed for %s: %s", name, exc)
             raise HTTPException(status_code=400, detail=f"无法读取附件内容：{name}") from exc
-        text_parts.append(f"[附件：{name}]\n{extracted[:80000] or '未提取到可搜索文本（可能是扫描版 PDF）。'}")
+        text_parts.append(f"[附件：{name}]\n{_attachment_excerpt(extracted) or '未提取到可搜索文本（可能是扫描版 PDF）。'}")
 
     if len(images) > 8:
         raise HTTPException(status_code=413, detail="图片与扫描版 PDF 页面合计最多支持 8 张")
@@ -523,7 +600,9 @@ async def chat_v2(req: ChatRequest, request: Request):
     user_key = str(user["user_id"])
     if not check_rate_limit("chat", user_key, limit=20, window_seconds=60):
         raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试。")
-    attachment_context, image_attachments, table_attachments = _prepare_chat_attachments(req.attachments)
+    from src.core.executors import ATTACHMENT_EXECUTOR
+    attachment_context, image_attachments, table_attachments = await asyncio.get_running_loop().run_in_executor(
+        ATTACHMENT_EXECUTOR, _prepare_chat_attachments, req.attachments)
     if req.session_id and session_manager.session_exists(req.session_id):
         require_owned_session(req.session_id, user)
     allowed, daily_limit = reserve_chat_request(user)
@@ -600,6 +679,7 @@ async def chat_v2(req: ChatRequest, request: Request):
     # DeepSeek 原生联网（output_text 围绕原始问题作答），检索词仅作"搜索参考关键词"
     set_original_query(query)
     t0 = time.perf_counter()
+    initial_state["request_started_at"] = t0
 
     async def event_generator():
         from src.core.progress_bus import (
@@ -686,49 +766,59 @@ async def chat_v2(req: ChatRequest, request: Request):
             # The shared Agent reasons directly from the user's original query;
             # no separate intake model or confirmation card rewrites it.
 
+            pending_supervisor_output = None
             try:
                 async for node_output in graph.astream(initial_state, stream_mode="updates",
                                                        recursion_limit=settings.RECURSION_LIMIT):
                     for node_name, output in node_output.items():
                         if "_trace" in output:
                             trace = output["_trace"]
-                            if trace.get("node") in ("load_context", "expert_load"):
+                            if trace.get("node") == "session_load":
                                 await event_queue.put(_encode_event("status", {
                                     "stage": "loading",
                                     "summary": trace.get("summary", ""),
                                 }))
 
-                        if node_name in ("load_context", "expert_load", "save_context", "expert_save"):
+                        if node_name == "session_load":
                             continue
-
-                        if node_name in ("light_retrieve",):
-                            await emit_to_client(_encode_event("status", {
-                                "stage": "retrieval_done",
-                                "main_count": len(output.get("main_results", [])),
-                            }))
-
-                        # v9.2: 节点名改为真实值（原 "light_synthesize"/"light_react" 是
-                        # v8.3.0 前 light 老节点名→ light 恒落入兜底分支：丢 citation_info/
-                        # tools_called、job 永不 completed、request_done 日志缺失）
-                        if node_name in ("supervisor", "light_supervisor"):
-                            ans = output.get("answer", "")
+                        if node_name == "supervisor":
+                            pending_supervisor_output = output
+                            ref_data = output.get("references_data")
+                            if ref_data:
+                                await emit_to_client(_encode_event("citations", ref_data))
+                        elif node_name == "session_save" and pending_supervisor_output is not None:
+                            # The graph emits the supervisor result before the
+                            # following session_save node. Delay the SSE done
+                            # event until that node has durably written history,
+                            # so an immediate refresh can restore the answer and
+                            # its elapsed-time badge together.
+                            agent_output = pending_supervisor_output
+                            ans = agent_output.get("answer", "")
                             if ans:
                                 # v9.2 P4 根治: 排空桥替代原 sleep(0.5) 时序猜
                                 # 测——工具线程已入队的进度事件先于 done 到达
                                 await flush_bridge()
+                                save_trace = output.get("_trace") or {}
+                                try:
+                                    persisted_generation_ms = int(save_trace.get("generation_ms") or 0)
+                                except (TypeError, ValueError):
+                                    persisted_generation_ms = 0
                                 done_payload = {
                                     "session_id": sid,
                                     "answer": ans,
                                     "job_id": job_id,
-                                    "gen_time_ms": int((time.perf_counter() - t0) * 1000),
+                                    "gen_time_ms": persisted_generation_ms or int((time.perf_counter() - t0) * 1000),
+                                    "history_saved": bool(save_trace.get("history_saved")),
                                 }
+                                if not done_payload["history_saved"]:
+                                    done_payload["warning"] = "本轮回答已完成，但历史写入未确认；刷新后可能无法恢复。"
                                 # v8.3.7 M3: 假完成检测元数据（前端可提示"引用未检索支撑"）
-                                cit = output.get("citation_info")
+                                cit = agent_output.get("citation_info")
                                 if cit:
                                     done_payload.update(cit)
-                                if output.get("tools_called"):
-                                    done_payload["tools_called"] = output["tools_called"]
-                                trace_meta = output.get("_trace") or {}
+                                if agent_output.get("tools_called"):
+                                    done_payload["tools_called"] = agent_output["tools_called"]
+                                trace_meta = agent_output.get("_trace") or {}
                                 if trace_meta.get("node") == "supervisor":
                                     done_payload["retrieval_trace"] = {
                                         key: trace_meta[key] for key in (
@@ -736,28 +826,34 @@ async def chat_v2(req: ChatRequest, request: Request):
                                             "retrieval_disabled_simple_query")
                                         if key in trace_meta
                                     }
+                                request_status = "incomplete" if ans.startswith("本轮未完成") else "completed"
                                 try:
                                     from src.admin_audit import finish_request
                                     finish_request(request_id=rid, answer=ans,
-                                                   tool_trace=output.get("tools_called") or [],
+                                                   tool_trace=agent_output.get("tools_called") or [],
                                                    retrieval_trace=done_payload.get("retrieval_trace") or {},
-                                                   status="completed",
+                                                   status=request_status,
                                                    elapsed_ms=int((time.perf_counter() - t0) * 1000))
                                 except Exception as exc:
                                     logger.warning("admin audit finish failed: %s", type(exc).__name__)
                                 # v10.0（卡点②③）: 裁决与审计结果随 done 下发
-                                if output.get("audit_report"):
-                                    done_payload["audit"] = output["audit_report"]
-                                if output.get("adjudication"):
-                                    done_payload["adjudication"] = output["adjudication"]
+                                if agent_output.get("audit_report"):
+                                    done_payload["audit"] = agent_output["audit_report"]
+                                if agent_output.get("adjudication"):
+                                    done_payload["adjudication"] = agent_output["adjudication"]
                                 await emit_to_client(_encode_event("done", done_payload))
                                 # v8.3.7 M2: 任务完成落状态
-                                jobs_mod.update_job(job_id, status="completed",
-                                                    progress_summary=ans[:200])
+                                jobs_mod.update_job(
+                                    job_id,
+                                    status="failed" if request_status == "incomplete" else "completed",
+                                    current_step="incomplete" if request_status == "incomplete" else "completed",
+                                    progress_summary=ans[:200],
+                                    error="required_work_incomplete" if request_status == "incomplete" else "",
+                                )
                                 # v8.4.1: 业务日志
                                 # v9.1.3: tools 口径与 supervisor_done 一致——tools_called
                                 # 为列表（AgentState 已声明，不再被 langgraph 丢弃），取长度
-                                _tools_n = len(output.get("tools_called") or [])
+                                _tools_n = len(agent_output.get("tools_called") or [])
                                 try:
                                     from src.core.business_logger import blog
                                     blog("request_done", answer_chars=len(ans),
@@ -775,19 +871,6 @@ async def chat_v2(req: ChatRequest, request: Request):
                                          ms=int((time.perf_counter() - t0) * 1000))
                                 except Exception:
                                     pass
-                        elif node_name not in ("light_retrieve",):
-                            ans = output.get("answer", "")
-                            if ans:
-                                await emit_to_client(_encode_event("done", {
-                                    "session_id": sid,
-                                    "answer": ans,
-                                    "job_id": job_id,
-                                    "gen_time_ms": int((time.perf_counter() - t0) * 1000),
-                                }))
-
-                        ref_data = output.get("references_data")
-                        if ref_data:
-                            await emit_to_client(_encode_event("citations", ref_data))
             except asyncio.CancelledError:
                 # 仅普通问答被 cancel（write 保活任务不会到这里）
                 jobs_mod.update_job(job_id, status="cancelled")
@@ -850,6 +933,8 @@ async def chat_v2(req: ChatRequest, request: Request):
             acquired = False
 
             async def announce_queue(position: int, maximum: int, pending: int):
+                jobs_mod.update_job(job_id, current_step="queued",
+                                    progress_summary=f"排队第 {position} 位")
                 await event_queue.put(_encode_event("status", {
                     "stage": "queued",
                     "summary": f"服务器正在处理其他请求，当前排队第 {position} 位；最多同时处理 {maximum} 个请求。",
@@ -858,6 +943,8 @@ async def chat_v2(req: ChatRequest, request: Request):
             try:
                 await chat_capacity.acquire(on_wait=announce_queue)
                 acquired = True
+                jobs_mod.update_job(job_id, current_step="starting",
+                                    progress_summary="已进入处理队列，正在启动本轮请求")
                 await process_graph()
             except OverflowError as exc:
                 jobs_mod.update_job(job_id, status="failed", error=str(exc))
@@ -879,6 +966,15 @@ async def chat_v2(req: ChatRequest, request: Request):
                     pass
                 await event_queue.put(_encode_event("error", {"message": str(exc)}))
                 await event_queue.put(None)
+            except asyncio.CancelledError:
+                jobs_mod.update_job(job_id, status="cancelled", error="client_disconnected_while_queued")
+                try:
+                    from src.admin_audit import finish_request
+                    finish_request(request_id=rid, status="cancelled",
+                                   elapsed_ms=int((time.perf_counter() - t0) * 1000))
+                except Exception:
+                    pass
+                raise
             finally:
                 if acquired:
                     await chat_capacity.release()
@@ -1190,27 +1286,6 @@ MODEL_PROVIDERS = {
 }
 
 
-def _provider_model_supports_images(provider_id: str, model_id: str) -> bool:
-    """Known image-capable models used by the supported provider catalog."""
-    model = (model_id or "").strip().lower().rsplit("/", 1)[-1]
-    if provider_id == "opencode_go":
-        return model in {
-            "deepseek-v4.1-flash", "deepseek-v4-flash",
-            "deepseek-v4-flash-vision-exp", "deepseek-flash",
-        }
-    if provider_id == "deepseek":
-        return model in {
-            "deepseek-flash", "deepseek-v4.1-flash", "deepseek-v4-flash",
-            "deepseek-v4-flash-vision-exp",
-        }
-    if provider_id in {"zhipu", "aliyun_bailian", "custom_openai"}:
-        return any(marker in model for marker in (
-            "glm-4v", "glm-4.1v", "glm-4v-plus", "qwen-vl", "qvq",
-            "qwen3-vl", "qwen2.5-vl", "qwen2-vl", "vision", "-vl-",
-        ))
-    return False
-
-
 @app.get("/api/v2/config/providers")
 async def list_model_providers():
     return {"providers": [
@@ -1356,9 +1431,7 @@ async def save_provider_config(req: ProviderConfigRequest):
     if not settings.save_runtime_model_config(
             provider_id=req.provider_id, main=model, fast="",
             main_base_url=base_url, fast_base_url="",
-            context_window_tokens=req.context_window_tokens,
-            main_model_image_input=_provider_model_supports_images(
-                req.provider_id, model)):
+            context_window_tokens=req.context_window_tokens):
         raise HTTPException(status_code=500, detail="模型配置保存失败")
     logger.info("[API] provider config saved: provider=%s model=%s",
                 req.provider_id, model)
@@ -1556,68 +1629,15 @@ async def health_check():
 
 @app.get("/api/v2/vision/status")
 async def vision_status():
-    """病害图像初筛状态；分别报告权重、运行时和已加载会话情况。"""
-    if not settings.VISION_ENABLED:
-        return {
-            "enabled": False,
-            "ready": False,
-            "inference_available": False,
-            "models": [],
-            "reason": "专用病害分类器已关闭；带图病害问题由主模型直接判断。",
-        }
-    try:
-        from src.vision import labels as vision_labels
-        from src.vision.models import (
-            available_providers, default_model_dir, enabled_specs, model_status,
-        )
-
-        directory = default_model_dir()
-        active_specs = enabled_specs(settings.VISION_ALLOW_UNLICENSED)
-        active = {spec.key for spec in active_specs}
-        providers = available_providers()
-        try:
-            import onnxruntime  # noqa: F401
-            runtime_available = bool(providers)
-            runtime_error = None
-        except Exception as exc:  # noqa: BLE001
-            runtime_available = False
-            runtime_error = f"{type(exc).__name__}: {exc}"
-        models = model_status(directory)
-        for item in models:
-            item["enabled"] = item["key"] in active
-            item["inference_available"] = bool(item["enabled"] and item["present"]
-                                                and runtime_available)
-        effective_keys = sorted({key for spec in active_specs for key in spec.mapping.values()})
-        citrus_keys = [key for key in effective_keys if not vision_labels.is_weak(key)]
-        weak_keys = [key for key in effective_keys if vision_labels.is_weak(key)]
-        weights_ready = all(item["present"] for item in models if item["enabled"])
-        any_weights_present = any(item["present"] and item["enabled"] for item in models)
-        inference_available = bool(settings.VISION_ENABLED and any_weights_present
-                                   and runtime_available)
-        return {
-            "enabled": bool(settings.VISION_ENABLED),
-            "model_dir": str(directory),
-            "models": models,
-            "weights_ready": weights_ready,
-            "runtime_available": runtime_available,
-            "runtime_error": runtime_error,
-            "inference_available": inference_available,
-            "ready": inference_available,
-            "allow_unlicensed_models": bool(settings.VISION_ALLOW_UNLICENSED),
-            "available_providers": providers,
-            "provider_priority": ["CUDAExecutionProvider", "DmlExecutionProvider",
-                                  "CPUExecutionProvider"],
-            "confidence_threshold": settings.VISION_CONFIDENCE_THRESHOLD,
-            "margin_threshold": settings.VISION_MARGIN_THRESHOLD,
-            "coverage": {
-                "citrus": citrus_keys,
-                "weak": weak_keys,
-                "uncovered": [key for key, _zh in vision_labels.UNCOVERED],
-            },
-        }
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[API] vision status failed: %s", exc)
-        return {"enabled": False, "ready": False, "error": f"{type(exc).__name__}: {exc}"}
+    """旧专用分类器保持停用；图片由当前主模型按自身能力处理。"""
+    return {
+        "enabled": False,
+        "ready": False,
+        "inference_available": False,
+        "models": [],
+        "mode": "main_model_vision",
+        "reason": "专用病害分类器已停用；带图病害问题由主模型直接判断。",
+    }
 
 
 @app.post("/api/v1/session/{session_id}/clear")
@@ -1999,7 +2019,15 @@ async def session_messages(session_id: str, limit: int = 200):
                         str(tc.get("name") or "tool"), tc.get("args") or {}),
                 } for tc in tool_calls]})
             if content:
-                out.append({"role": "assistant", "content": content})
+                item = {"role": "assistant", "content": content}
+                metadata = getattr(m, "response_metadata", None) or {}
+                try:
+                    generation_ms = int(metadata.get("citrus_generation_ms") or 0)
+                except (TypeError, ValueError):
+                    generation_ms = 0
+                if generation_ms > 0:
+                    item["gen_time_ms"] = generation_ms
+                out.append(item)
         elif isinstance(m, ToolMessage):
             # v8.10l: 工具调用结果随历史返回（前端恢复工具链折叠块）
             tcontent = str(getattr(m, "content", "") or "")
@@ -2166,3 +2194,7 @@ async def context_detail_endpoint(session_id: str, mode: str = "expert"):
         logger.error(f"[API] context-detail failed: {e}")
         return {"session_id": session_id, "segments": [], "count": 0,
                 "error": "context_detail_error"}
+
+
+# Added last so body length is checked before auth middleware and FastAPI body parsing.
+app.add_middleware(RequestBodyLimitMiddleware, max_bytes=28 * 1024 * 1024)

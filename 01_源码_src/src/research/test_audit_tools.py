@@ -10,10 +10,14 @@ from src.research.context import reset_request_tables, set_request_tables
 from src.research.tools import (
     _audit_frame,
     _decode_csv,
+    _json_arg,
     _load_frame,
     _metadata_candidate,
     _normalize_doi,
+    audit_uploaded_data,
+    export_paper_analysis,
 )
+from src.tools.draw_svg import draw_svg
 
 
 def test_numeric_relationships_and_review_only_outliers():
@@ -146,4 +150,38 @@ def test_doi_network_failure_is_not_mislabeled_as_nonexistent(monkeypatch):
     status, record, _ = _metadata_candidate("10.1234/example")
     assert status == "unverified"
     assert record is None
+
+
+def test_data_audit_accepts_native_json_tool_arguments():
+    assert _json_arg([0, 2], list, []) == [0, 2]
+    assert _json_arg({"treatment": "处理"}, dict, {}) == {"treatment": "处理"}
+    fields = audit_uploaded_data.args_schema.model_fields
+    assert "list[int]" in str(fields["file_indexes_json"].annotation)
+    assert "dict[str, str]" in str(fields["column_mapping_json"].annotation)
+
+
+def test_export_paper_analysis_can_infer_title_from_markdown():
+    fields = export_paper_analysis.args_schema.model_fields
+    assert not fields["title"].is_required()
+    assert not fields["analysis_markdown"].is_required()
+
+
+def test_svg_tools_handle_missing_or_fenced_input_and_export_svg_only(monkeypatch):
+    valid_svg = '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="30" viewBox="0 0 40 30"><title>测试流程图</title><rect width="40" height="30" fill="#fff"/></svg>'
+    assert "SVG_INPUT_MISSING" in draw_svg.invoke({})
+    assert "SVG 已通过安全校验" in draw_svg.invoke({"svg": f"```svg\n{valid_svg}\n```"})
+    saved = []
+
+    def fake_save(filename, content, mime):
+        saved.append({"filename": filename, "content": content, "mime": mime})
+        return f"/download/{len(saved)}"
+
+    monkeypatch.setattr("src.research.tools._save_artifact", fake_save)
+    result = export_paper_analysis.invoke({"svg_code": valid_svg})
+    assert "已生成 HTML" in result and "下载 SVG" in result
+    html_file = next(item for item in saved if item["filename"].endswith(".html"))
+    svg_file = next(item for item in saved if item["filename"].endswith(".svg"))
+    assert html_file["filename"].startswith("测试流程图")
+    assert b"<svg" in html_file["content"]
+    assert svg_file["content"].startswith(b"<svg")
 

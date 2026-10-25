@@ -35,11 +35,9 @@ qdrant-client>=1.9.0
 # v8.13-b5g: 以下版本与源机 citrus-agent 环境钉死——保证拷贝的 .hf_cache 模型缓存格式与运行时库完全匹配
 lancedb==0.37.1
 fastembed==0.8.0
-# v8.18: 病害图像初筛也走 onnxruntime（src/vision）。
-#   Windows 想要 GPU（DirectML）请把下面这行换成 onnxruntime-directml>=1.20；
-#   两者不能同时装（同名包）。只有 CPU 时保持 onnxruntime 即可，功能自动降级。
+# ONNX Runtime is used by the E5 encoder and BGE reranker for CPU inference.
 onnxruntime>=1.16.0
-# v8.18: 图像解码/预处理（Pillow 只用于病害初筛，缺了则工具报"未就绪"）
+# Pillow decodes and normalizes images passed to the multimodal main model.
 Pillow>=10.0.0
 
 # Reranker (BAAI/bge-reranker-v2-m3, ONNX 导出需要)

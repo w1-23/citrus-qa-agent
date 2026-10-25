@@ -17,6 +17,9 @@ from openai import OpenAI
 #   （data/ state/ workspace/ .env 按 B3(a) 原地不动）。
 _REPO = Path(__file__).resolve().parents[2]
 PROJECT_ROOT = _REPO / "agent"          # 运行期数据根（data/state/workspace/.env）
+MODEL_CACHE_ROOT = Path(os.getenv(
+    "CITRUSQA_MODEL_CACHE_ROOT", str(PROJECT_ROOT / ".hf_cache")
+)).expanduser().resolve()
 CONFIG_DIR = _REPO / "02_配置_config"   # 配置文件新家（config.yaml 等）
 WEB_DIR = Path(__file__).resolve().parents[1] / "web"  # 前端与源码同目录维护
 
@@ -65,8 +68,7 @@ class Settings(BaseSettings):
     # the user-configurable main-model provider key.
     DEEPSEEK_WEB_API_KEY: str = ""
 
-    # ── 专用病害分类器：默认关闭，病害图片由主模型直接分析 ──
-    # 可通过环境变量 VISION_ENABLED=true 显式重新启用旧分类管道。
+    # 旧分类器配置仅为迁移兼容保留；当前工具链不注册该分类器。
     VISION_ENABLED: bool = False
     VISION_MODEL_DIR: str = Field(default_factory=lambda: _yaml_val("vision", "model_dir", default=""))
     VISION_CONFIDENCE_THRESHOLD: float = Field(
@@ -79,12 +81,6 @@ class Settings(BaseSettings):
     # 打开后补上 melanose / greening / 白粉病弱标签。
     VISION_ALLOW_UNLICENSED: bool = Field(
         default_factory=lambda: _yaml_val("vision", "allow_unlicensed_models", default=False))
-    # Optional capability override for the configured main model. When unset, the
-    # Agent infers support from the resolved provider/model and avoids sending an
-    # image payload to known text-only endpoints.
-    VISION_MAIN_MODEL_IMAGE_INPUT: Optional[bool] = Field(
-        default_factory=lambda: _yaml_val("vision", "main_model_image_input", default=None))
-
     # 2. Model Endpoints & Fallback Keys
     MAIN_API_KEY: str = Field(default="")
     MAIN_BASE_URL: str = "https://api.deepseek.com"
@@ -506,8 +502,7 @@ class Settings(BaseSettings):
                 self._runtime_model_cfg = {
                     k: str(v).strip() for k, v in data.items()
                     if k in ("main_model", "fast_model", "main_base_url", "fast_base_url",
-                             "context_window_tokens", "provider_id",
-                             "main_model_image_input")
+                             "context_window_tokens", "provider_id")
                     and str(v).strip()
                 }
         except Exception:
@@ -516,8 +511,7 @@ class Settings(BaseSettings):
     def save_runtime_model_config(self, *, main: str = "", fast: str = "",
                                   main_base_url: str = "", fast_base_url: str = "",
                                   context_window_tokens: int | str = "",
-                                  provider_id: str = "",
-                                  main_model_image_input: bool | None = None) -> bool:
+                                  provider_id: str = "") -> bool:
         cfg = {}
         for k, v in (("main_model", main), ("fast_model", fast),
                      ("main_base_url", main_base_url), ("fast_base_url", fast_base_url),
@@ -526,8 +520,6 @@ class Settings(BaseSettings):
             value = str(v or "").strip()
             if value:
                 cfg[k] = value
-        if main_model_image_input is not None:
-            cfg["main_model_image_input"] = "true" if main_model_image_input else "false"
         try:
             p = PROJECT_ROOT / "state" / "model_config.json"
             if not cfg:
@@ -550,16 +542,8 @@ class Settings(BaseSettings):
 
     @property
     def RESOLVED_MAIN_MODEL_IMAGE_INPUT(self) -> Optional[bool]:
-        runtime_value = self._runtime_model_cfg.get("main_model_image_input")
-        if runtime_value is not None:
-            return str(runtime_value).strip().lower() in {"1", "true", "yes", "on"}
-        if self.VISION_MAIN_MODEL_IMAGE_INPUT is not None:
-            return bool(self.VISION_MAIN_MODEL_IMAGE_INPUT)
-        model_id = self.RESOLVED_MAIN_MODEL.strip().lower().rsplit("/", 1)[-1]
-        if model_id in {"deepseek-flash", "deepseek-v4.1-flash", "deepseek-v4-flash",
-                        "deepseek-v4-flash-vision-exp"}:
-            return True
-        return None
+        from src.core.model_capabilities import model_supports_images
+        return model_supports_images(self.RESOLVED_PROVIDER_ID, self.RESOLVED_MAIN_MODEL)
 
     @property
     def RESOLVED_CONTEXT_BUDGET_MAX_TOKENS(self) -> int:
