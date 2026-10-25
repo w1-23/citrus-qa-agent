@@ -216,12 +216,18 @@ _TOOL_LABELS = {
     "local_bm25_search": "本地关键词核对",
     "local_dense_search": "本地语义检索",
     "local_hybrid_search": "本地混合检索",
+    "draw_svg": "draw",
     "citrus_rag_search": "本地语义检索",
     "pdf_read": "读取 PDF",
     "read_local_file": "读取文件",
     "write_local_file": "写入文件",
     "statistical_analysis": "统计分析",
     "experimental_design": "实验设计",
+    "inspect_uploaded_table": "读取表格结构",
+    "audit_uploaded_table": "审查表格数据",
+    "audit_uploaded_data_bundle": "跨表数据审查",
+    "verify_uploaded_references": "核验文献元数据",
+    "fetch_and_audit_open_supplements": "获取并审查公开补充数据",
     "call_write_agent": "写作助手",
     "call_analyze_agent": "分析助手",
 }
@@ -289,9 +295,13 @@ def emit_tool_call_start(tool_name: str, args: dict, tool_call_id: str = "") -> 
 
 def emit_tool_executing(message: str, tool_name: str = "", tool_call_id: str = "") -> None:
     """Emit a TOOL_EXECUTING event (progress / heartbeat during tool run)."""
+    display_name = _TOOL_LABELS.get(tool_name, tool_name.replace("_", " ")[:48] or "工具")
+    if tool_name and message.startswith(tool_name):
+        message = display_name + message[len(tool_name):]
     emit_encoded("tool_executing", {
         "message": message,
         "tool_name": tool_name,
+        "display_name": display_name,
         "tool_call_id": tool_call_id,
     })
 

@@ -9,8 +9,8 @@ def _get_provider_priority() -> list[str]:
     if yaml_priorities and isinstance(yaml_priorities, list):
         return yaml_priorities
     return [
-        "DmlExecutionProvider",
         "CUDAExecutionProvider",
+        "DmlExecutionProvider",
         "CPUExecutionProvider",
     ]
 

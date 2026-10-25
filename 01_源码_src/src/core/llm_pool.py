@@ -137,7 +137,7 @@ class _ThinkingOffWrapper:
 
 
 def _new_client(model, api_key, base_url, temperature, timeout, max_tokens,
-                extra_body: dict | None):
+                extra_body: dict | None, default_headers: dict | None = None):
     kw: dict = {}
     if extra_body:
         # v8.17.19: 关闭字段必须经 extra_body 原样透传网关——langchain-openai
@@ -146,6 +146,8 @@ def _new_client(model, api_key, base_url, temperature, timeout, max_tokens,
         # 请求 body 由网关裁决。v8.17.18 曾放 model_kwargs 顶层 thinking，
         # langchain 展开为 create() 关键字参数 → TypeError（retrieve-agent 全挂根因）。
         kw["extra_body"] = dict(extra_body)
+    if default_headers:
+        kw["default_headers"] = dict(default_headers)
     return ChatOpenAI(
         model=model,
         api_key=api_key,
@@ -180,19 +182,23 @@ def get_llm(
         cfg = getattr(settings, "MODEL_REASONING_OFF_BODY", None) or {}
         if isinstance(cfg, dict) and cfg:
             extra_body = dict(cfg)
-    key = (model, api_key, base_url, temperature, timeout, max_tokens, bool(extra_body))
+    provider_headers = getattr(settings, "RESOLVED_PROVIDER_HEADERS", {}) or {}
+    header_key = tuple(sorted(provider_headers.items()))
+    key = (model, api_key, base_url, temperature, timeout, max_tokens,
+           bool(extra_body), header_key)
     with _lock:
         inst = _cache.get(key)
         if inst is None:
             inst = _new_client(model, api_key, base_url, temperature, timeout,
-                               max_tokens, extra_body)
+                               max_tokens, extra_body, provider_headers)
             _cache[key] = inst
         if extra_body:
-            fkey = (model, api_key, base_url, temperature, timeout, max_tokens, False)
+            fkey = (model, api_key, base_url, temperature, timeout, max_tokens,
+                    False, header_key)
             fallback = _cache.get(fkey)
             if fallback is None:
                 fallback = _new_client(model, api_key, base_url, temperature,
-                                       timeout, max_tokens, None)
+                                       timeout, max_tokens, None, provider_headers)
                 _cache[fkey] = fallback
             return _ThinkingOffWrapper(inst, fallback)
         return inst

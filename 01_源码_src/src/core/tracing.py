@@ -18,6 +18,11 @@ _job_id: contextvars.ContextVar = contextvars.ContextVar(
 _session_id: contextvars.ContextVar = contextvars.ContextVar(
     "session_id", default="")
 
+# Authenticated account id, propagated into agent/tool execution so workspace
+# output paths and tool permissions remain isolated between browser accounts.
+_user_id: contextvars.ContextVar = contextvars.ContextVar(
+    "user_id", default=None)
+
 # Web tools are enabled by default; the Agent decides whether each query needs them.
 # Kept as request context so older tool execution paths remain compatible.
 _web_search_enabled: contextvars.ContextVar = contextvars.ContextVar(
@@ -88,6 +93,15 @@ def set_session_id(session_id: str) -> None:
 
 def get_session_id() -> str:
     return _session_id.get()
+
+
+def set_user_id(user_id: int | None) -> None:
+    _user_id.set(int(user_id) if user_id is not None else None)
+
+
+def get_user_id() -> int | None:
+    value = _user_id.get()
+    return int(value) if value is not None else None
 
 
 def new_request_id() -> str:

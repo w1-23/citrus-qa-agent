@@ -460,7 +460,9 @@ class MemoryStore:
         try:
             from src.config import settings
             from openai import OpenAI
-            client = OpenAI(api_key=settings.RESOLVED_MAIN_API_KEY, base_url=settings.RESOLVED_MAIN_BASE_URL)
+            client = OpenAI(api_key=settings.RESOLVED_MAIN_API_KEY,
+                            base_url=settings.RESOLVED_MAIN_BASE_URL,
+                            default_headers=settings.RESOLVED_PROVIDER_HEADERS)
             prompt = (
                 "从以下问答对中提取最多5条不可推导的核心事实，每条用一句话描述。\n"
                 "只保留那些如果不记录就会丢失的信息（如：具体数值、疾病-基因关联、实验条件）。\n"

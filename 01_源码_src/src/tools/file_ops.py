@@ -74,6 +74,20 @@ def write_local_file(path: str, content: str, mode: Literal["write", "append"] =
             tmp_path.write_text(content, encoding="utf-8")
             os.replace(tmp_path, target_path)
 
+        try:
+            from src.core.tracing import get_session_id, get_user_id
+            user_id, session_id = get_user_id(), get_session_id()
+            if user_id is not None and session_id:
+                user_root = (PROJECT_ROOT / "workspace" / "output" / "users" / str(int(user_id))).resolve()
+                if target_path.resolve().is_relative_to(user_root):
+                    relative = target_path.resolve().relative_to(user_root).as_posix()
+                    from src.auth import register_workspace_file
+                    register_workspace_file(int(user_id), session_id, relative)
+        except Exception:
+            # File creation remains available if indexing the user's workspace
+            # registry is temporarily unavailable; unregistered files are not served.
+            pass
+
         total_chars = len(content)
         size_kb = target_path.stat().st_size / 1024
         # v8.3.1: 内容预览——append 时显示【本轮新增块】而非文件开头，

@@ -242,6 +242,7 @@ def _get_sync_cls_llm():
             model=sig[0],
             api_key=sig[2],
             base_url=sig[1],
+            default_headers=settings.RESOLVED_PROVIDER_HEADERS,
             temperature=0,
             timeout=30,
         )
@@ -260,6 +261,7 @@ async def _classify_document(text: str) -> bool:
         client = OpenAI(
             api_key=settings.RESOLVED_FAST_API_KEY,
             base_url=settings.RESOLVED_FAST_BASE_URL,
+            default_headers=settings.RESOLVED_PROVIDER_HEADERS,
             timeout=10,
         )
         resp = client.chat.completions.create(
@@ -1824,7 +1826,7 @@ async def supervisor_node(state: AgentState) -> dict:
     query = state.get("query", "")
     format_hint = state.get("format_hint")
     session_id = state.get("session_id", "")
-    logger.info(f"[ExpertGraph:supervisor] query={query[:60]}...")
+    logger.info(f"[ExpertGraph:supervisor] query_chars={len(query)}")
 
     system_prompt = assemble_system_prompt(
         mode="expert",

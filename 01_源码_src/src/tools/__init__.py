@@ -11,6 +11,12 @@ from src.tools.analyze import (statistical_analysis, experimental_design)
 from src.tools.readfile import read_local_file
 from src.tools.file_ops import write_local_file
 from src.tools.draw_svg import draw_svg
+from src.research.tools import (
+    inspect_uploaded_table, audit_uploaded_table, export_literature_evidence,
+    audit_uploaded_data_bundle, verify_uploaded_references, fetch_and_audit_open_supplements,
+    export_paper_analysis, export_experiment_design, save_research_note,
+    recall_research_notes, export_research_notes, export_corpus_gap_report,
+)
 
 _TOOL_REGISTRY = [
     citrus_rag_search, pdf_read,
@@ -20,6 +26,10 @@ _TOOL_REGISTRY = [
     read_local_file, write_local_file,
     statistical_analysis, experimental_design,
     draw_svg,
+    inspect_uploaded_table, audit_uploaded_table, export_literature_evidence,
+    audit_uploaded_data_bundle, verify_uploaded_references, fetch_and_audit_open_supplements,
+    export_paper_analysis, export_experiment_design, save_research_note,
+    recall_research_notes, export_research_notes, export_corpus_gap_report,
 ]
 _TOOL_REGISTRY_BY_NAME: dict[str, object] = {t.name: t for t in _TOOL_REGISTRY}
 
@@ -42,6 +52,18 @@ for _tool, _category, _key in (
     (local_bm25_search, "rag", "local_bm25_search"),
     (local_dense_search, "rag", "local_dense_search"),
     (local_hybrid_search, "rag", "local_hybrid_search"),
+    (inspect_uploaded_table, "research", "research_data"),
+    (audit_uploaded_table, "research", "research_data"),
+    (audit_uploaded_data_bundle, "research", "research_data"),
+    (verify_uploaded_references, "research", "research_references"),
+    (fetch_and_audit_open_supplements, "research", "research_web_fetch"),
+    (export_literature_evidence, "research", "research_artifacts"),
+    (export_paper_analysis, "research", "research_artifacts"),
+    (export_experiment_design, "research", "research_artifacts"),
+    (save_research_note, "research", "research_notes"),
+    (recall_research_notes, "research", "research_notes"),
+    (export_research_notes, "research", "research_artifacts"),
+    (export_corpus_gap_report, "research", "research_artifacts"),
 ):
     if get_tool_spec(_tool.name) is None:
         register_tool(_tool, category=_category, is_readonly=True, concurrency_key=_key)

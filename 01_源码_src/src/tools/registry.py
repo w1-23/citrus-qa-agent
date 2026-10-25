@@ -129,6 +129,10 @@ _READONLY_TOOLS = frozenset({
     "citrus_rag_search", "pdf_read", "deepseek_search", "deepseek_fetch", "deepseek_fetch_paper",
     "local_bm25_search", "local_dense_search", "local_hybrid_search",
     "read_local_file", "statistical_analysis", "experimental_design",
+    "inspect_uploaded_table", "audit_uploaded_table", "export_literature_evidence",
+    "audit_uploaded_data_bundle", "verify_uploaded_references", "fetch_and_audit_open_supplements",
+    "export_paper_analysis", "export_experiment_design", "save_research_note",
+    "recall_research_notes", "export_research_notes", "export_corpus_gap_report",
 })
 
 

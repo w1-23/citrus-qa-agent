@@ -26,6 +26,29 @@ LOCAL_CORPUS_FAMILIES = {
     "literature", "ucr_varieties", "deng_variety_book", "experiment_methods",
 }
 
+# The Agent prompt uses stable English category names while the indexed corpus
+# stores Chinese labels. Normalize both sides before applying category filters.
+_LOCAL_CATEGORY_ALIASES = {
+    "agriculture/ecology": "农业与生态",
+    "pathology/resistance": "病理与抗性",
+    "physiology/metabolism": "生理与代谢",
+    "nutrition/health": "营养与健康",
+    "breeding/biotechnology": "育种与生物技术",
+    "genomics/evolution": "基因组与进化",
+}
+
+
+def _normalized_local_category(value: object) -> str:
+    text = str(value or "").strip().casefold()
+    return _LOCAL_CATEGORY_ALIASES.get(text, text)
+
+
+def _local_category_allowed(row: dict, categories: set[str]) -> bool:
+    if not categories:
+        return True
+    actual = _normalized_local_category(row.get("l1_category"))
+    return actual in categories
+
 
 def local_corpus_family(chunk: Dict) -> str:
     """Map an indexed record to the curated corpus families exposed to the Agent."""
@@ -69,6 +92,8 @@ def _bm25_search_parallel(bm25: BM25Plus, queries: List[str], k: int = 20) -> Li
     累加段串行（9 路实测 5.2s → 预期 ≈2-3x）。顺序与旧串行循环完全一致：
     按 queries 提交顺序取结果拼接（每路 top_k 独立、无共享状态）。
     """
+    from src.retrieval.local_query_language import require_english_local_query
+    queries = [require_english_local_query(q, field="bm25_queries") for q in queries]
     if len(queries) <= 1:
         return [hit for q in queries for hit in bm25.top_k(q, k=k)]
     workers = min(4, len(queries))
@@ -727,6 +752,16 @@ class MultiBatchRetriever:
         """
         if not queries:
             return []
+        from src.retrieval.local_query_language import require_english_local_query
+        # Final boundary guard: every lexical/vector query and the reranker query
+        # must be English before any worker or embedder is started.
+        queries = [require_english_local_query(q, field="queries") for q in queries]
+        if rerank_query:
+            english_rerank_query = require_english_local_query(rerank_query, field="rerank_query")
+        elif original_query:
+            english_rerank_query = require_english_local_query(original_query, field="original_query")
+        else:
+            english_rerank_query = queries[0]
         _t0 = time.time()
         logger.info(f"[Retriever] 启动多路并发检索 | 总 Query 数: {len(queries)}")
 
@@ -770,7 +805,7 @@ class MultiBatchRetriever:
                 getattr(settings, 'RRF_WEIGHT_BM25', 1.0),
             ],
             stream_labels=["unique_v", "unique_b"],
-            rerank_query=rerank_query or original_query or queries[0],
+            rerank_query=english_rerank_query,
             mode="search_multi",
             t0=_t0,
             stage_ms={"embed": dt_embed, "vector": dt_vector, "bm25": dt_bm25},
@@ -794,15 +829,17 @@ class MultiBatchRetriever:
                               corpus_types: list[str] | None = None,
                               l1_categories: list[str] | None = None) -> List[Dict]:
         """Vector-only retrieval limited to selected corpus families/categories."""
+        from src.retrieval.local_query_language import require_english_local_query
+        query = require_english_local_query(query)
         if not query or not self.global_chunks:
             return []
         allowed = ({str(x).strip() for x in corpus_types} & LOCAL_CORPUS_FAMILIES
                    if corpus_types is not None else LOCAL_CORPUS_FAMILIES)
-        categories = {str(x).strip().lower() for x in (l1_categories or []) if str(x).strip()}
+        categories = {_normalized_local_category(x) for x in (l1_categories or []) if str(x).strip()}
         eligible = {
             int(row["_global_idx"]) for row in self.global_chunks
             if local_corpus_family(row) in allowed
-            and (not categories or str(row.get("l1_category") or "").strip().lower() in categories)
+            and _local_category_allowed(row, categories)
         }
         if not eligible:
             return []
@@ -838,15 +875,17 @@ class MultiBatchRetriever:
                              corpus_types: list[str] | None = None,
                              l1_categories: list[str] | None = None) -> List[Dict]:
         """BM25-only retrieval over selected corpus families/categories."""
+        from src.retrieval.local_query_language import require_english_local_query
+        query = require_english_local_query(query)
         allowed = {str(x).strip() for x in (corpus_types or [])}
         allowed &= LOCAL_CORPUS_FAMILIES
         if not query or not allowed:
             return []
-        categories = {str(x).strip().lower() for x in (l1_categories or []) if str(x).strip()}
+        categories = {_normalized_local_category(x) for x in (l1_categories or []) if str(x).strip()}
         eligible = {
             int(row["_global_idx"]) for row in self.global_chunks
             if local_corpus_family(row) in allowed
-            and (not categories or str(row.get("l1_category") or "").strip().lower() in categories)
+            and _local_category_allowed(row, categories)
         }
         hits = self.bm25.top_k(query, k=max(int(limit) * 12, 80),
                                allowed_doc_ids=eligible)
@@ -863,6 +902,9 @@ class MultiBatchRetriever:
         v8.13-b4b: 仅保留命中流生成（原/假想双 dense + BM25），RRF 融合/去重/阈值/
         日志统一走 _fuse_rerank_select；阈值拦截或无 rerank 结果时回退基础检索。
         """
+        from src.retrieval.local_query_language import require_english_local_query
+        original_query = require_english_local_query(original_query, field="original_query")
+        hyde_answer = require_english_local_query(hyde_answer, field="hyde_answer")
         _t0 = time.time()
         logger.info(f"[Retriever] HyDE hybrid search | query_len={len(original_query)} hyde_len={len(hyde_answer)}")
 

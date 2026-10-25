@@ -10,7 +10,7 @@
 <script src="https://cdn.jsdelivr.net/npm/marked@4.3.0/marked.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/assets/app.css?v=2">
+<link rel="stylesheet" href="/assets/app.css?v=9">
 </head>
 <body>
 
@@ -21,6 +21,9 @@
   <div class="logo-mark">C</div>
   <h1>CitrusQA</h1>
   <div class="header-actions">
+    <span id="accountLabel" class="account-label"></span>
+    <button id="adminUsersBtn" class="theme-btn" onclick="openAdminUsers()" title="账号管理" hidden>用户</button>
+    <button id="logoutBtn" class="theme-btn" onclick="logoutAccount()" title="退出登录" hidden>退出</button>
     <button class="ctx-circle-btn" id="ctxCircleBtn" onclick="toggleCtxDrawer()" title="上下文用量">
       <svg viewBox="0 0 36 36" width="22" height="22">
         <circle class="ctx-btn-bg" cx="18" cy="18" r="15" />
@@ -28,53 +31,96 @@
       </svg>
     </button>
     <button class="theme-btn" id="themeBtn" onclick="toggleTheme()" title="切换主题">⊙</button>
-    <button class="theme-btn" id="modelSettingsBtn" onclick="openSettingsModal()" title="设置（API Key / 模型切换）">⚙</button>
+    <button class="theme-btn" id="modelSettingsBtn" onclick="openSettingsModal()" title="设置（API Key / 模型切换）" hidden>⚙</button>
   </div>
 </header>
+
+<div class="auth-gate" id="authGate">
+  <form class="auth-card" onsubmit="event.preventDefault();authenticate(document.getElementById('authMode').value)">
+    <div class="auth-brand">🍊 CitrusQA</div>
+    <div class="auth-title">登录或注册</div>
+    <input id="authUsername" required minlength="3" maxlength="32" autocomplete="username" placeholder="用户名（3–32 位）">
+    <input id="authPassword" required minlength="10" maxlength="256" type="password" autocomplete="current-password" placeholder="密码（至少 10 位）">
+    <select id="authMode"><option value="login">登录</option><option value="register">创建账号</option></select>
+    <div class="auth-error" id="authError"></div>
+    <button class="api-save" type="submit">继续</button>
+    <p>账号数据彼此隔离。问题、回答和工具执行摘要会供管理员排障，保留一年；附件只记录文件名、类型和大小。对话与附件内容可能发送给管理员配置的模型和联网服务。</p>
+  </form>
+</div>
+
+<div class="admin-users-modal" id="adminUsersModal" hidden>
+  <section class="admin-users-card">
+    <header><strong>管理面板</strong><button type="button" onclick="closeAdminUsers()">关闭</button></header>
+    <details open><summary>账号</summary>
+    <div id="adminUsersList">正在加载…</div>
+    </details>
+    <details open><summary>队列 <span id="adminQueueStatus"></span></summary>
+      <div class="admin-audit-list" id="adminAuditList">正在加载…</div>
+      <button type="button" onclick="loadAdminAudit()">刷新记录</button>
+    </details>
+  </section>
+</div>
 
 <!-- v8.5.0 开源版：首次启动 API Key 引导（未配置时全屏遮罩，配置后隐藏） -->
 <div class="api-setup-overlay" id="apiSetupOverlay" style="display:none">
   <div class="api-setup-card">
-    <div class="api-logo">🍊 CitrusQA <button class="api-close" id="settingsCloseBtn" onclick="closeSettingsModal()" style="display:none" title="关闭">✕</button></div>
-    <div class="api-sub">填写主模型 Provider API Key、模型 ID 与 API 地址；主模型默认 DeepSeek，也支持兼容的其他服务。联网搜索与网页抓取使用独立的 DeepSeek Search/Fetch Key。</div>
+    <div class="api-heading"><div class="api-logo">🍊 <span>CitrusQA</span></div><button class="api-close" id="settingsCloseBtn" onclick="closeSettingsModal()" style="display:none" title="关闭">✕</button></div>
+    <div class="api-title">模型设置</div>
 
-    <label for="apiKeyInput">主模型 Provider API Key</label>
-    <input type="password" id="apiKeyInput" placeholder="当前模型服务商提供的 API Key" autocomplete="off">
+    <div class="configured-providers" id="configuredProvidersList" hidden></div>
+    <label for="mainProviderSelect">主模型服务商</label>
+    <select id="mainProviderSelect" onchange="onProviderChange()">
+      <option value="deepseek">DeepSeek</option>
+      <option value="opencode_go">OpenCode Go</option>
+      <option value="zhipu">智谱 GLM</option>
+      <option value="aliyun_bailian">阿里云百炼（通义千问）</option>
+      <option value="custom_openai">其他 OpenAI 兼容服务</option>
+    </select>
+    <label for="mainApiBaseUrlInput">API 地址</label>
+    <input type="url" id="mainApiBaseUrlInput" placeholder="https://…" autocomplete="url">
+    <div class="api-warn" id="providerEndpointHint"></div>
+    <label for="apiKeyInput">API Key</label>
+    <input type="password" id="apiKeyInput" placeholder="输入服务商 API Key" autocomplete="new-password">
     <div class="api-error" id="apiKeyError"></div>
     <div class="api-actions">
-      <button class="api-save" id="apiKeySave" onclick="saveApiKey()">保存 Provider Key</button>
+      <button class="api-secondary" id="providerModelsBtn" onclick="fetchProviderModels()">获取模型列表</button>
     </div>
 
-    <label for="webSearchApiKeyInput">DeepSeek Search/Fetch API Key</label>
-    <input type="password" id="webSearchApiKeyInput" placeholder="粘贴 DeepSeek Search/Fetch 专用 Key" autocomplete="off">
-    <div class="api-warn" id="webSearchApiKeyStatus">联网搜索与抓取使用此密钥，与主模型 Provider Key 分开保存。</div>
-    <div class="api-error" id="webSearchApiKeyError"></div>
-    <div class="api-actions">
-      <button class="api-save" id="webSearchApiKeySave" onclick="saveWebSearchApiKey()">保存联网 Search/Fetch Key</button>
-    </div>
-
-    <hr class="api-divider">
-    <label for="mainModelInput">主模型（默认 deepseek-v4-flash）</label>
-    <input type="text" id="mainModelInput" placeholder="留空=默认；如 qwen-turbo" autocomplete="off">
-    <div class="api-warn">请将上下文窗口设为不超过所选模型实际支持的 token 数；长对话会按此预算压缩历史。</div>
-    <label for="modelContextWindowInput">主模型上下文窗口（token）</label>
-    <input type="number" id="modelContextWindowInput" min="4096" max="1000000" step="1024" placeholder="留空=项目默认；例如 262144">
-    <label for="fastModelInput">快模型（压缩/意图，留空=跟随主模型）</label>
-    <input type="text" id="fastModelInput" placeholder="留空=跟随主模型" autocomplete="off">
-    <div style="height:10px"></div>
-    <label for="mainBaseUrlInput">主 API 地址（默认 https://api.deepseek.com）</label>
-    <input type="text" id="mainBaseUrlInput" placeholder="如 https://dashscope.aliyuncs.com/compatible-mode/v1" autocomplete="off">
-    <label for="fastBaseUrlInput">快模型 API 地址（留空=跟随主地址）</label>
-    <input type="text" id="fastBaseUrlInput" placeholder="留空=跟随主地址" autocomplete="off">
+    <label for="mainModelSelect">模型</label>
+    <select id="mainModelSelect" disabled>
+      <option value="">先填写 Key 并获取模型列表</option>
+    </select>
+    <div class="api-warn">“免费”按官方模型目录标注；免费政策可能调整。</div>
+    <details class="api-advanced">
+      <summary>高级设置</summary>
+      <label for="modelContextWindowInput">上下文窗口（token）</label>
+      <input type="number" id="modelContextWindowInput" min="4096" max="1000000" step="1024" placeholder="默认">
+    </details>
     <div class="api-error" id="modelConfigError"></div>
     <div class="api-actions">
-      <button class="api-save" id="modelConfigSave" onclick="saveModelConfig()">保存模型配置</button>
+      <button class="api-save" id="modelConfigSave" onclick="saveProviderConfig()">保存</button>
     </div>
-    <div class="api-note">配置主模型时填写 Provider API 地址、模型 ID 与该 Provider 的 Key；Provider 需兼容 OpenAI Chat Completions、流式输出及工具调用。DeepSeek: https://api.deepseek.com ｜ 通义 DashScope: https://dashscope.aliyuncs.com/compatible-mode/v1。Search/Fetch Key 单独保存在当前服务端 state/，立即生效、无需重启。</div>
+    <details class="api-advanced web-search-settings">
+      <summary>联网搜索</summary>
+      <label for="webSearchProviderSelect">搜索服务商</label>
+      <select id="webSearchProviderSelect" onchange="onWebSearchProviderChange()">
+        <option value="deepseek_search_fetch">DeepSeek Search/Fetch</option>
+        <option value="zhipu_web_search">智谱 Web Search（¥0.01/次）</option>
+      </select>
+      <label for="webSearchApiKeyInput">搜索 API Key</label>
+      <input type="password" id="webSearchApiKeyInput" placeholder="输入对应服务商的 Key" autocomplete="new-password">
+      <label for="webFetchApiKeyInput" id="webFetchApiKeyLabel" hidden>DeepSeek Fetch Key（可选）</label>
+      <input type="password" id="webFetchApiKeyInput" placeholder="需要网页全文读取时填写" autocomplete="new-password" hidden>
+      <div class="api-warn" id="webSearchKeyHint">DeepSeek Fetch 继续使用 DeepSeek Search/Fetch Key。</div>
+      <div class="api-error" id="webSearchConfigError"></div>
+      <div class="api-actions">
+        <button class="api-save" id="webSearchConfigSave" onclick="saveWebSearchConfig()">保存搜索配置</button>
+      </div>
+    </details>
   </div>
 </div>
 
-<div class="main-container" id="mainContainer">
+<div class="main-container" id="mainContainer" style="visibility:hidden">
   <div class="sidebar" id="appSidebar">
     <div class="sidebar-section expanded" id="session-section">
       <div class="sidebar-header" onclick="toggleSection('session')">
@@ -104,6 +150,7 @@
       <!-- v8.10: 输入气泡——上部两行输入（Enter 发送 / Shift+Enter 换行），
            底栏左下权限徽标（点击弹菜单），右下发送/停止圆形按钮 -->
       <div class="input-box">
+        <div id="attachment-list" class="attachment-list" aria-live="polite"></div>
         <textarea id="user-input" rows="2" placeholder="有什么想做的？(Enter 发送 / Shift+Enter 换行)" onkeydown="if(event.key==='Enter'&amp;&amp;!event.shiftKey&amp;&amp;!event.isComposing)sendMsg()"></textarea>
         <div class="input-bottom">
           <!-- v8.4.8 HITL 服务端化：权限模式徽标 + 切换菜单（v8.10 迁入输入框左下角
@@ -121,6 +168,8 @@
             <div class="perm-menu-note">重启后回落到 config.yaml 配置值</div>
           </div>
           <div class="input-actions">
+            <input id="attachment-input" type="file" accept="image/jpeg,image/png,image/webp,image/gif,.pdf,.docx,.csv,.tsv,.xlsx,.xls,.xlsm" multiple hidden onchange="handleAttachmentSelection(this.files)">
+            <button type="button" id="attachment-btn" class="attach-btn" onclick="document.getElementById('attachment-input').click()" title="附加图片、PDF、Word 或 CSV/XLSX 表格">＋ 附件</button>
             <!-- v8.7: 小巧圆形图标按钮；运行中由 JS 隐藏本按钮、显示停止按钮 -->
             <button class="send-btn" id="send-btn" onclick="sendMsg()" title="发送 (Enter)">↑</button>
             <!-- v8.4.11 停止按钮：运行中显示；点击中断当前任务（修改问题后重新发送）
@@ -158,7 +207,7 @@
 </div>
 
 
-<script src="/assets/app.js?v=4"></script>
+<script src="/assets/app.js?v=14"></script>
 </body>
 </html>
 

@@ -1205,6 +1205,7 @@ async def run_write_pipeline(task: dict, material_pack: list[dict],
                 model=settings.RESOLVED_MAIN_MODEL,
                 api_key=settings.RESOLVED_MAIN_API_KEY,
                 base_url=settings.RESOLVED_MAIN_BASE_URL,
+                default_headers=settings.RESOLVED_PROVIDER_HEADERS,
                 temperature=0,
                 timeout=settings.PIPELINE_SECTION_TIMEOUT,
             )

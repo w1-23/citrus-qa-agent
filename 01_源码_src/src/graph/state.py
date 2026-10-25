@@ -9,6 +9,8 @@ class AgentState(TypedDict, total=False):
     messages: Annotated[list[BaseMessage], add_messages]
     query: str
     visualization_enabled: bool
+    attachment_context: str
+    image_attachments: list[dict]
     request_deadline: float
     agent_no_prefetch_hints: bool
     session_id: str

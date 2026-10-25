@@ -146,7 +146,7 @@ async def light_retrieve_node(state: AgentState) -> dict:
             except Exception:
                 pass
         else:
-            logger.warning(f"[LightGraph:retrieve] 翻译失败, 回退原始查询: {query[:60]}...")
+            logger.warning(f"[LightGraph:retrieve] 翻译失败, query_chars={len(query)}")
         results = await asyncio.to_thread(rag.search, search_query)
         main = list(results or [])
         content = format_rag_context(main, "main") if main else "未检索到相关文献。"
@@ -191,7 +191,7 @@ async def light_supervisor_node(state: AgentState) -> dict:
     """
     query = state.get("query", "")
     format_hint = state.get("format_hint")
-    logger.info(f"[LightGraph:supervisor] query={query[:60]}...")
+    logger.info(f"[LightGraph:supervisor] query_chars={len(query)}")
 
     system_prompt = assemble_system_prompt(
         mode="light", format_hint=format_hint, query=query,

@@ -61,7 +61,7 @@ class Reranker:
         self._providers = raw_providers
         if any("DmlExecutionProvider" in p or "CUDAExecutionProvider" in p for p in raw_providers):
             self._needs_lock = True
-        logger.info(f"[Reranker] 配置 | Provider: {raw_providers} | Per-thread: {not self._needs_lock}")
+        logger.info(f"[Reranker] 配置 | Provider: {raw_providers} | 进程内共享模型")
 
     def _create_session(self):
         if not self._cache_dir.exists():
@@ -77,14 +77,13 @@ class Reranker:
         return model, tokenizer
 
     def _get_model(self):
-        if self._needs_lock:
-            with self._shared_lock:
-                if self._shared_model is None:
-                    self._shared_model, self._shared_tokenizer = self._create_session()
+        # One model instance per service process for both CPU and GPU. The old
+        # CPU path cached a separate ONNX session per worker thread, which could
+        # multiply memory use under concurrent requests.
+        with self._shared_lock:
+            if self._shared_model is None:
+                self._shared_model, self._shared_tokenizer = self._create_session()
             return self._shared_model, self._shared_tokenizer
-        if not hasattr(self._thread_local, "_model") or self._thread_local._model is None:
-            self._thread_local._model, self._thread_local._tokenizer = self._create_session()
-        return self._thread_local._model, self._thread_local._tokenizer
 
     def _safe_rerank(self, query: str, chunks: List[Dict], top_k: int) -> List[Dict]:
         for attempt in range(2):
@@ -101,7 +100,8 @@ class Reranker:
                         with self._shared_lock:
                             outputs = model(**inputs)
                 else:
-                    outputs = model(**inputs)
+                    with self._shared_lock:
+                        outputs = model(**inputs)
                 logits = outputs.logits.squeeze(-1).tolist()
                 if isinstance(logits, float):
                     logits = [logits]
@@ -118,7 +118,6 @@ class Reranker:
                         self._shared_model = None
                         self._shared_tokenizer = None
                         self._providers = ["CPUExecutionProvider"]
-                        self._thread_local = threading.local()
                     continue
                 raise
             except Exception as e:
@@ -130,7 +129,6 @@ class Reranker:
                         self._shared_model = None
                         self._shared_tokenizer = None
                         self._providers = ["CPUExecutionProvider"]
-                        self._thread_local = threading.local()
                     continue
                 raise
 

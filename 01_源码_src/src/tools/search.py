@@ -342,8 +342,9 @@ def citrus_rag_search(query: str) -> tuple[str, dict]:
 
     Use only after DeepSeek Search/Fetch when a material evidence gap remains,
     or when local full-text comparison is specifically useful. Do not use as a
-    default first lookup. Supports Chinese and returns paper excerpts, DOI and
-    relevance scores.
+    default first lookup. Chinese input is translated to an English-only query;
+    failed translation stops before BM25 or embedding. Returns paper excerpts,
+    DOI and relevance scores.
     """
 
     if not query or not query.strip():
@@ -360,17 +361,44 @@ def citrus_rag_search(query: str) -> tuple[str, dict]:
 
         return f"[ERR_PARSE] 查询词包含非法字符（<>\"'\\;），请移除后重试", {"main_results": []}
 
+    original_query = query
+    from src.retrieval.local_query_language import normalize_local_query
+    search_query, language_info = normalize_local_query(query)
+    if search_query is None:
+        reason = str(language_info.get("error") or "English local query unavailable")
+        logger.warning("[citrus_rag_search] skipped before retrieval: %s", reason)
+        try:
+            from src.core.diag import diag
+            diag("local_query_language", tool="citrus_rag_search", status="translation_error",
+                 input_chars=len(original_query), error=reason,
+                 bm25_candidates=0, dense_candidates=0)
+        except Exception:
+            pass
+        return (f"[LOCAL_SEARCH_TRANSLATION_ERROR] {reason}; no BM25 or dense request was sent.",
+                {"main_results": [], "local_status": "translation_error",
+                 "original_query": original_query, "local_query_language": "english",
+                 "bm25_candidates": 0, "dense_candidates": 0, "error": reason})
+
+    try:
+        from src.core.diag import diag
+        diag("local_query_language", tool="citrus_rag_search", status="ready",
+             translation_used=bool(language_info.get("translation_used")),
+             local_query_language="english", query_chars=len(search_query),
+             original_query_chars=len(original_query))
+    except Exception:
+        pass
+
     hyde_answer = None
     cache_key = None
     # v8.15: 缓存命中检查——在 HyDE 前短路（命中即省 HyDE+embed+vector+rerank 全套 3~10s）
     try:
         t0 = time.perf_counter()
         rag = _get_rag()
-        cache_key = _rag_cache_key(query, bool(getattr(settings, 'RAG_HYDE_ENABLED', True)), rag)
+        cache_key = _rag_cache_key(search_query, bool(getattr(settings, 'RAG_HYDE_ENABLED', True)), rag)
         cached = _rag_cache_get(cache_key)
         if cached is not None:
             elapsed = (time.perf_counter() - t0) * 1000
-            logger.info(f"[citrus_rag_search] 检索缓存命中: {query[:60]}... ({len(cached)} 条)")
+            logger.info(f"[citrus_rag_search] 检索缓存命中: query_chars={len(search_query)} ({len(cached)} 条)")
             try:
                 from src.core.progress_bus import emit_progress
                 emit_progress("tool_progress", {
@@ -384,27 +412,17 @@ def citrus_rag_search(query: str) -> tuple[str, dict]:
     except Exception:
         cache_key = None
 
-    # ── v10.2: 英文规范化（所有模式都先生成翻译）────────────────────────
-    # 设计意图：raw（生产）= 翻译后英文单路；full（实验性）= 翻译 + MQ×3 + SUM×3~5。
-    # 翻译输入优先取 HITL 确认后的意图（contextvar），空则回退工具入参。
-    # 失败 → 回退原始 query（fail-soft，不阻断检索）。
-    _translate_src = _translate_input(query)
-    translation = _cached_translation(_translate_src)
+    # The normalized query is the only query sent to any local retrieval backend.
+    translation = search_query if language_info.get("translation_used") else None
     if translation:
-        logger.info(f"[Translate] {len(_translate_src)}c -> {len(translation)}c: "
-                    f"{translation[:80]}...")
+        logger.info(f"[Translate] local query normalized to English: query_chars={len(search_query)}")
         try:
             from src.core.progress_bus import emit_progress
             emit_progress("tool_progress", {
-                "message": f"英文规范化完毕, 开始检索: {translation[:60]}",
+                "message": f"英文规范化完毕, 开始检索（{len(search_query)} 字符）",
                 "tool_call_id": ""})
         except Exception:
             pass
-    else:
-        logger.warning(f"[Translate] 失败/跳过, 回退原始查询: {query[:60]}...")
-
-    # 精排/检索使用的英文查询（翻译失败时为原始 query）
-    search_query = translation or query
 
     # v9.4 (P0#5): 查询消融模式路由。settings.QUERY_MODE 取值：
     # full=多路（翻译 + MQ×3 + SUM×3~5，实验性）；raw=翻译后单路（生产默认）；
@@ -425,7 +443,7 @@ def citrus_rag_search(query: str) -> tuple[str, dict]:
             hyde_parsed["hyde"] = search_query
             _hyd_q = 1 + len(hyde_parsed.get("multi_query") or []) \
                 + len(hyde_parsed.get("summary") or [])
-            logger.info(f"[Translate] multi-path {_hyd_q} 路查询 for: {query[:60]}...")
+            logger.info(f"[Translate] multi-path {_hyd_q} 路查询, query_chars={len(query)}")
             try:
                 from src.core.progress_bus import emit_progress
                 emit_progress("tool_progress", {
@@ -433,13 +451,13 @@ def citrus_rag_search(query: str) -> tuple[str, dict]:
                     "tool_call_id": ""})
             except Exception: pass
         else:
-            logger.debug(f"[Translate] 多路扩展不可用, 降级单路: {query[:60]}...")
+            logger.debug(f"[Translate] 多路扩展不可用, 降级单路; query_chars={len(query)}")
 
     try:
 
         if cache_key is None:
             rag = _get_rag()
-            cache_key = _rag_cache_key(query, bool(getattr(settings, 'RAG_HYDE_ENABLED', True)), rag)
+            cache_key = _rag_cache_key(search_query, bool(getattr(settings, 'RAG_HYDE_ENABLED', True)), rag)
         t0 = time.perf_counter()
 
         # ── v10.15（单路检索恢复 · 改动 A.3）：**已由现有机制满足，无需新代码** ────
@@ -447,7 +465,8 @@ def citrus_rag_search(query: str) -> tuple[str, dict]:
         #   本文件 L385-401 已经是这个语义 ——
         #     `_translate_src = _translate_input(query)`   # 优先 HITL 确认后的意图
         #     `translation    = _cached_translation(...)`
-        #     `search_query   = translation or query`      # ← 用户问题的英文翻译
+        #     Local retrieval now requires a validated English query; if
+        #     translation fails, normalize_local_query blocks retrieval.
         #   而 `_translate_input()`（L929）优先返回 `tracing.original_query()`
         #   （api/main.py 写入的 HITL 确认意图），**回退**工具入参。
         #   ⇒ `search_query` 就是"用户问题"的翻译，**不是**检索角度自己的词。
@@ -583,7 +602,9 @@ _TRANSLATE_PROMPT = (
     "2. Preserve all entities: cultivar names, gene IDs, disease names, chemical names.\n"
     "3. Use standard English scientific terminology (e.g., \"huanglongbing\" → \"HLB\",\n"
     "   \"sour orange\" → \"Citrus aurantium\").\n"
-    "4. Do not invent numbers, p-values, gene IDs, or citations.\n"
+    "4. Never leave Chinese characters in the translation. Translate Chinese common names to\n"
+    "   established English names where known; otherwise use Latin names or pinyin.\n"
+    "5. Do not invent numbers, p-values, gene IDs, or citations.\n"
     # ── v10.14（阶段 1 撤销）：**恢复"忠实翻译"口径** ─────────────────────────
     #   依《输出架构重构 · 最终确认文档》§四 第 1 项 + §七 关键点 1：
     #   **翻译只做忠实翻译，不做检索式化，不做命令式加工。**
@@ -747,7 +768,7 @@ def parse_translation(raw: str) -> str | None:
     """拆解纯翻译输出：只取一行英文。
 
     容错：剥代码围栏；跳过空行与常见前缀（"Translation:" 等）；剥首尾引号；
-    英文校验（CJK 占比 >5% 判失败）；空/非英文 → None（调用方回退原 query）。
+    英文校验（CJK 占比 >5% 判失败）；空/非英文 → None，由本地检索守卫失败关闭。
     幂等：输入已是英文时模型通常原样返回 → 结果与输入等价，不额外损伤。
     """
     if not raw or not raw.strip():
@@ -822,7 +843,7 @@ def _generate_english_translation(text: str) -> str | None:
     """把（中文）意图翻译为一行英文科学术语（fast 模型）。
 
     v8.15.3c 同款防线：空 content 重试一次（v4-flash 思维链偶发吃光 max_tokens）。
-    返回单行英文；非英文/空/异常 → None（调用方回退原始 query，不阻断检索）。
+    返回单行英文；非英文/空/异常 → None，本地检索守卫会阻止未通过校验的查询。
     思维链关闭字段经 extra_body 原样透传网关；被拒（400/422）→ 去参重试一次。
     """
     if not text or not str(text).strip():
@@ -871,12 +892,12 @@ def _generate_english_translation(text: str) -> str | None:
                 break
             logger.warning(f"[Translate] 第 {attempt} 次生成结果为空，重试一次")
         if not answer:
-            logger.warning("[Translate] 两次生成均为空，回退原始查询")
+            logger.warning("[Translate] 两次生成均为空；本地检索将失败关闭")
             return None
         parsed = parse_translation(answer)
         if parsed is None:
             logger.warning(
-                f"[Translate] 输出不可解析（非英文/空），回退原始查询: {answer[:60]!r}")
+                f"[Translate] 输出不可解析（非英文/空）；本地检索将失败关闭: {answer[:60]!r}")
             return None
         # ── v10.14（阶段 2 · 计划 §八 8.1）：**验证，不清洗** ───────────────────
         #   命中命令式措辞 ⇒ 判失败 ⇒ 重试一次 ⇒ 仍失败由调用方用原 `intent_confirmed`。
@@ -899,7 +920,7 @@ def _generate_english_translation(text: str) -> str | None:
                         logger.warning(f"[Translate] 重试仍失败（{why2}）: {_p2[:60]!r}")
                 except Exception as _e_rt:                     # noqa: BLE001
                     logger.warning(f"[Translate] 重试异常: {_e_rt}")
-            logger.warning("[Translate] 验证两轮均失败 → 回退原始 intent（调用方用原问题检索）")
+            logger.warning("[Translate] 验证两轮均失败；本地检索将失败关闭")
             return None
         return parsed
     except Exception as e:

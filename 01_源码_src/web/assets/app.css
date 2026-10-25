@@ -174,6 +174,23 @@ header h1 { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
   display: flex;
   flex-direction: column;
   min-width: 0;
+  position: relative;
+}
+.chat-panel.file-drag-over::after {
+  content: '拖放图片、PDF 或 Word 到这里';
+  position: absolute;
+  z-index: 20;
+  inset: 14px 14px 104px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed var(--accent, #e87917);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--bg-surface, #fff) 88%, transparent);
+  color: var(--text-primary, #222);
+  font-size: 16px;
+  font-weight: 600;
+  pointer-events: none;
 }
 #chat-container {
   flex: 1;
@@ -270,6 +287,12 @@ header h1 { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
   background: var(--accent-muted);
   border-color: rgba(217,119,6,0.12);
 }
+.sent-attachment-count { margin-top: 5px; color: var(--text-secondary); font-size: 11px; }
+.sent-attachment-gallery { display: flex; flex-wrap: wrap; gap: 7px; max-width: 340px; margin-top: 9px; }
+.sent-attachment-card { position: relative; width: 112px; height: 92px; flex: 0 0 112px; overflow: hidden; border: 1px solid rgba(0,0,0,.12); border-radius: 9px; background: rgba(255,255,255,.55); }
+.sent-attachment-image { display: block; width: 100%; height: 100%; object-fit: cover; }
+.sent-attachment-icon { display: flex; width: 100%; height: 100%; align-items: center; justify-content: center; color: var(--accent); font-size: 18px; font-weight: 700; }
+.sent-attachment-name { position: absolute; right: 0; bottom: 0; left: 0; overflow: hidden; padding: 17px 5px 4px; background: linear-gradient(transparent, rgba(0,0,0,.72)); color: #fff; font-size: 10px; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
 .content p { margin: 0 0 7px 0; }
 .content p:last-child { margin-bottom: 0; }
 .content h1 { font-size: 1.20em; font-weight: 700; margin: 14px 0 6px; color: var(--text-primary); }
@@ -410,6 +433,14 @@ footer {
   display: flex; align-items: center; gap: 8px;
 }
 .input-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.attach-btn { border: 1px solid var(--border, #ddd); border-radius: 999px; background: transparent; color: var(--text-secondary, #777); padding: 5px 9px; font: inherit; font-size: 12px; cursor: pointer; }
+.attachment-list { display: none; flex-wrap: wrap; gap: 8px; max-height: 112px; overflow-y: auto; padding: 2px 0 8px; }
+.attachment-preview-card { position: relative; width: 76px; height: 76px; flex: 0 0 76px; overflow: hidden; border: 1px solid var(--border-hairline); border-radius: 10px; background: var(--bg-elevated); }
+.attachment-preview-image { display: block; width: 100%; height: 100%; object-fit: cover; }
+.attachment-preview-icon { display: flex; width: 100%; height: 100%; align-items: center; justify-content: center; color: var(--accent); font-size: 17px; font-weight: 700; }
+.attachment-preview-name { position: absolute; right: 0; bottom: 0; left: 0; overflow: hidden; padding: 16px 4px 3px; background: linear-gradient(transparent, rgba(0,0,0,.72)); color: #fff; font-size: 10px; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-preview-remove { position: absolute; top: 3px; right: 3px; display: flex; width: 22px; height: 22px; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 50%; background: rgba(0,0,0,.68); color: #fff; font-size: 17px; line-height: 1; cursor: pointer; }
+.attachment-preview-remove:hover { background: var(--error, #c33); }
 /* v8.7: 发送与停止同位置切换——小巧圆形按钮（v8.10 起位于底栏右下角） */
 .send-btn, .stop-btn {
   width: 32px; height: 32px;
@@ -575,76 +606,119 @@ footer {
 .plan-body { margin-top: 6px; line-height: 1.7; }
 .plan-item { color: var(--text-secondary); word-break: break-word; }
 
-/* v8.5.0 开源版：首次启动 API Key 引导遮罩 */
+/* Compact model settings panel, aligned with the main chat surface. */
 .api-setup-overlay {
   position: fixed; inset: 0; z-index: 10000;
-  background: var(--bg-deep);
+  background: var(--overlay);
+  backdrop-filter: blur(3px);
   display: flex; align-items: center; justify-content: center;
+  padding: 16px;
 }
 .api-setup-card {
-  width: min(440px, calc(100vw - 48px));
+  width: min(390px, calc(100vw - 32px));
   background: var(--bg-elevated);
   border: 1px solid var(--border-hover);
-  border-radius: 14px;
-  padding: 26px 28px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+  border-radius: 16px;
+  padding: 20px 22px 22px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.20);
+  max-height: 92vh;
+  overflow-y: auto;
 }
+.api-heading { display: flex; align-items: center; justify-content: space-between; }
 .api-setup-card .api-logo {
-  font-size: 22px; font-weight: 700;
+  font-size: 17px; font-weight: 700;
   color: var(--accent);
-  margin-bottom: 6px;
+  display: flex; align-items: center; gap: 6px;
 }
-.api-setup-card .api-sub {
-  font-size: 13px; color: var(--text-muted);
-  margin-bottom: 16px; line-height: 1.6;
+.api-title {
+  color: var(--text-primary); font-size: 16px; font-weight: 600;
+  margin: 14px 0 18px;
 }
+.configured-providers {
+  border: 1px solid var(--border-hairline);
+  border-radius: 10px;
+  margin: -6px 0 14px;
+  overflow: hidden;
+}
+.configured-providers[hidden] { display: none; }
+.configured-providers-title {
+  padding: 9px 11px 5px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.configured-provider-row {
+  min-height: 38px;
+  padding: 5px 9px 7px 11px;
+  display: flex; align-items: center; gap: 8px;
+  border-top: 1px solid var(--border-hairline);
+}
+.configured-provider-name { flex: 1; color: var(--text-primary); font-size: 12px; }
+.configured-provider-state { color: var(--success); font-size: 11px; white-space: nowrap; }
+.configured-provider-edit {
+  border: 1px solid var(--border-hairline); border-radius: 7px;
+  background: var(--bg-surface); color: var(--text-secondary);
+  padding: 4px 9px; font: inherit; font-size: 11px; cursor: pointer;
+}
+.configured-provider-edit:hover { border-color: var(--accent); color: var(--accent); }
 .api-setup-card label {
   display: block;
-  font-size: 12px; font-weight: 600;
+  font-size: 12px; font-weight: 500;
   color: var(--text-secondary);
-  margin-bottom: 6px;
+  margin: 13px 0 6px;
 }
-.api-setup-card input {
-  width: 100%; padding: 10px 14px;
+.api-setup-card input,
+.api-setup-card select {
+  width: 100%; height: 42px; padding: 0 12px;
   background: var(--bg-surface);
   border: 1px solid var(--border-hairline);
-  border-radius: 8px;
-  font-size: 14px; font-family: var(--font-mono);
+  border-radius: 9px;
+  font-size: 13px; font-family: inherit;
   color: var(--text-primary);
   outline: none;
   transition: all 0.2s var(--ease-out-quint);
 }
-.api-setup-card input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+.api-setup-card input:focus,
+.api-setup-card select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+.api-setup-card #webFetchApiKeyLabel[hidden],
+.api-setup-card #webFetchApiKeyInput[hidden] { display: none; }
+.api-setup-card select:disabled { opacity: 0.65; }
+.api-setup-card input[readonly] { color: var(--text-muted); background: var(--bg-hover); }
 .api-setup-card .api-error {
   color: var(--error);
   font-size: 12px;
-  margin-top: 8px;
-  min-height: 16px;
+  line-height: 1.45;
+  margin-top: 6px;
 }
+.api-setup-card .api-error:empty,
+.api-setup-card .api-warn:empty { display: none; }
+.api-setup-card .api-warn { color: var(--text-muted); font-size: 11px; margin: 6px 0 0; }
 .api-setup-card .api-actions {
-  display: flex; gap: 10px; margin-top: 14px;
+  display: flex; gap: 8px; margin-top: 10px;
 }
 .api-setup-card .api-save {
-  flex: 1; padding: 10px 0;
+  flex: 1; height: 42px;
   background: var(--accent); color: #FFF;
-  border: none; border-radius: 8px;
+  border: none; border-radius: 9px;
   font-weight: 600; font-size: 13px;
   cursor: pointer; font-family: inherit;
   transition: all 0.2s var(--ease-out-quint);
 }
 .api-setup-card .api-save:hover { background: var(--accent-hover); }
 .api-setup-card .api-save:disabled { opacity: 0.5; cursor: wait; }
-.api-setup-card .api-note {
-  margin-top: 14px;
-  font-size: 11px; color: var(--text-muted);
-  line-height: 1.6;
+.api-setup-card .api-secondary {
+  width: 100%; height: 38px; border: 1px solid var(--border-hairline);
+  border-radius: 9px; background: var(--bg-surface); color: var(--text-secondary);
+  font-family: inherit; font-size: 12px; font-weight: 500;
+  cursor: pointer; transition: all 0.2s var(--ease-out-quint);
 }
-/* v8.14.1 设置面板：模型切换 + 分隔线 + 可滚动 + 关闭按钮 */
-.api-setup-card { max-height: 92vh; overflow-y: auto; }
-.api-divider { border: none; border-top: 1px solid var(--border-hairline); margin: 18px 0 14px; }
-.api-close { background: none; border: none; color: var(--text-muted); font-size: 18px; cursor: pointer; float: right; line-height: 1; padding: 0 2px; }
+.api-setup-card .api-secondary:hover { color: var(--accent); border-color: var(--accent); }
+.api-setup-card .api-secondary:disabled { opacity: 0.55; cursor: wait; }
+.api-advanced { margin-top: 16px; border-top: 1px solid var(--border-hairline); padding-top: 12px; }
+.api-advanced summary { color: var(--text-muted); font-size: 12px; cursor: pointer; user-select: none; }
+.api-advanced[open] label { margin-top: 12px; }
+.api-close { width: 28px; height: 28px; border: 0; border-radius: 8px; background: transparent; color: var(--text-muted); font-size: 17px; cursor: pointer; line-height: 1; }
+.api-close:hover { color: var(--text-primary); background: var(--bg-hover); }
 .api-setup-card .api-close:hover { color: var(--text-primary); }
-.api-warn { color: #e0a34b; font-size: 11px; line-height: 1.6; margin: -2px 0 12px; }
 
 /* ── Sidebar ── */
 .sidebar {
@@ -1241,3 +1315,31 @@ footer {
   background: var(--accent-muted);
   color: var(--accent);
 }
+
+.account-label { color: var(--text-muted); font-size: 12px; }
+.auth-gate, .admin-users-modal { position: fixed; inset: 0; z-index: 10000; display: grid; place-items: center; padding: 18px; background: color-mix(in srgb, var(--bg-app) 86%, #000 14%); }
+.auth-gate[hidden], .admin-users-modal[hidden] { display: none; }
+.auth-card, .admin-users-card { width: min(420px, 100%); padding: 24px; border: 1px solid var(--border-hairline); border-radius: 18px; background: var(--bg-surface); box-shadow: 0 20px 70px #0002; }
+.auth-brand { color: var(--accent); font-weight: 700; font-size: 20px; }
+.auth-title { margin: 18px 0 14px; font-size: 16px; font-weight: 600; }
+.auth-card input, .auth-card select { box-sizing: border-box; width: 100%; margin: 6px 0; padding: 11px 12px; border: 1px solid var(--border-hairline); border-radius: 10px; background: var(--bg-app); color: var(--text-primary); font: inherit; }
+.auth-card .api-save { width: 100%; margin-top: 12px; }
+.auth-card p { color: var(--text-muted); font-size: 11px; line-height: 1.6; }
+.auth-error { min-height: 18px; color: var(--error); font-size: 12px; }
+.admin-users-card { width: min(620px, 100%); max-height: 80vh; overflow: auto; }
+.admin-users-card > header { display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; }
+.admin-user-row { display:flex; justify-content:space-between; gap:12px; align-items:center; padding:12px 0; border-top:1px solid var(--border-hairline); font-size:12px; }
+.admin-user-actions { display:flex; gap:5px; }
+.admin-user-actions button, .admin-users-card header button { border:1px solid var(--border-hairline); border-radius:8px; background:transparent; color:var(--text-primary); padding:6px 8px; cursor:pointer; }
+.admin-users-card > details { border-top:1px solid var(--border-hairline); padding:12px 0; }
+.admin-users-card > details > summary { cursor:pointer; font-weight:600; margin-bottom:10px; }
+.admin-audit-list { max-height:46vh; overflow:auto; }
+.admin-audit-row { padding:10px 0; border-top:1px solid var(--border-hairline); font-size:12px; line-height:1.55; }
+.admin-audit-row summary { cursor:pointer; }
+.admin-audit-row p { white-space:pre-wrap; overflow-wrap:anywhere; margin:8px 0; }
+@media (max-width: 640px) { .account-label { display:none; } .admin-user-row { align-items:flex-start; flex-direction:column; } }
+.paper-review-btn, .paper-review-result button { border:1px solid var(--border-hairline); border-radius:7px; background:var(--bg-app); color:var(--text-primary); padding:5px 8px; font:inherit; font-size:11px; cursor:pointer; }
+.paper-review-result { flex-basis:100%; max-width:min(650px, 80vw); max-height:340px; overflow:auto; padding:10px; border-top:1px solid var(--border-hairline); color:var(--text-secondary); font-size:11px; line-height:1.55; }
+.paper-review-result > a { display:inline-block; margin:8px 0; color:var(--accent); }
+.paper-reference-row { display:flex; align-items:flex-start; gap:6px; padding:7px 0; border-top:1px solid var(--border-hairline); }
+.paper-reference-row span { flex:1; min-width:120px; }

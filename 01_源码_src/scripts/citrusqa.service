@@ -1,0 +1,22 @@
+[Unit]
+Description=CitrusQA web service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wangziqiang
+Group=wangziqiang
+WorkingDirectory=/home/WZQ/CitrusQA/01_源码_src
+ExecStart=/home/WZQ/CitrusQA/04_脚本_scripts/run_server.sh
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=60
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/home/WZQ/CitrusQA
+
+[Install]
+WantedBy=multi-user.target

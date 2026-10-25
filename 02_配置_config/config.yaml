@@ -115,8 +115,8 @@ embedder:
 
 onnx:
   provider_priority:
-    - "DmlExecutionProvider"
     - "CUDAExecutionProvider"
+    - "DmlExecutionProvider"
     - "CPUExecutionProvider"
 
 # ── Compute Scheduler ──
@@ -307,3 +307,22 @@ tools:
       category: analysis
       readonly: true
       concurrency_key: analysis
+
+# ── Vision：柑橘病害图像初筛（v8.16）──────────────────────────────
+# 工具只在「本轮请求带了图片」时暴露给模型；模型文件由
+# 04_脚本_scripts/prepare_models.py --vision 下载到 model_dir。
+vision:
+  enabled: true
+  # 留空 = <项目根>/agent/models/vision
+  model_dir: ""
+  # top-1 低于该阈值 → 返回“不确定”，不硬给病名
+  confidence_threshold: 0.60
+  # top-1 与 top-2 的差值低于该值 → 视为模型间不一致
+  margin_threshold: 0.12
+  # 判为“健康”但病害信号仍高于该值 → 降级为不确定（缺素/虫害陷阱）
+  healthy_veto: 0.25
+  # 许可不明的权重（dima806 ViT / PlantVillage MobileNetV2）是否加载：
+  # 关闭 → 只跑 apache-2.0 的 ConvNeXt-Small（8 类，无黄龙病/黑点病/白粉病弱标签）
+  allow_unlicensed_models: true
+
+

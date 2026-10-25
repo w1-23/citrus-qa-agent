@@ -70,7 +70,7 @@ class Embedder:
     def _load_config(self):
         if self._force_cpu:
             self._providers = ["CPUExecutionProvider"]
-            logger.info(f"[Embedder] 配置 | Provider: CPU(forced) | Per-thread: yes | 模型: {self.model_name}")
+            logger.info(f"[Embedder] 配置 | Provider: CPU(forced) | 进程内共享模型 | 模型: {self.model_name}")
             return
         from src.engine.hardware import get_ort_providers
         raw = get_ort_providers()
@@ -78,11 +78,13 @@ class Embedder:
         if "DmlExecutionProvider" in raw:
             self._needs_lock = True
         label = raw[0] if raw else "CPU"
-        logger.info(f"[Embedder] 配置 | Provider: {label} | Per-thread: {not self._needs_lock} | 模型: {self.model_name}")
+        logger.info(f"[Embedder] 配置 | Provider: {label} | 进程内共享模型 | 模型: {self.model_name}")
 
     def _create_session(self):
         with self._singleton_lock:
-            model = TextEmbedding(model_name=self.model_name, providers=self._providers)
+            cpu_threads = max(1, int(os.getenv("CITRUSQA_CPU_THREADS", "8")))
+            model = TextEmbedding(model_name=self.model_name, providers=self._providers,
+                                  threads=cpu_threads)
             if self._dim is None:
                 test_emb = list(model.embed(["validate"]))
                 self._dim = len(test_emb[0])
