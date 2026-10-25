@@ -217,7 +217,7 @@ class Settings(BaseSettings):
     #   原硬编码 2000 会被内部检索+思考吃光 → stop_reason=max_tokens → 只拿到引用
     #   条目、拿不到综合正文）；②每轮"按正文过滤 + 重编号"后的 cited_refs 落盘，
     #   /citations 刷新路径改读它并去掉 LIMIT 10，侧栏与正文标号一致。
-    VERSION: str = "9.6.3"
+    VERSION: str = "1.0"
 
     # ── Context Engineering (阶段1: 静态前缀灰度开关) ──
     # true = SystemMessage 字节级稳定（format 指南/策略卡片/skills 移出前缀，

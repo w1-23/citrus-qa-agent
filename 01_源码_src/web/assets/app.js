@@ -728,7 +728,7 @@ function loadRuntimeConfig() {
 }
 /* v8.4.5: 版本单源——后端 /api/v2/config.version 下发，静态文案仅为离线回退 */
 function _appVersion() {
-  return (_runtimeConfig && _runtimeConfig.version) || '9.4.6';
+  return (_runtimeConfig && _runtimeConfig.version) || '1.0';
 }
 function applyAppVersion() {
   var v = _appVersion();
