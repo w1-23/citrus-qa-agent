@@ -472,13 +472,34 @@ def local_hybrid_search(query: str, corpus_types: list[str], limit: int = 6,
     from src.config import settings
 
     rag = get_rag()
+    from src.retrieval.query_cache import build_cache_key, get_query_cache
+    query_cache = get_query_cache(settings)
+    cache_miss_status = "miss" if query_cache is not None else "disabled"
+    cache_key = build_cache_key(query, families, l1_categories or [], limit, id(rag), settings)
+    if query_cache is not None:
+        cached = query_cache.get(cache_key)
+        if cached is not None:
+            cached_artifact = cached.get("artifact") or {"main_results": []}
+            cached_artifact.update({
+                "original_query": original_query, "query": query,
+                "translation_used": translation_used, "rag_cache_status": "hit",
+                "cached_elapsed_ms": float(cached_artifact.get("elapsed_ms", 0) or 0),
+                "elapsed_ms": 0.0,
+            })
+            try:
+                from src.core.web_failure_ledger import record_local_check
+                results = cached_artifact.get("main_results") or []
+                record_local_check(query, families, "hit" if results else "zero_hit", results)
+            except Exception:
+                pass
+            return str(cached.get("content") or ""), cached_artifact
     candidate_limit = min(max(limit * 6, 24), 72)
     errors: dict[str, str] = {}
     bm25_rows: list[dict] = []
     dense_rows: list[dict] = []
-    future_bm25 = RAG_CHANNEL_EXECUTOR.submit(
+    future_bm25 = RAG_CHANNEL_EXECUTOR.submit_wait(
         rag.search_bm25_filtered, query, candidate_limit, families, l1_categories)
-    future_dense = RAG_CHANNEL_EXECUTOR.submit(
+    future_dense = RAG_CHANNEL_EXECUTOR.submit_wait(
         rag.search_dense_filtered, query, candidate_limit, families, l1_categories)
     for name, future in (("bm25", future_bm25), ("dense", future_dense)):
         try:
@@ -553,13 +574,16 @@ def local_hybrid_search(query: str, corpus_types: list[str], limit: int = 6,
     if not rows:
         reason = "; ".join(f"{k}: {v}" for k, v in errors.items())
         suffix = f" Retrieval errors: {reason}." if reason else ""
-        return (f"No matching local hybrid records were found.{suffix}",
-                {"main_results": [], "corpus_types": families,
+        no_hit_content = f"No matching local hybrid records were found.{suffix}"
+        no_hit_artifact = {"main_results": [], "corpus_types": families,
                  "local_status": "zero_hit", "bm25_candidates": len(bm25_rows),
                  "dense_candidates": len(dense_rows), "rrf_candidates": len(fused),
                  "errors": errors, "elapsed_ms": elapsed_ms,
                  "query": query, "original_query": original_query,
-                 "translation_used": translation_used})
+                 "translation_used": translation_used, "rag_cache_status": cache_miss_status}
+        if query_cache is not None and not errors:
+            query_cache.set(cache_key, {"content": no_hit_content, "artifact": no_hit_artifact})
+        return no_hit_content, no_hit_artifact
 
     labels = "; ".join(_CORPUS_LABELS[x] for x in families)
     parts = [f"Local hybrid retrieval selected {len(rows)} record(s) from: {labels}. "
@@ -579,7 +603,8 @@ def local_hybrid_search(query: str, corpus_types: list[str], limit: int = 6,
         parts.append("\nChannel degradation: " + "; ".join(f"{k}: {v}" for k, v in errors.items()))
     if rerank_error:
         parts.append("\nReranking was unavailable; the returned order uses RRF rank.")
-    return "\n".join(parts), {
+    result_content = "\n".join(parts)
+    result_artifact = {
         "main_results": rows, "corpus_types": families, "local_status": "hit",
         "bm25_candidates": len(bm25_rows), "dense_candidates": len(dense_rows),
         "rrf_candidates": len(fused), "errors": errors,
@@ -587,4 +612,8 @@ def local_hybrid_search(query: str, corpus_types: list[str], limit: int = 6,
         "translation_used": translation_used,
         "reranker_fallback": bool(rerank_error), "elapsed_ms": elapsed_ms,
         "decay_filtered": decay_filtered, "adjacent_decay_ratio": decay_ratio,
+        "rag_cache_status": cache_miss_status,
     }
+    if query_cache is not None:
+        query_cache.set(cache_key, {"content": result_content, "artifact": result_artifact})
+    return result_content, result_artifact

@@ -101,7 +101,7 @@ def _bm25_search_parallel(bm25: BM25Plus, queries: List[str], k: int = 20) -> Li
     queries = [require_english_local_query(q, field="bm25_queries") for q in queries]
     if len(queries) <= 1:
         return [hit for q in queries for hit in bm25.top_k(q, k=k)]
-    futures = [RAG_BM25_EXECUTOR.submit(bm25.top_k, q, k) for q in queries]
+    futures = [RAG_BM25_EXECUTOR.submit_wait(bm25.top_k, q, k) for q in queries]
     out: List[Tuple[int, float]] = []
     for f in futures:  # 按提交顺序取回 → 与串行逐位一致
         out.extend(f.result())
@@ -775,7 +775,7 @@ class MultiBatchRetriever:
         # BM25 为只读 numpy 向量化路径（多线程安全），多查询并行可再获 ≈2-3x 收益，
         # 结果与串行逐位一致（每路 top_k 独立、无共享状态）。
         t_bm25 = time.time()
-        _bm25_futures = [RAG_BM25_EXECUTOR.submit(
+        _bm25_futures = [RAG_BM25_EXECUTOR.submit_wait(
             self.bm25.top_k, query, settings.TOP_K_BM25) for query in queries]
 
         t_embed = time.time()
@@ -791,7 +791,7 @@ class MultiBatchRetriever:
         batch_names = list(self.lance_tables.keys()) if self.backend == "lancedb" \
             else list(self.batches.keys())
         all_vector_hits: List[Tuple[int, float]] = []
-        futures = [RAG_VECTOR_EXECUTOR.submit(self._vector_search, name, vec,
+        futures = [RAG_VECTOR_EXECUTOR.submit_wait(self._vector_search, name, vec,
                                               settings.TOP_K_VECTOR)
                    for vec in query_vecs for name in batch_names]
         for future in as_completed(futures):
@@ -855,7 +855,7 @@ class MultiBatchRetriever:
         if not batch_names:
             return []
         hits: list[tuple[int, float]] = []
-        futures = [RAG_VECTOR_EXECUTOR.submit(
+        futures = [RAG_VECTOR_EXECUTOR.submit_wait(
             self._vector_search, name, query_vec,
             min(max(int(limit) * 3, settings.TOP_K_VECTOR, 40), 200))
             for name in batch_names]
@@ -922,7 +922,7 @@ class MultiBatchRetriever:
         t_embed = time.time()
         # v8.15 BM25 并行化：BM25 与 HyDE 双路 embedding 重叠执行（ONNX 释放 GIL）
         t_bm25 = time.time()
-        _bm25_fut = RAG_BM25_EXECUTOR.submit(
+        _bm25_fut = RAG_BM25_EXECUTOR.submit_wait(
             self.bm25.top_k, original_query, k=settings.TOP_K_BM25)
         with RAG_MODEL_SEMAPHORE:
             orig_vec = self.embedder.embed_query(original_query)
@@ -935,10 +935,10 @@ class MultiBatchRetriever:
         t_vector = time.time()
         orig_v_hits: List[Tuple[int, float]] = []
         hyde_v_hits: List[Tuple[int, float]] = []
-        futures_orig = [RAG_VECTOR_EXECUTOR.submit(
+        futures_orig = [RAG_VECTOR_EXECUTOR.submit_wait(
             self._vector_search, name, orig_vec, settings.TOP_K_VECTOR)
             for name in batch_names]
-        futures_hyde = [RAG_VECTOR_EXECUTOR.submit(
+        futures_hyde = [RAG_VECTOR_EXECUTOR.submit_wait(
             self._vector_search, name, hyde_vec, settings.TOP_K_VECTOR)
             for name in batch_names]
         for future in as_completed(futures_orig):

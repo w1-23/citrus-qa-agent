@@ -9,8 +9,9 @@ def _get_provider_priority() -> list[str]:
     if yaml_priorities and isinstance(yaml_priorities, list):
         return yaml_priorities
     return [
-        "CUDAExecutionProvider",
-        "DmlExecutionProvider",
+        "ROCMExecutionProvider",  # AMD ROCm
+        "CUDAExecutionProvider",  # NVIDIA CUDA
+        "DmlExecutionProvider",   # Windows DirectML
         "CPUExecutionProvider",
     ]
 

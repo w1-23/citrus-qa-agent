@@ -10,7 +10,7 @@
 <script src="https://cdn.jsdelivr.net/npm/marked@4.3.0/marked.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/assets/app.css?v=10">
+<link rel="stylesheet" href="/assets/app.css?v=15">
 </head>
 <body>
 
@@ -36,7 +36,17 @@
     <div class="auth-title">登录或注册</div>
     <input id="authUsername" required minlength="3" maxlength="32" autocomplete="username" placeholder="用户名（3–32 位）">
     <input id="authPassword" required minlength="10" maxlength="256" type="password" autocomplete="current-password" placeholder="密码（至少 10 位）">
-    <select id="authMode"><option value="login">登录</option><option value="register">创建账号</option></select>
+    <select id="authMode" onchange="syncAuthAvatarPicker()"><option value="login">登录</option><option value="register">创建账号</option></select>
+    <div class="auth-avatar-picker" id="authAvatarPicker" hidden>
+      <div class="avatar-picker-heading"><span>选一个小头像</span><span class="avatar-picker-note">默认 01</span></div>
+      <div class="avatar-grid" id="authAvatarGrid" role="listbox" aria-label="选择注册头像"></div>
+      <div class="avatar-upload-row">
+        <img class="avatar-preview" id="authAvatarPreview" src="/assets/avatars/01.webp" alt="当前选择的头像">
+        <span class="avatar-preview-label" id="authAvatarLabel">已选 01</span>
+        <label class="avatar-upload-button">上传头像<input id="authAvatarFile" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" hidden onchange="previewSignupAvatar(this)"></label>
+      </div>
+      <div class="avatar-picker-error" id="authAvatarError" aria-live="polite"></div>
+    </div>
     <div class="auth-error" id="authError"></div>
     <button class="api-save" type="submit">继续</button>
     <p>账号数据彼此隔离。问题、回答和工具执行摘要会供管理员排障，保留一年；附件只记录文件名、类型和大小。对话与附件内容可能发送给管理员配置的模型和联网服务。公开访问时，连接还会经过 Cloudflare 转发。</p>
@@ -124,6 +134,9 @@
         <div class="account-menu-heading">账户与设置</div>
         <a id="adminUsersBtn" class="account-menu-item" href="/admin" hidden><span aria-hidden="true">▦</span> 管理后台</a>
         <button id="modelSettingsBtn" class="account-menu-item" onclick="setAccountMenuOpen(false); openSettingsModal()" hidden><span aria-hidden="true">⚙</span> 模型与服务设置</button>
+        <button class="account-menu-item" onclick="setAccountMenuOpen(false); openAvatarSettings()"><span aria-hidden="true">☺</span> 更换头像</button>
+        <button class="account-menu-item" onclick="setAccountMenuOpen(false); openMemorySettings()"><span aria-hidden="true">▤</span> 账号记忆</button>
+        <button class="account-menu-item" onclick="setAccountMenuOpen(false); openOnboardingGuide()"><span aria-hidden="true">✦</span> 使用指南</button>
         <button id="themeBtn" class="account-menu-item" onclick="toggleTheme(); setAccountMenuOpen(false)"><span aria-hidden="true">◐</span> 切换主题</button>
         <div class="account-menu-divider"></div>
         <button id="logoutBtn" class="account-menu-item danger" onclick="logoutAccount()"><span aria-hidden="true">↪</span> 退出登录</button>
@@ -139,32 +152,18 @@
   <div class="chat-panel">
     <div id="chat-container">
       <div class="message bot">
-        <div class="avatar">◆</div>
+        <div class="avatar"><img class="agent-avatar-image" src="/assets/avatars/08.webp" alt="CitrusQA 助手" width="36" height="36"></div>
         <div class="content">您好！有什么想了解的？</div>
       </div>
     </div>
 
     <footer>
-      <!-- v8.10: 输入气泡——上部两行输入（Enter 发送 / Shift+Enter 换行），
-           底栏左下权限徽标（点击弹菜单），右下发送/停止圆形按钮 -->
+      <!-- 输入区：消息输入、可视化选项、附件与发送控件 -->
       <div class="input-box">
         <div id="attachment-list" class="attachment-list" aria-live="polite"></div>
         <textarea id="user-input" rows="2" placeholder="有什么想做的？(Enter 发送 / Shift+Enter 换行)" onkeydown="if(event.key==='Enter'&amp;&amp;!event.shiftKey&amp;&amp;!event.isComposing)sendMsg()"></textarea>
         <div class="input-bottom">
-          <!-- v8.4.8 HITL 服务端化：权限模式徽标 + 切换菜单（v8.10 迁入输入框左下角
-               v8.10f SVG 线条图标：护盾+对号 全权 / 护盾+笔 询问 / 护盾+感叹号 只读） -->
           <button class="visual-toggle" id="visualToggle" type="button" aria-pressed="false" onclick="toggleVisualization()" title="允许主模型在有帮助时生成 SVG 可视化">可视化</button>
-          <button class="perm-badge" id="permBadge" onclick="togglePermMenu(event)" title="权限模式（HITL）：点击切换">
-            <span class="perm-ico" id="permIco"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 2.8v5.2c0 4.3-2.9 7.8-7 9.5-4.1-1.7-7-5.2-7-9.5V5.8z"/><path d="M8.6 12.4l2.3 2.3 4.5-4.8"/></svg></span>
-            <span class="perm-name" id="permName">全权</span>
-          </button>
-          <div class="perm-menu" id="permMenu" style="display:none">
-            <div class="perm-menu-title">权限模式（HITL）</div>
-            <div class="perm-menu-item" data-mode="auto_workspace" onclick="setPermMode('auto_workspace')"><span class="perm-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 2.8v5.2c0 4.3-2.9 7.8-7 9.5-4.1-1.7-7-5.2-7-9.5V5.8z"/><path d="M8.6 12.4l2.3 2.3 4.5-4.8"/></svg></span><span>全权 — 工作区写文件免询问（默认）</span></div>
-            <div class="perm-menu-item" data-mode="ask" onclick="setPermMode('ask')"><span class="perm-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 2.8v5.2c0 4.3-2.9 7.8-7 9.5-4.1-1.7-7-5.2-7-9.5V5.8z"/><path d="M14.4 6.2l3.4 3.4L9.5 18H7.5v-2z"/><path d="M13 8.6l2.4 2.4"/></svg></span><span>询问 — 危险操作弹卡片审批</span></div>
-            <div class="perm-menu-item" data-mode="deny" onclick="setPermMode('deny')"><span class="perm-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 2.8v5.2c0 4.3-2.9 7.8-7 9.5-4.1-1.7-7-5.2-7-9.5V5.8z"/><path d="M12 8.2v5.2"/><path d="M12 16.6h.01"/></svg></span><span>只读 — 一律拒绝危险操作</span></div>
-            <div class="perm-menu-note">重启后回落到 config.yaml 配置值</div>
-          </div>
           <div class="input-actions">
             <input id="attachment-input" type="file" accept="image/jpeg,image/png,image/webp,image/gif,.pdf,.docx,.csv,.tsv,.xlsx,.xls,.xlsm,.xlsb" multiple hidden onchange="handleAttachmentSelection(this.files)">
             <button type="button" id="attachment-btn" class="attach-btn" onclick="document.getElementById('attachment-input').click()" title="附加图片、PDF、Word 或 CSV/XLSX 表格">＋ 附件</button>
@@ -179,6 +178,51 @@
     </footer>
   </div>
 
+</div>
+
+<div class="avatar-settings-overlay" id="avatarSettingsOverlay" hidden role="dialog" aria-modal="true" aria-labelledby="avatarSettingsTitle" onclick="if(event.target===this)closeAvatarSettings()">
+  <section class="avatar-settings-card">
+    <button class="overlay-close" type="button" onclick="closeAvatarSettings()" aria-label="关闭">×</button>
+    <div class="overlay-eyebrow">CitrusQA 账户</div>
+    <h2 id="avatarSettingsTitle">更换头像</h2>
+    <p class="overlay-subtitle">选一枚柑橘伙伴，或上传 JPG、PNG、WebP（不超过 5 MB）。</p>
+    <div class="avatar-settings-preview-row">
+      <img class="avatar-settings-preview" id="settingsAvatarPreview" src="/assets/avatars/01.webp" alt="头像预览">
+      <span id="settingsAvatarLabel">预设头像 01</span>
+      <label class="avatar-upload-button">上传图片<input id="settingsAvatarFile" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" hidden onchange="previewSettingsAvatar(this)"></label>
+    </div>
+    <div class="avatar-grid settings-avatar-grid" id="settingsAvatarGrid" role="listbox" aria-label="选择头像"></div>
+    <div class="avatar-picker-error" id="settingsAvatarError" aria-live="polite"></div>
+    <div class="overlay-actions"><button class="api-secondary" type="button" onclick="closeAvatarSettings()">取消</button><button class="api-save" type="button" id="saveAvatarButton" onclick="saveAccountAvatar()">保存头像</button></div>
+  </section>
+</div>
+
+<div class="onboarding-overlay" id="onboardingOverlay" hidden role="dialog" aria-modal="true" aria-labelledby="onboardingTitle" onclick="if(event.target===this)completeOnboarding()">
+  <section class="onboarding-card">
+    <button class="overlay-close" type="button" onclick="completeOnboarding()" aria-label="关闭">×</button>
+    <div class="onboarding-brand"><span class="onboarding-fruit" aria-hidden="true"><svg viewBox="0 0 44 44"><path d="M23 10c3-6 8-7 12-5-2 5-6 8-12 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="M22 12c-8-2-15 4-15 13s6 14 15 14 15-6 15-14-7-15-15-13Z" fill="currentColor" opacity=".18" stroke="currentColor" stroke-width="2"/><path d="M22 12c0-3 1-5 3-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></span><span>认识一下 CitrusQA</span></div>
+    <h2 id="onboardingTitle">柑橘科研，有问题就从这里开始</h2>
+    <p class="onboarding-lead">提问、上传材料，主 Agent 会按你的需求调用检索和科研工具。</p>
+    <div class="onboarding-feature-grid">
+      <article><span class="onboarding-icon green">⌕</span><div><strong>问答与文献</strong><p>科研问题可结合网页检索和本地柑橘语料。例：柑橘黄龙病有哪些早期证据？</p></div></article>
+      <article><span class="onboarding-icon orange">▧</span><div><strong>上传图片与论文</strong><p>附上图片、PDF、Word 或表格后，直接说明希望模型做什么。</p></div></article>
+      <article><span class="onboarding-icon green">⌁</span><div><strong>数据与科研辅助</strong><p>需要检查表格时明确说“审查附件数据”；普通上传不会自动审查。结果可整理成报告。</p></div></article>
+      <article><span class="onboarding-icon orange">◇</span><div><strong>图示与文件</strong><p>需要流程图时开启输入区的“可视化”；论文解读、实验设计等可按需导出文件。</p></div></article>
+    </div>
+    <div class="onboarding-privacy"><strong>隐私提示</strong><span>账号间的会话和文件相互隔离。对话或附件内容可能发送给已配置的模型和联网服务；请勿上传不适合外发的敏感材料。</span></div>
+    <div class="onboarding-footer"><span>也可从左下角账户菜单再次打开本指南。</span><button class="api-save" type="button" onclick="completeOnboarding()">开始使用</button></div>
+  </section>
+</div>
+
+<div class="memory-settings-overlay" id="memorySettingsOverlay" hidden role="dialog" aria-modal="true" aria-labelledby="memorySettingsTitle" onclick="if(event.target===this)closeMemorySettings()">
+  <section class="memory-settings-card">
+    <button class="overlay-close" type="button" onclick="closeMemorySettings()" aria-label="关闭">×</button>
+    <div class="overlay-eyebrow">CitrusQA 账户</div>
+    <h2 id="memorySettingsTitle">账号记忆</h2>
+    <p class="overlay-subtitle">仅在你的账号内跨会话使用，不影响其他账户。会话原文仍保存在各自会话中。</p>
+    <div class="memory-settings-content" id="accountMemoryContent" aria-live="polite">正在读取…</div>
+    <div class="memory-settings-actions"><span id="accountMemoryStatus" aria-live="polite"></span><button class="danger-secondary" type="button" onclick="clearAccountMemory()">清除账号记忆</button><button class="api-save" type="button" onclick="closeMemorySettings()">完成</button></div>
+  </section>
 </div>
 
 <div class="ctx-drawer-backdrop" id="ctxBackdrop" onclick="toggleCtxDrawer()"></div>
@@ -205,7 +249,7 @@
 </div>
 
 
-<script src="/assets/app.js?v=15"></script>
+<script src="/assets/app.js?v=20"></script>
 </body>
 </html>
 

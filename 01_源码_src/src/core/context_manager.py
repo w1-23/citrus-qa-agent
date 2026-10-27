@@ -72,11 +72,13 @@ def build_loaded_context(state: dict, *, mode: str, format_hint):
     """LoadedContext 构造收敛（expert/light supervisor 共用，v9.2 P6）。"""
     return LoadedContext(
         session_id=state.get("session_id", ""),
+        user_id=int(state.get("user_id") or 0),
         mode=mode,
         query=state.get("query", ""),
         history_summary=state.get("history_summary"),
         long_term_memory=state.get("long_term_memory"),
         resident_cards=state.get("resident_cards"),
+        user_preferences=state.get("user_preferences"),
         search_suggestions=state.get("search_suggestions", []),
         format_hint=format_hint,
     )
@@ -103,6 +105,7 @@ def assemble_supervisor_messages(system_prompt: str, state: dict, human_msg):
 @dataclass
 class LoadedContext:
     session_id: str
+    user_id: int
     mode: str
     query: str
     history_messages: list[BaseMessage] = field(default_factory=list)
@@ -137,13 +140,14 @@ class ContextManager:
         self._hint_fmt_cache: dict[tuple, str] = {}
         if budget:
             from src.guardrails.history_compactor import compact_messages
-            async def _compact(msgs, query="", prior_summary=""):
+            async def _compact(msgs, query="", prior_summary="", session_id=""):
                 return await compact_messages(
                     msgs,
                     fast_llm=self._get_compact_llm(),
                     max_tokens=self._budget.config.compact_max_tokens,
                     query=query,
                     prior_summary=prior_summary,
+                    usage_session_id=session_id,
                 )
             budget.set_compact_fn(_compact)
 
@@ -197,10 +201,12 @@ class ContextManager:
         query: str,
         mode: str,
         *,
+        user_id: int = 0,
         generate_hints: bool = True,
     ) -> LoadedContext:
         ctx = LoadedContext(
             session_id=session_id,
+            user_id=int(user_id or 0),
             mode=mode,
             query=query,
         )
@@ -242,9 +248,9 @@ class ContextManager:
         if self._memory:
             try:
                 # v8.4.5: LTM 语义召回含 embed 推理（≤500 条事实），走线程池防阻塞事件循环
-                # v8.9 记忆域化：传 session_id——会话为主 + 高置信全局共享
+                # 账号记忆可跨该账号的会话共享，不跨账号召回。
                 ltm = await asyncio.to_thread(
-                    self._memory.recall_long_term_memory, query, 5, session_id)
+                    self._memory.recall_long_term_memory, query, 5, ctx.user_id)
                 if ltm:
                     ctx.long_term_memory = ltm
                     logger.info(f"[ContextManager] LTM recalled: {len(ltm)} chars")
@@ -252,7 +258,7 @@ class ContextManager:
                 logger.debug(f"[ContextManager] LTM recall skipped: {e}")
             try:
                 cards = await asyncio.to_thread(
-                    self._memory.get_resident_cards, session_id)
+                    self._memory.get_resident_cards, ctx.user_id)
                 if cards:
                     ctx.resident_cards = cards
             except Exception as e:
@@ -261,7 +267,7 @@ class ContextManager:
                 # v8.6 (书 §3.1 偏好追踪): 用户显式偏好 → <user_preferences> 块
                 # （纯 DB 读取，无 LLM 开销；空则零注入）
                 prefs = await asyncio.to_thread(
-                    self._memory.get_preferences, session_id)
+                    self._memory.get_preferences, ctx.user_id)
                 if prefs:
                     ctx.user_preferences = prefs
                     logger.info(f"[ContextManager] preferences injected: {len(prefs)} chars")
@@ -387,6 +393,8 @@ class ContextManager:
                     )),
                     HumanMessage(content=query),
                 ])
+                from src.core.cache_metrics import emit_usage_from_response
+                emit_usage_from_response(session_id or "", "context_hints", resp)
                 import json, re
                 content = resp.content.strip()
                 content = re.sub(r"```\w*\n?", "", content)
@@ -420,6 +428,8 @@ class ContextManager:
                     )),
                     HumanMessage(content=query),
                 ])
+                from src.core.cache_metrics import emit_usage_from_response
+                emit_usage_from_response(session_id or "", "context_hints", resp)
                 import json, re
                 content = resp.content.strip()
                 content = re.sub(r"```\w*\n?", "", content)
@@ -527,6 +537,7 @@ def finalize_load_result(
         "compacted": ctx.compacted,
         "long_term_memory": ctx.long_term_memory,
         "resident_cards": ctx.resident_cards,
+        "user_preferences": ctx.user_preferences,
         "search_suggestions": ctx.search_suggestions,
         "format_hint": ctx.format_hint,
     }
@@ -553,16 +564,21 @@ def finalize_load_result(
     result["_trace"] = {"node": node_label, "elapsed_ms": 0, "summary": load_summary}
 
     hist_chars = sum(len(m.content or "") for m in history_msgs if hasattr(m, 'content'))
+    # Estimate loaded conversation text only. System prompt, tool schemas, current
+    # multimodal payload and provider-side tokenization are not included here.
     est_tokens = budget.estimate_tokens(history_msgs) if budget is not None else 0
     try:
         from src.core.progress_bus import emit_encoded
         emit_encoded("context_status", {
             "history_msgs": len(history_msgs),
             "history_chars": hist_chars,
+            "estimate_scope": "history_text_only",
+            "estimate_label": "会话文本估算（不含系统提示、工具定义和图片）",
             "ltm_recalled": bool(ctx.long_term_memory),
             "ltm_chars": len(ctx.long_term_memory or ""),
             "resident_cards": bool(ctx.resident_cards),
             "user_preferences": bool(ctx.user_preferences),
+            "memory_status": "recalled" if (ctx.long_term_memory or ctx.resident_cards or ctx.user_preferences) else "empty",
             "suggestions": ctx.search_suggestions[:3] if ctx.search_suggestions else [],
             "format_hint": ctx.format_hint or "",
             "estimated_tokens": est_tokens,

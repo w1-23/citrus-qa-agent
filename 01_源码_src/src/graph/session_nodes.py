@@ -15,9 +15,7 @@ async def load_session_context(state: AgentState) -> dict:
     """Load history and memory once for the unified Agent graph."""
     query = state.get("query", "")
     session_id = state.get("session_id", "default")
-    # The application now has one Agent graph. Ignore the legacy UI mode so
-    # history hints and prompts cannot silently switch to the retired Lite path.
-    mode = "expert"
+    mode = "general_agent"
     result: dict = {}
     try:
         from src.session.manager import session_manager
@@ -42,6 +40,7 @@ async def load_session_context(state: AgentState) -> dict:
             "message": "正在加载会话历史与记忆…", "tool_call_id": ""})
         load_coro = ctx_mgr.load(
             session_id, query, mode,
+            user_id=int(state.get("user_id") or 0),
             generate_hints=not bool(state.get("agent_no_prefetch_hints")))
         if state.get("agent_no_prefetch_hints") and state.get("request_deadline"):
             remaining = max(0.1, float(state["request_deadline"]) - time.monotonic() - 25.0)
@@ -89,10 +88,5 @@ async def load_session_context(state: AgentState) -> dict:
 
 async def save_session_context(state: AgentState) -> dict:
     """Persist the answer, sanitized trace, and evidence ledger."""
-    from src.core.agent_loop import default_ltm_gate, run_save_node
-    return await run_save_node(
-        state,
-        log_tag="GeneralAgent",
-        include_web=True,
-        ltm_gate=default_ltm_gate,
-    )
+    from src.graph.session_persistence import persist_agent_turn
+    return await persist_agent_turn(state)

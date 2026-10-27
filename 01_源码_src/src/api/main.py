@@ -131,13 +131,12 @@ async def lifespan(app: FastAPI):
                     + ", ".join(f"{k}={len(v)}chars" for k, v in _prompts.items()))
     except Exception as e:
         logger.error(f"[Lifespan] fixed prompts build failed: {e}")
-    # Log the actual active general-agent toolset. The legacy expert schema is
-    # still imported for compatibility helpers, but it is not bound to chat
-    # requests and must not be presented as the active tool list.
+    # Log registered capabilities. Per-request tool filtering happens inside
+    # the General Agent; opt-in tools may not be advertised on ordinary turns.
     try:
         from src.graph.general_agent_graph import _toolset
         _active_tools, _ = _toolset()
-        logger.info("[Lifespan] active general-agent tools: "
+        logger.info("[Lifespan] registered general-agent capabilities: "
                     + ", ".join(tool.name for tool in _active_tools))
     except Exception as e:
         logger.warning(f"[Lifespan] active agent tools snapshot failed: {e}")
@@ -253,8 +252,6 @@ async def account_auth_guard(request: Request, call_next):
 # 不在任意时刻强行掐断，而是向任务发取消信号，在 LLM/tool await 处抛 CancelledError）。
 _running_graph_tasks: dict = {}
 from src.core.chat_capacity import chat_capacity
-# v10.0（卡点①）: Intake 意图澄清卡挂起表 token -> {event, choice, profile, session_id}
-_pending_intents: dict = {}
 
 
 class ChatRequest(BaseModel):
@@ -275,6 +272,60 @@ class ChatRequest(BaseModel):
 class CredentialsRequest(BaseModel):
     username: str = Field(..., min_length=1, max_length=64)
     password: str = Field(..., min_length=1, max_length=256)
+    avatar_preset: str = Field(default="01", max_length=2)
+
+
+class AvatarPresetRequest(BaseModel):
+    preset: str = Field(..., min_length=2, max_length=2)
+
+
+class AvatarUploadRequest(BaseModel):
+    data_url: str = Field(..., min_length=1, max_length=7_100_000)
+
+
+def _normalize_avatar_data_url(data_url: str) -> bytes:
+    """Validate a bounded raster image and store a small normalized WebP."""
+    match = re.fullmatch(r"data:(image/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=\r\n]+)",
+                         str(data_url or ""))
+    if not match:
+        raise HTTPException(status_code=415, detail="头像仅支持 JPG、PNG 或 WebP 图片。")
+    try:
+        raw = base64.b64decode(match.group(2), validate=True)
+    except (ValueError, base64.binascii.Error):
+        raise HTTPException(status_code=400, detail="头像文件编码无效。")
+    if not raw or len(raw) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="头像文件不能超过 5 MB。")
+
+    try:
+        from PIL import Image, ImageOps
+
+        with Image.open(BytesIO(raw)) as source:
+            if source.format not in {"JPEG", "PNG", "WEBP"}:
+                raise HTTPException(status_code=415, detail="头像内容不是受支持的 JPG、PNG 或 WebP 图片。")
+            declared_format = {"image/jpeg": "JPEG", "image/png": "PNG", "image/webp": "WEBP"}[match.group(1)]
+            if source.format != declared_format:
+                raise HTTPException(status_code=415, detail="头像声明的格式与文件内容不一致。")
+            width, height = source.size
+            if width < 1 or height < 1 or width > 12000 or height > 12000 or width * height > 20_000_000:
+                raise HTTPException(status_code=413, detail="头像尺寸过大，请上传不超过 2000 万像素的图片。")
+            source.verify()
+        with Image.open(BytesIO(raw)) as source:
+            image = ImageOps.exif_transpose(source)
+            image = image.convert("RGBA" if "A" in image.getbands() else "RGB")
+            width, height = image.size
+            side = min(width, height)
+            left = (width - side) // 2
+            top = (height - side) // 2
+            image = image.crop((left, top, left + side, top + side))
+            image.thumbnail((256, 256), Image.Resampling.LANCZOS)
+            normalized = BytesIO()
+            image.save(normalized, format="WEBP", quality=86, method=5)
+            return normalized.getvalue()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.info("Rejected invalid profile image (%s)", type(exc).__name__)
+        raise HTTPException(status_code=400, detail="无法读取这张图片，请换一张有效的 JPG、PNG 或 WebP。")
 
 
 def _client_ip(request: Request) -> str:
@@ -330,7 +381,7 @@ async def register_account(req: CredentialsRequest, request: Request, response: 
     remote = _client_ip(request)
     if not check_rate_limit("register", remote, limit=8, window_seconds=3600):
         raise HTTPException(status_code=429, detail="注册请求过于频繁，请稍后再试。")
-    user, token, error = register(req.username, req.password)
+    user, token, error = register(req.username, req.password, req.avatar_preset)
     if error:
         raise HTTPException(status_code=409 if "已被使用" in error else 400, detail=error)
     _set_auth_cookie(response, token or "")
@@ -367,6 +418,67 @@ async def current_account(request: Request):
     if not user:
         raise HTTPException(status_code=401, detail="尚未登录。")
     return {"user": user}
+
+
+@app.get("/api/v2/auth/memory")
+async def read_account_memory(request: Request):
+    """Return only the signed-in account's saved preferences and long-term facts."""
+    user = current_user(request)
+    from src.guardrails.memory import memory_store
+    memory = await asyncio.to_thread(memory_store.list_user_memory, int(user["user_id"]))
+    return memory
+
+
+@app.delete("/api/v2/auth/memory")
+async def clear_account_memory(request: Request):
+    """Clear account-wide memory without deleting conversation history."""
+    user = current_user(request)
+    from src.guardrails.memory import memory_store
+    ok = await asyncio.to_thread(memory_store.clear_user_memory, int(user["user_id"]))
+    if not ok:
+        raise HTTPException(status_code=500, detail="账号记忆清理失败。")
+    return {"status": "cleared"}
+
+
+@app.post("/api/v2/auth/avatar/preset")
+async def choose_avatar_preset(req: AvatarPresetRequest, request: Request):
+    from src.auth import set_avatar_preset, user_by_id
+    user = current_user(request)
+    if not set_avatar_preset(user["user_id"], req.preset):
+        raise HTTPException(status_code=400, detail="请选择 01–20 号头像。")
+    return {"status": "ok", "user": user_by_id(user["user_id"])}
+
+
+@app.post("/api/v2/auth/avatar/upload")
+async def upload_account_avatar(req: AvatarUploadRequest, request: Request):
+    from src.auth import set_custom_avatar, user_by_id
+    user = current_user(request)
+    image_data = _normalize_avatar_data_url(req.data_url)
+    if not set_custom_avatar(user["user_id"], image_data):
+        raise HTTPException(status_code=404, detail="账户不存在或已停用。")
+    return {"status": "ok", "user": user_by_id(user["user_id"])}
+
+
+@app.get("/api/v2/auth/avatar")
+async def read_account_avatar(request: Request):
+    from src.auth import get_custom_avatar
+    user = current_user(request)
+    image_data = get_custom_avatar(user["user_id"])
+    if not image_data:
+        raise HTTPException(status_code=404, detail="当前账户使用的是预设头像。")
+    return Response(content=image_data, media_type="image/webp", headers={
+        "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+    })
+
+
+@app.post("/api/v2/auth/onboarding/complete")
+async def complete_account_onboarding(request: Request):
+    from src.auth import complete_onboarding, user_by_id
+    user = current_user(request)
+    if not complete_onboarding(user["user_id"]):
+        raise HTTPException(status_code=404, detail="账户不存在或已停用。")
+    return {"status": "ok", "user": user_by_id(user["user_id"])}
 
 
 @app.delete("/api/v2/auth/account")
@@ -447,6 +559,78 @@ def _attachment_excerpt(text: str, max_chars: int = 80_000) -> str:
             + text[-tail_chars:])
 
 
+_MAX_CHAT_IMAGE_PIXELS = 30_000_000
+_MAX_CHAT_PDF_PAGES = 200
+_MAX_CHAT_DOCUMENT_TEXT_CHARS = 500_000
+_MAX_SCANNED_PDF_PAGE_PIXELS = 8_000_000
+_MAX_OOXML_DOCUMENT_XML_BYTES = 16 * 1024 * 1024
+try:
+    _CHAT_ATTACHMENT_PROCESSING_TIMEOUT = max(
+        10, min(600, int(os.getenv("CITRUSQA_ATTACHMENT_PROCESSING_TIMEOUT_SECONDS", "120"))))
+except (TypeError, ValueError):
+    _CHAT_ATTACHMENT_PROCESSING_TIMEOUT = 120
+
+
+def _estimated_attachment_bytes(items: list[dict[str, str]]) -> int:
+    """Estimate decoded bytes without base64-decoding while a request is queued."""
+    if len(items) > 8:
+        raise HTTPException(status_code=413, detail="每轮最多上传 8 个附件。")
+    total = 0
+    for item in items:
+        raw = str(item.get("data") or "")
+        if raw.startswith("data:") and "," in raw:
+            raw = raw.split(",", 1)[1]
+        compact_length = sum(not char.isspace() for char in raw)
+        padding = 2 if raw.endswith("==") else (1 if raw.endswith("=") else 0)
+        total += max(0, (compact_length * 3 // 4) - padding)
+        if total > 20 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="本轮附件总大小不能超过 20 MB")
+    return total
+
+
+def _extract_pdf_attachment(content: bytes, name: str) -> tuple[str, list[dict[str, str]]]:
+    """Extract bounded PDF text; render at most five pages for scanned PDFs."""
+    try:
+        import fitz
+        document = fitz.open(stream=content, filetype="pdf")
+        try:
+            page_count = len(document)
+            page_limit = min(page_count, _MAX_CHAT_PDF_PAGES)
+            chunks: list[str] = []
+            total_chars = 0
+            truncated = page_count > page_limit
+            for page_no in range(page_limit):
+                text = document.load_page(page_no).get_text("text") or ""
+                remaining = _MAX_CHAT_DOCUMENT_TEXT_CHARS - total_chars
+                if len(text) > remaining:
+                    chunks.append(text[:max(0, remaining)])
+                    truncated = True
+                    break
+                chunks.append(text)
+                total_chars += len(text)
+            extracted = "\n".join(chunks)
+            images: list[dict[str, str]] = []
+            if not extracted.strip():
+                for page_no in range(min(page_limit, 5)):
+                    page = document.load_page(page_no)
+                    rect = page.rect
+                    page_area = max(1.0, float(rect.width) * float(rect.height))
+                    scale = min(1.2, (_MAX_SCANNED_PDF_PAGE_PIXELS / page_area) ** 0.5)
+                    pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+                    page_url = "data:image/png;base64," + base64.b64encode(
+                        pix.tobytes("png")).decode("ascii")
+                    images.append({"name": f"{name} · page {page_no + 1}", "url": page_url})
+                extracted = "扫描版 PDF：已将前 5 页（或全部不足 5 页）作为图片输入。"
+            if truncated:
+                extracted += (f"\n[处理范围：最多 {_MAX_CHAT_PDF_PAGES} 页、"
+                              f"{_MAX_CHAT_DOCUMENT_TEXT_CHARS:,} 个文本字符；其余内容未读取。]")
+            return extracted, images
+        finally:
+            document.close()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"无法读取 PDF：{name}") from exc
+
+
 def _prepare_chat_attachments(items: list[dict[str, str]]) -> tuple[str, list[dict[str, str]], list[dict[str, object]]]:
     """Extract text / prepare image blocks in memory for this request only."""
     if not items:
@@ -482,8 +666,30 @@ def _prepare_chat_attachments(items: list[dict[str, str]]) -> tuple[str, list[di
                 raise HTTPException(status_code=400, detail=f"图片格式与文件内容不匹配：{name}")
             if suffix == "gif" and content[:6] not in {b"GIF87a", b"GIF89a"}:
                 raise HTTPException(status_code=400, detail=f"图片格式与文件内容不匹配：{name}")
-            mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
-                    "webp": "image/webp", "gif": "image/gif"}[suffix]
+            try:
+                from PIL import Image
+                expected_format = {"jpg": "JPEG", "jpeg": "JPEG", "png": "PNG",
+                                   "webp": "WEBP", "gif": "GIF"}[suffix]
+                expected_mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+                                 "webp": "image/webp", "gif": "image/gif"}[suffix]
+                if declared_type.startswith("image/") and declared_type != expected_mime:
+                    raise HTTPException(status_code=400, detail=f"图片声明类型与文件扩展名不匹配：{name}")
+                with Image.open(BytesIO(content)) as image:
+                    if image.format != expected_format:
+                        raise HTTPException(status_code=400, detail=f"图片格式与文件内容不匹配：{name}")
+                    width, height = image.size
+                    if width < 1 or height < 1 or width * height > _MAX_CHAT_IMAGE_PIXELS:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"图片 {name} 超过 {_MAX_CHAT_IMAGE_PIXELS // 1_000_000} 百万像素处理上限。")
+                    if suffix == "gif" and int(getattr(image, "n_frames", 1) or 1) > 1:
+                        raise HTTPException(status_code=415, detail="暂不支持动画 GIF，请上传静态图片。")
+                    image.load()
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"无法解码图片：{name}") from exc
+            mime = expected_mime
             encoded = base64.b64encode(content).decode("ascii")
             images.append({"name": name, "url": f"data:{mime};base64,{encoded}"})
             continue
@@ -512,27 +718,36 @@ def _prepare_chat_attachments(items: list[dict[str, str]]) -> tuple[str, list[di
                 # The normal document path below still extracts text for ordinary Q&A.
                 tables.pop()
                 if suffix == "pdf":
-                    try:
-                        import fitz
-                        doc = fitz.open(stream=content, filetype="pdf")
-                        extracted = "\n".join(doc.load_page(i).get_text("text")
-                                                for i in range(min(len(doc), 200)))
-                        if not extracted.strip():
-                            for page_no in range(min(len(doc), 5)):
-                                pix = doc.load_page(page_no).get_pixmap(matrix=fitz.Matrix(1.2, 1.2), alpha=False)
-                                page_url = "data:image/png;base64," + base64.b64encode(pix.tobytes("png")).decode("ascii")
-                                images.append({"name": f"{name} · page {page_no + 1}", "url": page_url})
-                            extracted = "扫描版 PDF：已将前 5 页（或全部不足 5 页）作为图片输入。"
-                        doc.close()
-                    except Exception as exc:
-                        raise HTTPException(status_code=400, detail=f"无法读取 PDF：{name}") from exc
+                    extracted, pdf_images = _extract_pdf_attachment(content, name)
+                    images.extend(pdf_images)
                 else:
                     try:
                         with zipfile.ZipFile(BytesIO(content)) as archive:
+                            document_info = archive.getinfo("word/document.xml")
+                            if document_info.file_size > _MAX_OOXML_DOCUMENT_XML_BYTES:
+                                raise HTTPException(
+                                    status_code=413,
+                                    detail=f"Word 正文 XML 超过 {_MAX_OOXML_DOCUMENT_XML_BYTES // (1024 * 1024)} MB，已停止解析：{name}")
                             xml = ElementTree.fromstring(archive.read("word/document.xml"))
                         ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
-                        extracted = "\n".join("".join(node.text or "" for node in p.findall(".//w:t", ns))
-                                               for p in xml.findall(".//w:p", ns))
+                        paragraphs = []
+                        total_chars = 0
+                        truncated = False
+                        for paragraph in xml.findall(".//w:p", ns):
+                            text = "".join(node.text or "" for node in paragraph.findall(".//w:t", ns))
+                            if not text.strip():
+                                continue
+                            remaining = _MAX_CHAT_DOCUMENT_TEXT_CHARS - total_chars
+                            if len(text) > remaining:
+                                paragraphs.append(text[:max(0, remaining)])
+                                truncated = True
+                                break
+                            paragraphs.append(text)
+                            total_chars += len(text)
+                        extracted = "\n".join(paragraphs)
+                        if truncated:
+                            extracted += (f"\n[处理范围：最多 {_MAX_CHAT_DOCUMENT_TEXT_CHARS:,} "
+                                          "个文本字符；其余内容未读取。]")
                     except HTTPException:
                         raise
                     except Exception as exc:
@@ -546,22 +761,8 @@ def _prepare_chat_attachments(items: list[dict[str, str]]) -> tuple[str, list[di
 
         try:
             if suffix == "pdf" or content.startswith(b"%PDF"):
-                import fitz
-                document = fitz.open(stream=content, filetype="pdf")
-                extracted = "\n".join(document.load_page(i).get_text("text")
-                                        for i in range(min(len(document), 200)))
-                if len(document) > 200:
-                    extracted += "\n[为控制处理开销，仅提取前 200 页]"
-                if not extracted.strip():
-                    # For scanned PDFs, send a small page sample as transient
-                    # vision inputs; never persist rendered page data.
-                    for page_no in range(min(len(document), 5)):
-                        page = document.load_page(page_no)
-                        pix = page.get_pixmap(matrix=fitz.Matrix(1.2, 1.2), alpha=False)
-                        page_url = "data:image/png;base64," + base64.b64encode(pix.tobytes("png")).decode("ascii")
-                        images.append({"name": f"{name} · page {page_no}", "url": page_url})
-                    extracted = "扫描版 PDF：已将前 5 页（或全部不足 5 页）作为图片交给视觉模型阅读。"
-                document.close()
+                extracted, pdf_images = _extract_pdf_attachment(content, name)
+                images.extend(pdf_images)
             elif suffix == "docx" or (content.startswith(b"PK") and suffix == "docx"):
                 with zipfile.ZipFile(BytesIO(content)) as archive:
                     if sum(info.file_size for info in archive.infolist()) > 100 * 1024 * 1024:
@@ -600,9 +801,7 @@ async def chat_v2(req: ChatRequest, request: Request):
     user_key = str(user["user_id"])
     if not check_rate_limit("chat", user_key, limit=20, window_seconds=60):
         raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试。")
-    from src.core.executors import ATTACHMENT_EXECUTOR
-    attachment_context, image_attachments, table_attachments = await asyncio.get_running_loop().run_in_executor(
-        ATTACHMENT_EXECUTOR, _prepare_chat_attachments, req.attachments)
+    queued_attachment_bytes = _estimated_attachment_bytes(req.attachments)
     if req.session_id and session_manager.session_exists(req.session_id):
         require_owned_session(req.session_id, user)
     allowed, daily_limit = reserve_chat_request(user)
@@ -659,13 +858,14 @@ async def chat_v2(req: ChatRequest, request: Request):
     set_job_id(job_id)
     initial_state: AgentState = {
         "query": query,
-        "attachment_context": attachment_context,
-        "image_attachments": image_attachments,
+        "attachment_context": "",
+        "image_attachments": [],
         "visualization_enabled": bool(req.visualization_enabled),
         "request_deadline": time.monotonic() + max(
             1, int(getattr(settings, "AGENT_REQUEST_TIMEOUT_SEC", 180) or 180)),
         "agent_no_prefetch_hints": True,
         "session_id": sid,
+        "user_id": int(user["user_id"]),
         "mode": mode,
         "messages": [],
         "answer": "",
@@ -730,6 +930,9 @@ async def chat_v2(req: ChatRequest, request: Request):
 
         progress_task = asyncio.create_task(bridge_progress())
         heartbeat_task = asyncio.create_task(tool_heartbeat())
+        attachment_context = ""
+        image_attachments: list[dict[str, str]] = []
+        table_attachments: list[dict[str, object]] = []
 
         # v8.3.7 M2: 观察者标志——write 类任务断连保活后丢弃后续事件（防队列堆积）
         observer_connected = True
@@ -930,7 +1133,9 @@ async def chat_v2(req: ChatRequest, request: Request):
                     logger.info(f"[SSE v2] write job {job_id} 断连保活执行完成")
 
         async def process_with_capacity():
+            nonlocal attachment_context, image_attachments, table_attachments
             acquired = False
+            processing_started = False
 
             async def announce_queue(position: int, maximum: int, pending: int):
                 jobs_mod.update_job(job_id, current_step="queued",
@@ -941,12 +1146,84 @@ async def chat_v2(req: ChatRequest, request: Request):
                 }))
 
             try:
-                await chat_capacity.acquire(on_wait=announce_queue)
+                capacity_waiter = asyncio.create_task(chat_capacity.acquire(
+                    on_wait=announce_queue,
+                    queued_payload_bytes=queued_attachment_bytes,
+                ))
+                try:
+                    await asyncio.shield(capacity_waiter)
+                except asyncio.CancelledError:
+                    # Cancellation can land after the gate reserves a slot but
+                    # before this task receives the return value. Reconcile the
+                    # waiter first so the slot is always released exactly once.
+                    if not capacity_waiter.done():
+                        capacity_waiter.cancel()
+                    try:
+                        await capacity_waiter
+                    except asyncio.CancelledError:
+                        pass
+                    else:
+                        acquired = True
+                    raise
                 acquired = True
+                jobs_mod.update_job(job_id, current_step="preparing_attachments",
+                                    progress_summary="正在安全解析本轮附件")
+                try:
+                    from src.core.executors import ATTACHMENT_EXECUTOR
+                    attachment_future = asyncio.get_running_loop().run_in_executor(
+                        ATTACHMENT_EXECUTOR, _prepare_chat_attachments, req.attachments)
+                    try:
+                        attachment_context, image_attachments, table_attachments = await asyncio.wait_for(
+                            attachment_future, timeout=_CHAT_ATTACHMENT_PROCESSING_TIMEOUT)
+                    except asyncio.TimeoutError as exc:
+                        raise TimeoutError("附件解析超过处理时限，请缩小文件或拆分后重试。") from exc
+                except HTTPException as exc:
+                    from src.auth import release_chat_request
+                    release_chat_request(user)
+                    jobs_mod.update_job(job_id, status="failed", error=str(exc.detail)[:500])
+                    try:
+                        from src.admin_audit import finish_request
+                        finish_request(request_id=rid, status="attachment_rejected",
+                                       elapsed_ms=int((time.perf_counter() - t0) * 1000))
+                    except Exception:
+                        pass
+                    await event_queue.put(_encode_event("error", {"message": str(exc.detail)}))
+                    await event_queue.put(None)
+                    return
+                except Exception as exc:
+                    from src.core.executors import ExecutorSaturatedError
+                    if isinstance(exc, ExecutorSaturatedError):
+                        message = "附件处理队列繁忙，请稍后重试。"
+                        status = "attachment_busy"
+                    elif isinstance(exc, TimeoutError):
+                        message = str(exc)
+                        status = "attachment_timeout"
+                    else:
+                        logger.exception("chat attachment preparation failed")
+                        message = "附件处理失败，请检查文件格式后重试。"
+                        status = "attachment_failed"
+                    from src.auth import release_chat_request
+                    release_chat_request(user)
+                    jobs_mod.update_job(job_id, status="failed", error=message)
+                    try:
+                        from src.admin_audit import finish_request
+                        finish_request(request_id=rid, status=status,
+                                       elapsed_ms=int((time.perf_counter() - t0) * 1000))
+                    except Exception:
+                        pass
+                    await event_queue.put(_encode_event("error", {"message": message}))
+                    await event_queue.put(None)
+                    return
+                initial_state["attachment_context"] = attachment_context
+                initial_state["image_attachments"] = image_attachments
                 jobs_mod.update_job(job_id, current_step="starting",
                                     progress_summary="已进入处理队列，正在启动本轮请求")
+                processing_started = True
                 await process_graph()
             except OverflowError as exc:
+                if not processing_started:
+                    from src.auth import release_chat_request
+                    release_chat_request(user)
                 jobs_mod.update_job(job_id, status="failed", error=str(exc))
                 try:
                     from src.admin_audit import finish_request
@@ -957,6 +1234,9 @@ async def chat_v2(req: ChatRequest, request: Request):
                 await event_queue.put(_encode_event("error", {"message": str(exc)}))
                 await event_queue.put(None)
             except TimeoutError as exc:
+                if not processing_started:
+                    from src.auth import release_chat_request
+                    release_chat_request(user)
                 jobs_mod.update_job(job_id, status="failed", error=str(exc))
                 try:
                     from src.admin_audit import finish_request
@@ -967,6 +1247,9 @@ async def chat_v2(req: ChatRequest, request: Request):
                 await event_queue.put(_encode_event("error", {"message": str(exc)}))
                 await event_queue.put(None)
             except asyncio.CancelledError:
+                if not processing_started:
+                    from src.auth import release_chat_request
+                    release_chat_request(user)
                 jobs_mod.update_job(job_id, status="cancelled", error="client_disconnected_while_queued")
                 try:
                     from src.admin_audit import finish_request
@@ -975,6 +1258,22 @@ async def chat_v2(req: ChatRequest, request: Request):
                 except Exception:
                     pass
                 raise
+            except Exception as exc:
+                logger.exception("chat request failed before/during graph execution")
+                if not processing_started:
+                    from src.auth import release_chat_request
+                    release_chat_request(user)
+                jobs_mod.update_job(job_id, status="failed", error=type(exc).__name__)
+                try:
+                    from src.admin_audit import finish_request
+                    finish_request(request_id=rid, status="failed",
+                                   elapsed_ms=int((time.perf_counter() - t0) * 1000))
+                except Exception:
+                    pass
+                await event_queue.put(_encode_event("error", {
+                    "message": "请求准备失败，请稍后重试。",
+                }))
+                await event_queue.put(None)
             finally:
                 if acquired:
                     await chat_capacity.release()
@@ -1154,26 +1453,6 @@ class ModeRequest(BaseModel):
 
 
 # ── v10.0（卡点①）意图澄清卡回执：原 SSE 请求在 wait_for 中继续，无需重放 ──
-class IntentChoiceRequest(BaseModel):
-    token: str = Field(..., min_length=4, max_length=64)
-    choice_id: Optional[int] = None
-    custom_text: Optional[str] = Field(default=None, max_length=2000)
-
-
-@app.post("/api/v2/intent/confirm")
-async def intent_confirm_choice(req: IntentChoiceRequest, request: Request):
-    pend = _pending_intents.get(req.token)
-    if not pend:
-        return {"status": "expired"}
-    require_owned_session(pend.get("session_id", ""), current_user(request))
-    pend["choice"] = {"choice_id": req.choice_id,
-                      "custom_text": (req.custom_text or "").strip()}
-    pend["event"].set()
-    logger.info(f"[Intake] card choice: id={req.choice_id} "
-                f"custom={bool(req.custom_text)} token={req.token[:8]}")
-    return {"status": "ok"}
-
-
 @app.post("/api/v2/permission/mode")
 async def permission_mode_switch(req: ModeRequest, request: Request):
     """运行时切换权限模式（ask/auto_workspace/deny）。
@@ -1615,6 +1894,10 @@ async def serve_frontend():
 # Frontend assets are split from index.html to keep the page maintainable.
 _frontend_assets = WEB_DIR / "assets"
 if _frontend_assets.exists():
+    # Windows may not register WebP in its MIME database; keep avatar assets
+    # correctly typed across local development and Linux deployment.
+    import mimetypes
+    mimetypes.add_type("image/webp", ".webp", strict=True)
     from fastapi.staticfiles import StaticFiles
     app.mount("/assets", StaticFiles(directory=str(_frontend_assets)), name="frontend-assets")
 
@@ -2074,6 +2357,8 @@ def _build_context_snapshot(msgs: list, session_id: str = "") -> dict:
     return {
         "history_msgs": len(msgs),
         "history_chars": hist_chars,
+        "estimate_scope": "history_text_only",
+        "estimate_label": "刷新后的会话文本估算（不含系统提示、工具定义和图片）",
         "estimated_tokens": est,
         "max_tokens": settings.RESOLVED_CONTEXT_BUDGET_MAX_TOKENS,
         "soft_threshold": settings.CONTEXT_BUDGET_SOFT_THRESHOLD,
@@ -2081,6 +2366,7 @@ def _build_context_snapshot(msgs: list, session_id: str = "") -> dict:
         "compressed": compressed,
         "compression_len": 0,
         "ltm_recalled": False, "ltm_chars": 0,
+        "memory_status": "not_loaded",
         "resident_cards": False, "suggestions": [], "format_hint": "",
     }
 
@@ -2089,11 +2375,23 @@ def _build_context_snapshot(msgs: list, session_id: str = "") -> dict:
 
 @app.get("/api/v2/session/{session_id}/artifacts/{artifact_id}")
 async def download_research_artifact(session_id: str, artifact_id: str):
-    """Download a generated research artifact bound to its creating session."""
+    """Serve a session-bound research artifact; compact audit HTML opens inline."""
     from src.research.tools import resolve_artifact
     artifact = await asyncio.to_thread(resolve_artifact, session_id, artifact_id)
     if not artifact:
         raise HTTPException(status_code=404, detail="文件不存在、已过期或不属于此会话")
+    if (artifact["mime"].startswith("text/html")
+            and str(artifact["filename"]).endswith("报告.html")):
+        from urllib.parse import quote
+        return FileResponse(
+            path=artifact["path"], media_type=artifact["mime"],
+            headers={
+                "Content-Disposition": f"inline; filename*=UTF-8''{quote(artifact['filename'])}",
+                "Cache-Control": "private, no-store",
+                "X-Content-Type-Options": "nosniff",
+                "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+            },
+        )
     return FileResponse(path=artifact["path"], media_type=artifact["mime"],
                         filename=artifact["filename"],
                         headers={"Cache-Control": "private, no-store"})

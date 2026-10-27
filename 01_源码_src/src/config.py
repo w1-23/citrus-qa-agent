@@ -219,7 +219,6 @@ class Settings(BaseSettings):
     # true = SystemMessage 字节级稳定（format 指南/策略卡片/skills 移出前缀，
     #        追加到当前轮 HumanMessage 尾部），利于 DeepSeek 上下文缓存命中；
     # false = 旧行为（动态内容进 SystemMessage，前缀每次请求重算）
-    CONTEXT_STATIC_PREFIX: bool = Field(default_factory=lambda: _yaml_val("context", "static_prefix", default=False))
 
     # 5. Tools Parameters
     # v8.3.3: MAX_TOOL_CALLS 死配置已删除（无引用）

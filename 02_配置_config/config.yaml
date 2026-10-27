@@ -114,7 +114,10 @@ embedder:
   # offline_mode: true     # 默认离线(大陆推荐)。改为 false 或设 HF_HUB_OFFLINE=0 可连 HuggingFace 检查更新
 
 onnx:
+  # 自动过滤当前 ONNX Runtime 实际可用的 Provider，再按 AMD ROCm → NVIDIA CUDA
+  # → Windows DirectML（AMD/NVIDIA/Intel GPU）→ CPU 回退。
   provider_priority:
+    - "ROCMExecutionProvider"
     - "CUDAExecutionProvider"
     - "DmlExecutionProvider"
     - "CPUExecutionProvider"
@@ -240,7 +243,6 @@ context_budget:
 
 # ── Context Engineering v8.4 ──
 context:
-  static_prefix: true           # v8.4.4 转正: SystemMessage 字节级稳定(格式指南/策略卡片/
                                 #   skills 移出前缀，追加到当前轮 HumanMessage 尾部)，
                                 #   利于 DeepSeek 上下文缓存命中（灰度验证通过后转默认）
 

@@ -63,6 +63,9 @@ def get_tools_by_category(category: str) -> list[str]:
 
 def _classify_error(e: Exception) -> str:
     """统一错误回传 (v8.3.1): [ERR_类别] 原因 + 建议策略，让 LLM 对症下药。"""
+    from src.core.executors import ExecutorSaturatedError
+    if isinstance(e, ExecutorSaturatedError):
+        return "[ERR_BUSY] 服务当前繁忙，工具未进入执行队列。请稍后重试或缩小任务范围。"
     if isinstance(e, ImportError):
         pkg = getattr(e, "name", str(e))
         return f"[ERR_MISSING_DEP] 缺少依赖库: {pkg}。建议: pip install {pkg} 后重试"

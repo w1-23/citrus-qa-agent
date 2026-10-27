@@ -20,7 +20,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langgraph.graph import END, StateGraph
 
 from src.config import get_deepseek_model, settings
-from src.core.agent_loop import emit_llm_usage
+from src.core.cache_metrics import emit_usage_from_response
 from src.core.model_capabilities import model_supports_images
 from src.core.progress_bus import (
     emit_status, emit_text,
@@ -78,6 +78,9 @@ _LOCAL_CITRUS_CORPUS_CUES = re.compile(
     r"\bcitrus\b|\bmandarins?\b|\bpomelos?\b|\blemons?\b|\bkumquats?\b|"
     r"\btrifoliate orange\b|\bcitrus rootstocks?\b|\bHLB\b|"
     r"\b(?:sweet|navel|blood|bitter|sour) oranges?\b", re.I)
+_WEB_RETRIEVAL_CUES = re.compile(
+    r"最新|进展|论文|文献|参考文献|引用|研究|证据|来源|检索|搜索|搜一下|查一下|查一查|查查|找一下|"
+    r"PubMed|数据库|知识库|DOI|PMID|literature|papers?|studies|evidence|sources?|search|latest|citations?", re.I)
 
 
 def _source_scope(query: str) -> str:
@@ -168,22 +171,115 @@ def _is_simple_query(query: str, scope: str) -> bool:
     return len(q) <= 48 and not re.search(r"[?？].*[?？]|以及|并且|分别|综述|全面", q)
 
 
-def _scoped_toolset(scope: str):
+def _explicit_export_request(query: str) -> bool:
+    return bool(re.search(r"导出|下载|生成(?:一个|可下载)?文件|保存为|RIS|BibTeX|Zotero|export|download", query, re.I))
+
+
+def _explicit_supplement_request(query: str) -> bool:
+    return bool(re.search(r"(?:获取|下载|查找|找出|retrieve|download|fetch).{0,18}(?:补充数据|补充材料|supplement(?:ary)? data|source data)|"
+                          r"(?:补充数据|补充材料|supplement(?:ary)? data|source data).{0,18}(?:获取|下载|查找|retrieve|download|fetch)", query, re.I))
+
+
+def _explicit_experiment_design_request(query: str) -> bool:
+    return bool(re.search(r"实验设计|设计实验|实验方案|制定.{0,8}方案|protocol design|design an experiment", query, re.I))
+
+
+def _explicit_paper_analysis_request(query: str) -> bool:
+    return bool(re.search(r"(?:解读|解析|总结|梳理).{0,12}(?:论文|文章|研究|方法|结果|实验)|"
+                          r"(?:论文|文章|研究).{0,12}(?:方法|结果|实验|解读|总结)|"
+                          r"(?:explain|summari[sz]e|analy[sz]e).{0,12}(?:paper|article|study)", query, re.I))
+
+
+def _explicit_note_save_request(query: str) -> bool:
+    if _explicit_export_request(query) and re.search(r"课题记录|项目记录|研究记录|project notes", query, re.I):
+        return False
+    return bool(re.search(r"(?:保存|记录|记住|记下来|加入课题记录).{0,18}(?:课题|项目|研究)|"
+                          r"(?:课题|项目|研究).{0,18}(?:保存|记录|记住)", query, re.I))
+
+
+def _explicit_note_recall_request(query: str) -> bool:
+    return bool(re.search(r"回顾|查阅.{0,8}(?:课题|项目)记录|之前.{0,8}(?:保存|记录)|以前.{0,8}(?:记录|保存)|recall.{0,12}project notes", query, re.I))
+
+
+def _explicit_gap_export_request(query: str) -> bool:
+    return bool(re.search(r"(?:语料|知识库).{0,8}(?:缺口|覆盖)|(?:缺口|覆盖).{0,8}(?:语料|知识库)", query, re.I)
+                and _explicit_export_request(query))
+
+
+def _scoped_toolset(scope: str, *, query: str = "", has_table: bool = False,
+                    visualization_enabled: bool = False):
+    """Return only tools relevant to this request, while preserving source scope.
+
+    The model still chooses the sequence and whether a tool is needed. This is a
+    capability boundary: irrelevant write/export and attachment tools are not
+    advertised to ordinary chat turns.
+    """
     tools, _schemas = _toolset()
-    research_tools = {
-        "inspect_uploaded_table", "audit_uploaded_data",
-        "verify_uploaded_references", "fetch_and_audit_open_supplements", "export_literature_evidence",
-        "export_paper_analysis", "export_experiment_design", "save_research_note",
-        "recall_research_notes", "export_research_notes", "export_corpus_gap_report",
-    }
+    available = {tool.name: tool for tool in tools}
+    q = str(query or "")
+    audit = _explicit_data_audit(q) and has_table
+    references = _explicit_reference_check(q)
+    literature = _explicit_literature_request(q)
+    retrieval = (scope in {"web", "fusion"} or bool(_WEB_RETRIEVAL_CUES.search(q))
+                 or references or literature)
+    supplement = _explicit_supplement_request(q)
+    export = _explicit_export_request(q)
+    design = _explicit_experiment_design_request(q)
+    paper_analysis = _explicit_paper_analysis_request(q)
+    note_save = _explicit_note_save_request(q)
+    note_recall = _explicit_note_recall_request(q)
+    note_export = export and bool(re.search(r"课题记录|项目记录|研究记录|project notes", q, re.I))
+    selected: set[str] = set()
+
+    if scope in {"auto", "web", "fusion"} and retrieval:
+        selected.update({"deepseek_search", "deepseek_fetch"})
+        if literature or references or supplement:
+            selected.add("deepseek_fetch_paper")
+    if scope == "local" or (scope in {"auto", "fusion"} and retrieval and _local_corpus_matches(q)):
+        selected.add("local_hybrid_search")
+
+    # Explicit file workflows only. Merely uploading a table never starts audit.
+    if has_table and (audit or bool(re.search(r"查看|读取|识别|概览|表头|工作表|列名|inspect|profile", q, re.I))):
+        selected.add("inspect_uploaded_table")
+    if audit:
+        selected.add("audit_uploaded_data")
+    if scope != "local" and references:
+        selected.add("verify_uploaded_references")
+    if scope != "local" and supplement:
+        selected.add("fetch_and_audit_open_supplements")
+
+    if export:
+        if literature or references:
+            selected.add("export_literature_evidence")
+        if paper_analysis:
+            selected.add("export_paper_analysis")
+        if design:
+            selected.add("export_experiment_design")
+        if note_export:
+            selected.add("export_research_notes")
+        if _explicit_gap_export_request(q):
+            selected.add("export_corpus_gap_report")
+    if note_save:
+        selected.add("save_research_note")
+    if note_recall:
+        selected.add("recall_research_notes")
+    if visualization_enabled:
+        selected.add("draw_svg")
+
     if scope == "local":
-        # Source scope must also apply to network-capable research tools.
-        network_research_tools = {"verify_uploaded_references", "fetch_and_audit_open_supplements"}
-        tools = [t for t in tools if t.name.startswith("local_") or
-                 (t.name in research_tools and t.name not in network_research_tools)]
+        # Never expose network-capable tools under an explicit local-only scope.
+        selected = {name for name in selected if name.startswith("local_") or name in {
+            "inspect_uploaded_table", "audit_uploaded_data", "export_literature_evidence",
+            "export_paper_analysis", "export_experiment_design", "save_research_note",
+            "recall_research_notes", "export_research_notes", "export_corpus_gap_report",
+            "draw_svg"}}
     elif scope == "web":
-        tools = [t for t in tools if t.name.startswith("deepseek_") or t.name in research_tools]
-    return tools, []
+        selected = {name for name in selected if name.startswith("deepseek_") or name in {
+            "verify_uploaded_references", "fetch_and_audit_open_supplements",
+            "export_literature_evidence", "export_paper_analysis", "export_experiment_design",
+            "save_research_note", "recall_research_notes", "export_research_notes",
+            "export_corpus_gap_report", "draw_svg"}}
+    return [available[name] for name in sorted(selected) if name in available], []
 
 
 def _answer_profile(query: str) -> tuple[int, str]:
@@ -308,15 +404,6 @@ def _safe_persisted_trace(messages: list) -> list:
                 safe.append(ToolMessage(
                     content="表格结构已在本轮检查；原始单元格样例未写入会话历史。",
                     tool_call_id=message.tool_call_id, name=message.name, artifact={}))
-        elif isinstance(message, ToolMessage) and getattr(message, "name", "") == "audit_uploaded_table":
-            # Keep the download capability but omit row-level findings from the
-            # durable tool trace; the assistant's user-facing answer remains.
-            links = re.findall(r"\[([^\]]+)\]\((/api/v2/session/[A-Za-z0-9_-]+/artifacts/[a-f0-9]{32})\)",
-                               str(message.content or ""))
-            link_text = "\n".join(f"- [{label}]({url})" for label, url in links)
-            safe.append(ToolMessage(
-                content="本轮数据审查已执行；行级发现仅保存在限时报告中，原始表格未修改。\n" + link_text,
-                tool_call_id=message.tool_call_id, name=message.name, artifact={}))
         elif isinstance(message, HumanMessage) and isinstance(message.content, list):
             # Vision payloads are request-scoped; keep a trace placeholder, not
             # base64 image bytes, in session history.
@@ -422,7 +509,7 @@ def _toolset():
     """Expose retrieval plus task-specific research workflow tools."""
     from src.tools import _TOOL_REGISTRY_BY_NAME
 
-    allowed = {"deepseek_search", "deepseek_fetch", "deepseek_fetch_paper",
+    allowed = {"deepseek_search", "deepseek_fetch", "deepseek_fetch_paper", "draw_svg",
                "local_hybrid_search"}
     research_enabled = os.getenv("CITRUS_RESEARCH_TOOLS_ENABLED", "true").strip().lower() not in {
         "0", "false", "no", "off"}
@@ -513,16 +600,28 @@ async def _execute_calls(response, *, tools_by_name: dict,
 
     for call, message in zip(calls, results):
         try:
+            from src.tools.outcome import normalize_tool_outcome
+            outcome = normalize_tool_outcome(
+                call["name"], str(message.content or {}),
+                getattr(message, "artifact", None) or {})
             if call["name"] in {"local_bm25_search", "local_dense_search", "local_hybrid_search"}:
                 artifact = getattr(message, "artifact", None) or {}
                 rows = artifact.get("main_results") or []
                 families = call.get("args", {}).get("corpus_types") or []
                 if call["name"] == "local_hybrid_search":
-                    summary = (f"本地混合检索完成：类别 {', '.join(families)}；"
-                               f"BM25 {artifact.get('bm25_candidates', 0)} + "
-                               f"Dense {artifact.get('dense_candidates', 0)} → "
-                               f"RRF {artifact.get('rrf_candidates', 0)} → "
-                               f"重排后 {len(rows)} 条；{artifact.get('elapsed_ms', 0)} ms。")
+                    rag_cache_status = artifact.get("rag_cache_status") or ""
+                    if rag_cache_status in {"hit", "miss", "disabled"}:
+                        from src.core.progress_bus import emit_progress
+                        emit_progress("retrieval_cache", {"kind": "rag", "status": rag_cache_status})
+                    if rag_cache_status == "hit":
+                        summary = (f"本地混合检索结果缓存命中：类别 {', '.join(families)}；"
+                                   f"返回 {len(rows)} 条；原计算耗时 {artifact.get('cached_elapsed_ms', 0)} ms。")
+                    else:
+                        summary = (f"本地混合检索完成：类别 {', '.join(families)}；"
+                                   f"BM25 {artifact.get('bm25_candidates', 0)} + "
+                                   f"Dense {artifact.get('dense_candidates', 0)} → "
+                                   f"RRF {artifact.get('rrf_candidates', 0)} → "
+                                   f"重排后 {len(rows)} 条；{artifact.get('elapsed_ms', 0)} ms。")
                     if artifact.get("reranker_fallback"):
                         summary += " 重排降级为 RRF 顺序。"
                     summary += (f" 相邻分数衰减阈值 {artifact.get('adjacent_decay_ratio', 0.6):.2f}；"
@@ -530,9 +629,11 @@ async def _execute_calls(response, *, tools_by_name: dict,
                 else:
                     summary = (f"本地检索完成：类别 {', '.join(families)}；"
                                f"命中 {len(rows)} 条记录；原文只进入模型上下文。")
-                emit_tool_result(call["name"], summary, call["id"], summary=summary)
+                emit_tool_result(call["name"], summary, call["id"], summary=summary,
+                                 outcome=outcome.as_dict())
             else:
-                emit_tool_result(call["name"], str(message.content), call["id"])
+                emit_tool_result(call["name"], str(message.content), call["id"],
+                                 outcome=outcome.as_dict())
         except Exception:
             pass
     return results
@@ -623,9 +724,14 @@ async def general_agent_node(state: AgentState) -> dict:
     explicit_data_audit = _explicit_data_audit(query)
     try:
         from src.research.context import get_request_tables
-        has_table_attachments = bool(get_request_tables())
+        request_tables = get_request_tables()
+        has_table_attachments = bool(request_tables)
     except Exception:
+        request_tables = []
         has_table_attachments = False
+    image_attachments = state.get("image_attachments") or []
+    attachment_context = str(state.get("attachment_context") or "").strip()
+    visualization_enabled = bool(state.get("visualization_enabled"))
     required_tool_groups: list[set[str]] = []
     if scope == "local":
         required_tool_groups.append({"local_hybrid_search"})
@@ -644,15 +750,12 @@ async def general_agent_node(state: AgentState) -> dict:
         required_tool_groups.append({"verify_uploaded_references"})
     if explicit_data_audit and has_table_attachments:
         required_tool_groups.append({"audit_uploaded_data"})
-    tools, _ = _scoped_toolset(scope)
+    tools, _ = _scoped_toolset(
+        scope, query=query, has_table=has_table_attachments,
+        visualization_enabled=visualization_enabled)
     available_names = {tool.name for tool in tools}
     required_tool_groups = [group for group in required_tool_groups
                             if group & available_names]
-    visualization_enabled = bool(state.get("visualization_enabled"))
-    if visualization_enabled:
-        from src.tools.draw_svg import draw_svg
-        tools.append(draw_svg)
-    image_attachments = state.get("image_attachments") or []
     disease_image_query = bool(image_attachments and re.search(
         r"病害|病症|什么病|识别.{0,6}病|诊断|症状|黄龙病|溃疡病|黑斑病|病斑|disease|diagnos|symptom",
         query, re.I))
@@ -660,6 +763,7 @@ async def general_agent_node(state: AgentState) -> dict:
     if retrieval_disabled:
         keep = {"draw_svg"}
         tools = [tool for tool in tools if tool.name in keep]
+    tools = sorted(tools, key=lambda tool: str(getattr(tool, "name", "")))
     tools_by_name = {tool.name: tool for tool in tools}
     system_prompt = assemble_system_prompt(mode="expert", format_hint=state.get("format_hint"),
                                            query=query)
@@ -694,7 +798,6 @@ async def general_agent_node(state: AgentState) -> dict:
     human.content = (str(human.content or "")
                      + "\n\n<answer_length_and_scope>\n" + answer_guidance
                      + "\n</answer_length_and_scope>" + request_policy)
-    attachment_context = str(state.get("attachment_context") or "").strip()
     if attachment_context:
         human.content += "\n\n" + attachment_context
     image_attachments = state.get("image_attachments") or []
@@ -734,6 +837,38 @@ async def general_agent_node(state: AgentState) -> dict:
             ])
     messages, trace_start = assemble_supervisor_messages(system_prompt, state, human)
     messages = _sanitize_history_tool_protocol(messages)
+    # First display a text estimate for the fully assembled messages. Provider
+    # input_tokens later replaces it with measured usage for each model call.
+    try:
+        from src.core.context_budget import ContextBudget, ContextBudgetConfig
+        from src.core.progress_bus import emit_encoded
+        budget = ContextBudget(ContextBudgetConfig(
+            max_tokens=settings.RESOLVED_CONTEXT_BUDGET_MAX_TOKENS,
+            soft_threshold=settings.CONTEXT_BUDGET_SOFT_THRESHOLD,
+            hard_threshold=settings.CONTEXT_BUDGET_HARD_THRESHOLD,
+        ))
+        history_messages = state.get("messages") or []
+        estimate = budget.estimate_tokens(messages)
+        emit_encoded("context_status", {
+            "history_msgs": len(history_messages),
+            "history_chars": sum(len(str(getattr(m, "content", "") or "")) for m in history_messages),
+            "estimate_scope": "assembled_message_text",
+            "estimate_label": "本轮消息文本估算（不含工具定义和图片 token）",
+            "ltm_recalled": bool(state.get("long_term_memory")),
+            "ltm_chars": len(str(state.get("long_term_memory") or "")),
+            "resident_cards": bool(state.get("resident_cards")),
+            "user_preferences": bool(state.get("user_preferences")),
+            "memory_status": "recalled" if any(state.get(k) for k in
+                ("long_term_memory", "resident_cards", "user_preferences")) else "empty",
+            "estimated_tokens": estimate,
+            "max_tokens": budget.config.max_tokens,
+            "soft_threshold": budget.config.soft_threshold,
+            "hard_threshold": budget.config.hard_threshold,
+            "compressed": bool(state.get("compacted")),
+            "compression_len": 0,
+        })
+    except Exception:
+        pass
 
     from src.core.llm_pool import get_llm
     llm_base = get_llm(
@@ -785,7 +920,7 @@ async def general_agent_node(state: AgentState) -> dict:
             failure_notice = _provider_failure_notice(exc)
             break
 
-        emit_llm_usage(session_id, "general_agent", response)
+        emit_usage_from_response(session_id, "general_agent", response)
         calls = getattr(response, "tool_calls", None) or []
         if not calls:
             detected, recovered_calls = _parse_dsml_tool_calls(
@@ -886,7 +1021,7 @@ async def general_agent_node(state: AgentState) -> dict:
             try:
                 final_response = await _call_llm(
                     llm_base, final_messages, timeout=remaining)
-                emit_llm_usage(session_id, "general_agent", final_response)
+                emit_usage_from_response(session_id, "general_agent", final_response)
                 final_text = str(final_response.content or "")
                 if _DSML_PROTOCOL_RE.search(final_text):
                     logger.error("Blocked DSML tool-call text from final synthesis")

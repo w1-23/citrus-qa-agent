@@ -33,13 +33,15 @@ import numpy as np
 from langchain_core.tools import tool
 
 from src.config import PROJECT_ROOT
-from src.core.tracing import get_session_id
+from src.core.tracing import get_session_id, get_user_id
 from src.research.context import get_request_tables
 
 logger = logging.getLogger(__name__)
 _ARTIFACT_TTL_SEC = 24 * 60 * 60
 _MAX_TABLE_ROWS = 100_000
 _MAX_TABLE_COLUMNS = 200
+_MAX_TABLE_CELLS = 2_000_000
+_MAX_EXTRACTED_TABLES = 500
 _MAX_SAMPLES = 8
 
 
@@ -52,7 +54,35 @@ def _db_path() -> Path:
             mime TEXT NOT NULL, created_at REAL NOT NULL, path TEXT NOT NULL)""")
         conn.execute("""CREATE TABLE IF NOT EXISTS research_notes (
             id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
-            project_name TEXT NOT NULL, note TEXT NOT NULL, created_at REAL NOT NULL)""")
+            owner_user_id INTEGER, project_name TEXT NOT NULL,
+            note TEXT NOT NULL, created_at REAL NOT NULL)""")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(research_notes)")}
+        if "owner_user_id" not in columns:
+            conn.execute("ALTER TABLE research_notes ADD COLUMN owner_user_id INTEGER")
+            sessions_path = PROJECT_ROOT / "state" / "sessions.db"
+            if sessions_path.exists():
+                try:
+                    conn.execute("ATTACH DATABASE ? AS session_store", (str(sessions_path),))
+                    session_columns = {row[1] for row in conn.execute(
+                        "PRAGMA session_store.table_info(sessions)")}
+                    if "owner_user_id" in session_columns:
+                        conn.execute("""UPDATE research_notes
+                            SET owner_user_id=(SELECT s.owner_user_id FROM session_store.sessions s
+                                               WHERE s.session_id=research_notes.session_id)
+                            WHERE owner_user_id IS NULL AND EXISTS (
+                                SELECT 1 FROM session_store.sessions s
+                                WHERE s.session_id=research_notes.session_id
+                                  AND s.owner_user_id IS NOT NULL)""")
+                        conn.commit()
+                    conn.execute("DETACH DATABASE session_store")
+                except sqlite3.Error:
+                    logger.warning("Could not migrate legacy research-note ownership; unverified rows remain private")
+                    try:
+                        conn.execute("DETACH DATABASE session_store")
+                    except sqlite3.Error:
+                        pass
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_research_notes_owner_project "
+                     "ON research_notes(owner_user_id,project_name,id)")
     return path
 
 
@@ -366,26 +396,56 @@ def _decode_csv(data: bytes, header_row: int = 1, header_rows: list[int] | None 
     header_rows = sorted(set(header_rows or [header_row]))
     if not header_rows or any(row < 1 or row > 20 for row in header_rows):
         raise ValueError("header_row 必须在 1 到 20 之间")
-    raw_rows = list(islice(csv.reader(io.StringIO(text), delimiter=delimiter),
-                           _MAX_TABLE_ROWS + max(header_rows) + 1))
+    row_limit = _MAX_TABLE_ROWS + max(header_rows) + 1
+    raw_rows = []
+    raw_cells = 0
+    truncated = False
+    for row in csv.reader(io.StringIO(text), delimiter=delimiter):
+        if len(raw_rows) >= row_limit:
+            truncated = True
+            break
+        if len(row) > _MAX_TABLE_COLUMNS:
+            raise ValueError(f"列数超过限制 {_MAX_TABLE_COLUMNS}")
+        if raw_cells + len(row) > _MAX_TABLE_CELLS:
+            truncated = True
+            break
+        raw_rows.append(row)
+        raw_cells += len(row)
     raw_preview = raw_rows[:8]
     if not raw_rows:
         return _pd().DataFrame(), encoding, raw_preview, header_rows, False
     header = _normalize_headers(raw_rows, header_rows, max(len(row) for row in raw_rows))
     body_start = max(header_rows)
     width = len(header)
+    if width > _MAX_TABLE_COLUMNS:
+        raise ValueError(f"列数 {width} 超过限制 {_MAX_TABLE_COLUMNS}")
+    data_row_limit = min(_MAX_TABLE_ROWS, _MAX_TABLE_CELLS // max(1, width))
     body = [(row + [""] * width)[:width]
-            for row in raw_rows[body_start:_MAX_TABLE_ROWS + body_start]]
+            for row in raw_rows[body_start:body_start + data_row_limit]]
     frame = _pd().DataFrame(body, columns=header)
     frame = frame.replace(r"^\s*$", _pd().NA, regex=True)
     # Keep literal CSV values (including zero-padded IDs) intact. Numeric
     # calculations use temporary coercions and the raw source is never rewritten.
-    return frame, encoding, raw_preview, header_rows, len(raw_rows) > _MAX_TABLE_ROWS + max(header_rows)
+    truncated = truncated or len(raw_rows) > body_start + data_row_limit
+    return frame, encoding, raw_preview, header_rows, truncated
 
 
 def _pd():
     import pandas as pd
     return pd
+
+
+def _bound_raw_table(rows: list[list[Any]], header_rows: list[int],
+                     cell_budget: int, label: str) -> tuple[list[list[Any]], bool, int]:
+    width = max((len(row) for row in rows), default=0)
+    if width > _MAX_TABLE_COLUMNS:
+        raise ValueError(f"{label}列数 {width} 超过限制 {_MAX_TABLE_COLUMNS}，未执行审查")
+    if width <= 0:
+        return [], len(rows) > 0, 0
+    header_limit = max(header_rows)
+    row_limit = min(_MAX_TABLE_ROWS + header_limit, header_limit + max(1, cell_budget // width))
+    bounded = rows[:row_limit]
+    return bounded, len(rows) > row_limit, len(bounded) * width
 
 
 def _load_frame(file_index: int, sheet_name: str = "", header_row: int = 1,
@@ -412,7 +472,24 @@ def _load_frame(file_index: int, sheet_name: str = "", header_row: int = 1,
                     chosen = sheet_name.strip() if sheet_name.strip() in names else (names[0] if names else "")
                     if not chosen:
                         raise ValueError("工作簿中没有可读取的工作表")
-                    data_rows = reader.get_sheet_by_name(chosen).to_python()
+                    sheet = reader.get_sheet_by_name(chosen)
+                    width = getattr(sheet, "width", None)
+                    height = getattr(sheet, "height", None)
+                    width = width() if callable(width) else width
+                    height = height() if callable(height) else height
+                    if not isinstance(width, int) or not isinstance(height, int):
+                        raise ValueError("无法在读取前确认工作表尺寸；为避免无界内存占用，已停止解析")
+                    if width > _MAX_TABLE_COLUMNS:
+                        raise ValueError(f"列数 {width} 超过限制 {_MAX_TABLE_COLUMNS}")
+                    row_limit = max(1, min(_MAX_TABLE_ROWS + max(used_header_rows) + 1,
+                                           _MAX_TABLE_CELLS // max(1, width) + max(used_header_rows)))
+                    if height > row_limit:
+                        raise ValueError(
+                            f"工作表有 {height:,} 行，当前 XLS/XLSB 安全解析上限为 {row_limit:,} 行；"
+                            "请先拆分工作表后重试，未对该表执行审查")
+                    data_rows = sheet.to_python()
+                    if len(data_rows) > row_limit:
+                        raise ValueError("工作表实际行数超出安全解析范围，未执行审查")
                 except ImportError as exc:
                     raise ValueError(f"读取 {suffix.upper()} 需要安装 python-calamine；文件未被判定为无异常") from exc
             else:
@@ -431,21 +508,36 @@ def _load_frame(file_index: int, sheet_name: str = "", header_row: int = 1,
                 if not chosen:
                     wb.close()
                     raise ValueError("工作簿中没有可读取的工作表")
-                data_rows = list(islice(wb[chosen].iter_rows(values_only=True),
-                                        _MAX_TABLE_ROWS + max(used_header_rows) + 1))
+                worksheet = wb[chosen]
+                width = int(worksheet.max_column or 0)
+                height = int(worksheet.max_row or 0)
+                if width > _MAX_TABLE_COLUMNS:
+                    wb.close()
+                    raise ValueError(f"列数 {width} 超过限制 {_MAX_TABLE_COLUMNS}")
+                row_limit = max(1, min(_MAX_TABLE_ROWS + max(used_header_rows) + 1,
+                                       _MAX_TABLE_CELLS // max(1, width) + max(used_header_rows)))
+                data_rows = list(worksheet.iter_rows(
+                    min_row=1, max_row=min(height, row_limit), max_col=max(1, width),
+                    values_only=True)) if height and width else []
                 wb.close()
+            data_row_limit = min(_MAX_TABLE_ROWS, _MAX_TABLE_CELLS // max(1, width))
             if len(data_rows) < max(used_header_rows):
                 frame = _pd().DataFrame()
             else:
                 width = max((len(row) for row in data_rows), default=0)
+                if width > _MAX_TABLE_COLUMNS:
+                    raise ValueError(f"列数 {width} 超过限制 {_MAX_TABLE_COLUMNS}")
                 header = _normalize_headers(data_rows, used_header_rows, width)
-                frame = _pd().DataFrame(data_rows[max(used_header_rows):_MAX_TABLE_ROWS + max(used_header_rows)],
-                                        columns=header)
+                data_row_limit = min(_MAX_TABLE_ROWS, _MAX_TABLE_CELLS // max(1, len(header)))
+                frame = _pd().DataFrame(
+                    data_rows[max(used_header_rows):max(used_header_rows) + data_row_limit],
+                    columns=header)
             meta = {"name": name, "sheet": chosen, "sheets": names, "encoding": suffix[1:],
                     "header_row": max(used_header_rows), "header_rows": used_header_rows,
                     "raw_preview": [[str(v)[:120] if v is not None else "" for v in row]
                                     for row in data_rows[:8]]}
-            meta["truncated"] = len(data_rows) > _MAX_TABLE_ROWS + max(used_header_rows)
+            meta["truncated"] = (height > row_limit) or (
+                len(data_rows) > max(used_header_rows) + data_row_limit)
         except ValueError:
             raise
         except Exception as exc:
@@ -454,11 +546,25 @@ def _load_frame(file_index: int, sheet_name: str = "", header_row: int = 1,
         try:
             import pdfplumber
             all_tables = []
+            cell_budget = _MAX_TABLE_CELLS
+            extraction_truncated = False
             with pdfplumber.open(io.BytesIO(data)) as pdf:
-                for page_no, page in enumerate(pdf.pages[:200], start=1):
+                pages = pdf.pages[:200]
+                extraction_truncated = len(pdf.pages) > len(pages)
+                for page_no, page in enumerate(pages, start=1):
                     for table_no, rows in enumerate(page.extract_tables() or [], start=1):
                         if rows and any(any(str(cell or "").strip() for cell in row) for row in rows):
-                            all_tables.append((f"{name}!p{page_no}_t{table_no}", rows))
+                            if len(all_tables) >= _MAX_EXTRACTED_TABLES or cell_budget <= 0:
+                                extraction_truncated = True
+                                break
+                            label = f"{name}!p{page_no}_t{table_no}"
+                            bounded_rows, clipped, used_cells = _bound_raw_table(
+                                rows, sorted(set(header_rows or [header_row])), cell_budget, label)
+                            all_tables.append((label, bounded_rows))
+                            cell_budget -= used_cells
+                            extraction_truncated = extraction_truncated or clipped
+                    if extraction_truncated and (len(all_tables) >= _MAX_EXTRACTED_TABLES or cell_budget <= 0):
+                        break
             matching = next(((label, rows) for label, rows in all_tables
                              if label == sheet_name.strip()), None)
             if not all_tables:
@@ -469,13 +575,16 @@ def _load_frame(file_index: int, sheet_name: str = "", header_row: int = 1,
                 raise ValueError("header_row 必须在 1 到 20 之间")
             width = max((len(row) for row in rows), default=0)
             header = _normalize_headers(rows, used_header_rows, width)
-            frame = _pd().DataFrame([(row + [None] * width)[:width]
-                                     for row in rows[max(used_header_rows):_MAX_TABLE_ROWS + max(used_header_rows)]],
-                                    columns=header)
+            data_row_limit = min(_MAX_TABLE_ROWS, _MAX_TABLE_CELLS // max(1, width))
+            frame = _pd().DataFrame(
+                [(row + [None] * width)[:width]
+                 for row in rows[max(used_header_rows):max(used_header_rows) + data_row_limit]],
+                columns=header)
             meta = {"name": name, "sheet": chosen, "sheets": [label for label, _ in all_tables],
                     "encoding": "pdf-table", "header_row": max(used_header_rows),
                     "header_rows": used_header_rows, "raw_preview": rows[:8],
-                    "truncated": len(rows) > _MAX_TABLE_ROWS + max(used_header_rows)}
+                    "truncated": extraction_truncated or
+                                 len(rows) > max(used_header_rows) + data_row_limit}
         except ValueError:
             raise
         except Exception as exc:
@@ -485,16 +594,38 @@ def _load_frame(file_index: int, sheet_name: str = "", header_row: int = 1,
             from src.core.file_safety import validate_zip_bytes
             validate_zip_bytes(data, label=name)
             with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                document_info = archive.getinfo("word/document.xml")
+                if document_info.file_size > 16 * 1024 * 1024:
+                    raise ValueError("Word 正文 XML 超过 16 MB，已停止解析")
                 root = ET.fromstring(archive.read("word/document.xml"))
             ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
             word_tables = []
+            cell_budget = _MAX_TABLE_CELLS
+            extraction_truncated = False
             for number, table in enumerate(root.findall(".//w:tbl", ns), start=1):
                 rows = []
                 for row in table.findall("./w:tr", ns):
+                    cells = row.findall("./w:tc", ns)
+                    if len(cells) > _MAX_TABLE_COLUMNS:
+                        raise ValueError(f"Word 表格 {number} 列数超过限制 {_MAX_TABLE_COLUMNS}，未执行审查")
                     rows.append(["".join(t.text or "" for t in cell.findall(".//w:t", ns))
-                                 for cell in row.findall("./w:tc", ns)])
+                                 for cell in cells])
+                    if sum(len(item) for item in rows) > _MAX_TABLE_CELLS:
+                        extraction_truncated = True
+                        break
                 if rows:
-                    word_tables.append((f"{name}!t{number}", rows))
+                    if len(word_tables) >= _MAX_EXTRACTED_TABLES or cell_budget <= 0:
+                        extraction_truncated = True
+                        break
+                    label = f"{name}!t{number}"
+                    bounded_rows, clipped, used_cells = _bound_raw_table(
+                        rows, sorted(set(header_rows or [header_row])), cell_budget, label)
+                    word_tables.append((label, bounded_rows))
+                    cell_budget -= used_cells
+                    extraction_truncated = extraction_truncated or clipped
+                    if cell_budget <= 0:
+                        extraction_truncated = True
+                        break
             if not word_tables:
                 raise ValueError("Word 中没有可提取的结构化表格，审查未完成")
             matching = next(((label, rows) for label, rows in word_tables
@@ -503,13 +634,16 @@ def _load_frame(file_index: int, sheet_name: str = "", header_row: int = 1,
             used_header_rows = sorted(set(header_rows or [header_row]))
             width = max((len(row) for row in rows), default=0)
             header = _normalize_headers(rows, used_header_rows, width)
-            frame = _pd().DataFrame([(row + [None] * width)[:width]
-                                     for row in rows[max(used_header_rows):_MAX_TABLE_ROWS + max(used_header_rows)]],
-                                    columns=header)
+            data_row_limit = min(_MAX_TABLE_ROWS, _MAX_TABLE_CELLS // max(1, width))
+            frame = _pd().DataFrame(
+                [(row + [None] * width)[:width]
+                 for row in rows[max(used_header_rows):max(used_header_rows) + data_row_limit]],
+                columns=header)
             meta = {"name": name, "sheet": chosen, "sheets": [label for label, _ in word_tables],
                     "encoding": "docx-table", "header_row": max(used_header_rows),
                     "header_rows": used_header_rows, "raw_preview": rows[:8],
-                    "truncated": len(rows) > _MAX_TABLE_ROWS + max(used_header_rows)}
+                    "truncated": extraction_truncated or
+                                 len(rows) > max(used_header_rows) + data_row_limit}
         except ValueError:
             raise
         except Exception as exc:
@@ -793,64 +927,6 @@ def _write_audit_xlsx(filename: str, meta: dict, findings: list[dict]):
     return out.getvalue()
 
 
-@tool
-def audit_uploaded_table(file_index: int = 0, sheet_name: str = "", header_row: int = 1,
-                         header_rows_json: str = "",
-                         column_mapping_json: str = "{}", group_columns_json: str = "[]",
-                         value_columns_json: str = "[]", integer_data_confirmed: bool = False,
-                         sd_kind: str = "", include_report: bool = False) -> str:
-    """对本轮 CSV/TSV/Excel/PDF/Word 提取表执行可解释审查，不改原件。先调用 inspect_uploaded_table；只传有依据的字段映射、分组与测量列。按复杂度设置 include_report；明确要求报告或需逐行复核时设 true。整数均值/SD检查仅在 integer_data_confirmed=true 且数据确为整数粒度时启用；sd_kind 可选 sample/population。"""
-    mapping = _json_arg(column_mapping_json, dict, {})
-    groups = _json_arg(group_columns_json, list, [])
-    values = _json_arg(value_columns_json, list, [])
-    if any(not isinstance(k, str) or not isinstance(v, str) for k, v in mapping.items()):
-        raise ValueError("字段映射需要字符串到字符串")
-    if any(not isinstance(v, str) for v in groups + values):
-        raise ValueError("分组列和测量列需要字符串数组")
-    header_rows = _parse_header_rows(header_rows_json, header_row)
-    frame, meta = _load_frame(file_index, sheet_name, header_row, header_rows)
-    findings, issue_rows = _audit_frame(frame, mapping, groups, values,
-                                        row_offset=max(meta.get("header_rows") or [header_row]) + 1,
-                                        integer_data_confirmed=bool(integer_data_confirmed),
-                                        sd_kind=str(sd_kind or "").lower())
-    meta.update(_profile(frame))
-    include_report = bool(include_report or len(findings) > 12 or meta.get("truncated"))
-    report_links = ""
-    if include_report:
-        xlsx_bytes = _write_audit_xlsx(Path(meta["name"]).stem + "_数据审查.xlsx", meta, findings)
-        xlsx_url = _save_artifact(Path(meta["name"]).stem + "_数据审查.xlsx", xlsx_bytes,
-                                  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    flagged = sorted(issue_rows)
-    csv_buffer = io.StringIO(newline="")
-    writer = csv.writer(csv_buffer)
-    writer.writerow(["原始行号", "检查项", *[_safe_spreadsheet_value(str(c)) for c in frame.columns]])
-    for idx in flagged:
-        raw_values = [_safe_spreadsheet_value(v) for v in frame.iloc[idx].where(frame.iloc[idx].notna(), "").tolist()]
-        writer.writerow([idx + int(meta.get("header_row", 1)) + 1,
-                         ";".join(sorted(issue_rows[idx])), *raw_values])
-    if include_report:
-        csv_url = _save_artifact(Path(meta["name"]).stem + "_异常行.csv",
-                                 csv_buffer.getvalue().encode("utf-8-sig"), "text/csv; charset=utf-8")
-        report_links = f"\n\n- [下载 XLSX 审查报告]({xlsx_url})\n- [下载异常行 CSV]({csv_url})"
-    severe = sum(1 for f in findings if f["severity"] == "error")
-    review = sum(1 for f in findings if f["severity"] == "review")
-    summary = (f"已审查 {meta['name']}（{meta.get('sheet') or 'CSV'}，{frame.shape[0]} 行 × {frame.shape[1]} 列）。"
-               f"发现 {len(findings)} 项提示，其中需复核 {review} 项、明确结构错误 {severe} 项；"
-               "离群与组间差异均为复核提示，不会自动判错或改写原始数据。")
-    if meta.get("truncated"):
-        summary += f"注意：超过 {_MAX_TABLE_ROWS:,} 行，当前检查仅覆盖前 {_MAX_TABLE_ROWS:,} 行。"
-    details = "\n".join(
-        f"- {item['severity']} · {item['check']} · {item['field'] or '全表'}"
-        f"{(' · 第 ' + str(item['row']) + ' 行') if item['row'] else ''}：{item['detail']}"
-        for item in findings[:30])
-    if len(findings) > 30:
-        details += f"\n- 其余 {len(findings) - 30} 项见完整报告。"
-    return summary + ("\n\n发现明细：\n" + details if details else "") + report_links
-
-
-_DOI_PATTERN = re.compile(r"(?i)(?:https?://(?:dx\.)?doi\.org/)?\b10\.\d{4,9}/[^\s<>\[\]{}\"']+")
-
-
 def _extract_attachment_text(item: dict[str, Any]) -> str:
     name = str(item.get("name") or "")
     data = item.get("data") or b""
@@ -1055,174 +1131,154 @@ def verify_uploaded_references(file_index: int = 0, references_json: str = "") -
             f"[下载 DOI 核验表]({url})")
 
 
-@tool
-def audit_uploaded_data_bundle(file_indexes_json: str | list[int] = "", include_report: bool = True) -> str:
-    """跨本轮上传的 CSV/TSV/Excel/PDF/Word 表格执行通用数值审查，并查找跨工作表/文件完全重复的数值列。先 inspect_uploaded_table 确认表头；此工具不推断实验组语义、不修改文件，发现均是人工复核线索。多表审查通常保留 XLSX 报告；include_report=false 仅用于简短快速核对。"""
-    requested = _json_arg(file_indexes_json, list, list(range(len(get_request_tables()))))
-    if any(type(index) is not int for index in requested):
-        raise ValueError("file_indexes_json 必须是整数数组")
-    entries = []
-    skipped = []
-    for index in requested:
-        item = _attachment(index)
-        try:
-            _, first_meta = _load_frame(index)
-            sheet_names = first_meta.get("sheets") or [first_meta.get("sheet") or ""]
-            for sheet in sheet_names:
-                try:
-                    frame, meta = _load_frame(index, sheet_name=str(sheet or ""))
-                    findings, _ = _audit_frame(frame, {}, [], [],
-                                                row_offset=max(meta.get("header_rows") or [1]) + 1)
-                    source = f"文件 {index + 1} · {meta.get('sheet') or meta.get('name')}"
-                    for finding in findings:
-                        finding["field"] = f"{source} · {finding.get('field', '')}"
-                    entries.append((source, frame, meta, findings))
-                except Exception as exc:
-                    skipped.append(f"{item.get('name')} · {sheet}: {type(exc).__name__}: {exc}")
-        except Exception as exc:
-            skipped.append(f"{item.get('name')}: {type(exc).__name__}: {exc}")
-    if not entries:
-        return "审查未完成：没有任何表格可成功解析。" + ("\n" + "\n".join(skipped[:20]) if skipped else "")
-    # Cross-table exact numeric column reuse: stable value sequence hashes avoid
-    # retaining additional copies of uploaded data in reports.
-    seen_columns: dict[str, tuple[str, str]] = {}
-    cross_findings = []
-    for source, frame, _meta, _findings in entries:
-        for column in frame.columns[:200]:
-            values = _pd().to_numeric(frame[column], errors="coerce").dropna()
-            if len(values) < 5 or values.nunique() < 3:
-                continue
-            normalized = "\n".join(format(float(v), ".12g") for v in values)
-            digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-            previous = seen_columns.get(digest)
-            if previous and previous[0] != source:
-                cross_findings.append({"severity": "review", "check": "cross_file_identical_numeric_column",
-                    "field": f"{previous[0]} · {previous[1]} ↔ {source} · {column}", "row": "",
-                    "detail": f"两处有 {len(values)} 个非空数值按顺序完全一致；可能为共享对照、重复导出或数据复用，需核对表注和实验设计。"})
-            else:
-                seen_columns[digest] = (source, str(column))
-    all_findings = [finding for _, _, _, findings in entries for finding in findings] + cross_findings
-    meta = {"name": "本轮上传数据集合", "sheet": f"解析 {len(entries)} 个表/工作表",
-            "rows": sum(int(frame.shape[0]) for _, frame, _, _ in entries),
-            "columns": sum(int(frame.shape[1]) for _, frame, _, _ in entries),
-            "scan_errors": skipped}
-    report_link = ""
-    if include_report or len(all_findings) > 12 or skipped:
-        report = _write_audit_xlsx("跨文件数据审查.xlsx", meta, all_findings)
-        report_url = _save_artifact("跨文件数据审查.xlsx", report,
-                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        report_link = f"\n\n[下载 XLSX 审查报告]({report_url})"
-    statuses = f"已解析 {len(entries)} 个表/工作表，发现 {len(all_findings)} 项复核线索，其中跨表/跨文件重复数值列 {len(cross_findings)} 项。"
-    if skipped:
-        statuses += f"另有 {len(skipped)} 个对象未完成解析；审查不完整，不代表未发现异常。"
-    details = "\n".join(f"- {f['severity']} · {f['check']} · {f['field']}：{f['detail']}"
-                       for f in all_findings[:30])
-    return statuses + ("\n\n" + details if details else "\n没有触发已实现的数值线索规则；这不证明数据无问题。") + report_link
+def _audit_category_for_kind(kind: str) -> str:
+    known = {check: label for label, checks in _AUDIT_CATEGORIES for check in checks}
+    if kind in known:
+        return known[kind]
+    lowered = kind.lower()
+    if any(token in lowered for token in ("duplicate", "reuse", "identical", "repeat", "block_dup")):
+        return "重复值与数据复用"
+    if any(token in lowered for token in ("outlier", "anomal", "range")):
+        return "异常值"
+    if any(token in lowered for token in ("grim", "mean", "sd", "summary")):
+        return "均值与标准差自洽性"
+    if any(token in lowered for token in ("digit", "decimal", "tail", "ending")):
+        return "数字分布与小数尾"
+    if any(token in lowered for token in ("row", "relation", "offset", "ratio", "linear", "sum", "diff", "progression")):
+        return "行列关系与局部数值模式"
+    if any(token in lowered for token in ("missing", "empty", "mixed", "invalid", "constant_field")):
+        return "缺失值与数据格式"
+    if any(token in lowered for token in ("group", "replicate", "design")):
+        return "组别与重复数"
+    return "其他审查线索"
 
 
-_AUDIT_MARKDOWN_CATEGORIES = (
-    ("缺失值与数据格式", {"missing_values", "mixed_numeric_text", "empty_table",
-                           "constant_field", "invalid_group_mapping", "invalid_value_mapping"}),
-    ("重复值与数据复用", {"duplicate_row", "identical_columns", "identical_row_reuse",
-                           "cross_sheet_column_duplicate", "cross_file_identical_numeric_column",
-                           "identical_after_rounding", "block_value_duplication",
-                           "within_col_duplicate", "equal_pair", "equal_pairs"}),
-    ("异常值", {"iqr_outlier", "outlier", "range_outlier"}),
-    ("组别与重复数", {"unequal_group_size", "unequal_replicates", "design_checks_skipped"}),
-    ("行列关系与局部数值模式", {"constant_offset_columns", "constant_ratio_columns",
-                              "exact_linear_columns", "constant_offset", "constant_ratio",
-                              "exact_linear", "sum_constant", "small_diff_set",
-                              "partial_constant_offset", "partial_constant_ratio",
-                              "local_offset_run", "local_ratio_run", "partial_value_overlap",
-                              "offset_row_reuse", "ratio_row_reuse", "row_relation",
-                              "row_pairs", "row_relations"}),
-    ("数字分布与小数尾", {"decimal_ending_concentration", "last_digit_distribution",
-                          "repeated_decimal_endings", "decimal_tail_clustering",
-                          "within_col_decimal_repetition", "digit_distribution"}),
-    ("均值与标准差自洽性", {"integer_mean_inconsistent", "integer_summary_inconsistent",
-                           "grim_inconsistent", "grimmer_inconsistent", "grim_sd_skipped"}),
-    ("其他审查线索", set()),
-)
+def _audit_report_subject(source_name: str) -> str:
+    stem = Path(source_name).stem
+    stem = re.sub(r"^(?:[0-9a-f]{20,}[_-]+)+", "", stem, flags=re.IGNORECASE)
+    stem = re.sub(
+        r"(?:[_\-\s]*(?:科研数据审查|数据审查|审查结果|仪器导出|仪器数据|数据导出|科研数据|审查|导出|报告))+$",
+        "", stem,
+        flags=re.IGNORECASE,
+    )
+    stem = re.sub(r"^[_\-\s]+|[_\-\s]+$", "", stem)
+    return _safe_name(stem[:36], "科研数据")
 
 
-def _render_audit_markdown(findings: list[dict[str, Any]], *, scan: dict[str, Any],
-                           inspected_rows: int, inspected_cols: int,
-                           skipped: list[str]) -> bytes:
-    """Render an at-a-glance Markdown report with an explicit row for every check category."""
-    grouped: dict[str, list[dict[str, Any]]] = {label: [] for label, _ in _AUDIT_MARKDOWN_CATEGORIES}
-    not_run: list[str] = []
-    known = {kind: label for label, kinds in _AUDIT_MARKDOWN_CATEGORIES for kind in kinds}
+def _render_audit_html(findings: list[dict[str, Any]], *, title: str, scan: dict[str, Any],
+                       inspected_rows: int, inspected_cols: int,
+                       skipped: list[str]) -> bytes:
+    """Render one concise, self-contained HTML report with escaped user data."""
+    grouped: dict[str, list[dict[str, Any]]] = {label: [] for label, _ in _AUDIT_CATEGORIES}
+    not_run: dict[str, list[str]] = {
+        "组别与重复数": [],
+        "均值与标准差自洽性": [],
+    }
     for finding in findings:
         kind = str(finding.get("check") or finding.get("kind") or "")
-        if kind in {"design_checks_skipped", "grim_sd_skipped"}:
-            not_run.append(str(finding.get("detail") or kind))
+        if kind == "design_checks_skipped":
+            not_run["组别与重复数"].append(str(finding.get("detail") or kind))
             continue
-        label = known.get(kind)
-        if label is None:
-            lowered = kind.lower()
-            if any(token in lowered for token in ("duplicate", "reuse", "identical", "repeat", "block_dup")):
-                label = "重复值与数据复用"
-            elif any(token in lowered for token in ("outlier", "anomal", "range")):
-                label = "异常值"
-            elif any(token in lowered for token in ("grim", "mean", "sd", "summary")):
-                label = "均值与标准差自洽性"
-            elif any(token in lowered for token in ("digit", "decimal", "tail", "ending")):
-                label = "数字分布与小数尾"
-            elif any(token in lowered for token in ("row", "relation", "offset", "ratio", "linear", "sum", "diff", "progression")):
-                label = "行列关系与局部数值模式"
-            else:
-                label = "其他审查线索"
+        if kind == "grim_sd_skipped":
+            not_run["均值与标准差自洽性"].append(str(finding.get("detail") or kind))
+            continue
+        label = _audit_category_for_kind(kind)
         grouped[label].append(finding)
 
     coverage = scan.get("coverage") or {}
     sheets = len((scan.get("scan_stats") or {}).get("sheets") or [])
     n_files = int(scan.get("n_files") or coverage.get("files_succeeded") or 0)
     status = str(scan.get("scan_status") or "partial")
-    lines = [
-        "# 科研数据审查报告", "",
-        f"- **状态：** {status}",
-        f"- **文件 / 工作表：** {n_files} 个文件 / {sheets} 张工作表",
-        f"- **基础表格检查：** {inspected_rows} 行 × {inspected_cols} 列",
-        f"- **复核线索：** {sum(map(len, grouped.values()))} 项",
-        "- **说明：** 命中仅表示需要结合原始记录、图注、Methods 或实验设计复核，不代表数据错误或研究不端。",
-        "",
-    ]
-    if not_run:
-        lines.extend(["## 未执行的检查", ""])
-        lines.extend(f"- {note}" for note in dict.fromkeys(not_run))
-        lines.append("")
+    total_findings = sum(map(len, grouped.values()))
+    esc = lambda value: html.escape(str(value or ""), quote=True)
+    status_text = "已完成" if status == "complete" else "部分完成"
+    rows: list[str] = []
+    coverage_notice = ""
     if status != "complete":
         limits = (coverage.get("limitations") or [])
-        lines.extend(["## 覆盖情况", "", "**扫描未完整结束；未检查范围不能写作‘无异常’。**"])
-        for limitation in limits:
-            lines.append(f"- {limitation}")
-        for error in skipped:
-            lines.append(f"- 未完成：{error}")
-        lines.append("")
+        coverage_notes = [str(item) for item in [*limits, *skipped] if item]
+        note = "未检查范围不能写作“无异常”。"
+        if coverage_notes:
+            note += " 未完成项：" + "；".join(dict.fromkeys(coverage_notes[:3]))
+        coverage_notice = f'<div class="notice"><strong>覆盖不完整</strong><span>{esc(note)}</span></div>'
 
-    for label, _ in _AUDIT_MARKDOWN_CATEGORIES:
+    for label, _ in _AUDIT_CATEGORIES:
         items = grouped[label]
-        lines.extend([f"## {label}", ""])
-        if not items:
-            lines.extend(["无", ""])
+        if not items and not_run.get(label):
+            result = "未执行：" + "；".join(list(dict.fromkeys(not_run[label]))[:2])
+            rows.append(f'<tr><th>{esc(label)}</th><td><span class="state skipped">未执行</span> {esc(result)}</td></tr>')
             continue
-        # Avoid an unbounded Markdown artifact for very large files. The full
-        # machine-readable report still contains every finding.
-        for index, finding in enumerate(items[:500], 1):
-            kind = str(finding.get("check") or finding.get("kind") or "复核线索")
-            severity = str(finding.get("severity") or "待复核")
-            details = [str(finding.get(key) or "") for key in ("file", "sheet", "location", "field")]
-            place = "；".join(dict.fromkeys(part for part in details if part))
-            detail = str(finding.get("detail") or finding.get("rule") or "需结合实验背景复核")
-            prefix = f"**{kind}**（{severity}）"
-            if place:
-                prefix += f"｜{place}"
-            lines.append(f"{index}. {prefix}：{detail}")
-        if len(items) > 500:
-            lines.append(f"- 本类另有 {len(items) - 500} 项未在 Markdown 中展开；完整列表见机器可读 JSON 和详细 HTML。")
-        lines.append("")
-    lines.extend(["---", "本报告由规则扫描生成。异常值、重复关系和数字模式均为筛查线索；是否合理需结合实验设计和原始记录判断。", ""])
-    return "\n".join(lines).encode("utf-8")
+        if not items and not not_run.get(label):
+            rows.append(f'<tr><th>{esc(label)}</th><td><span class="state clear">无</span><span class="muted">已检查范围内</span></td></tr>')
+            continue
+
+        # Fold repeated hits by rule and table location. Show a few concrete
+        # examples so large scans remain readable while retaining traceability.
+        buckets: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+        for finding in items:
+            key = (
+                str(finding.get("check") or finding.get("kind") or "复核线索"),
+                str(finding.get("file") or ""),
+                str(finding.get("sheet") or ""),
+            )
+            buckets.setdefault(key, []).append(finding)
+        examples: list[str] = []
+        bucket_items = list(buckets.items())
+        for (kind, file_name, sheet), hits in bucket_items[:3]:
+            label_parts = [part for part in (kind or "复核线索", file_name, sheet) if part]
+            fields = list(dict.fromkeys(str(hit.get("field") or "") for hit in hits if hit.get("field")))[:4]
+            locations = list(dict.fromkeys(
+                str(hit.get("location") or hit.get("range") or "") for hit in hits
+                if hit.get("location") or hit.get("range")
+            ))[:3]
+            details = list(dict.fromkeys(
+                str(hit.get("detail") or hit.get("rule") or "") for hit in hits
+                if hit.get("detail") or hit.get("rule")
+            ))[:2]
+            example = " · ".join(label_parts) + f"：{len(hits)} 条"
+            if fields:
+                example += "；字段 " + "、".join(fields)
+            if locations:
+                example += "；位置 " + "、".join(locations)
+            if details:
+                detail_text = "；".join(details)
+                if len(detail_text) > 140:
+                    detail_text = detail_text[:137].rstrip() + "…"
+                example += "；" + detail_text
+            examples.append(example.replace("|", "／").replace("\n", " "))
+        extra_groups = max(0, len(bucket_items) - len(examples))
+        result_parts = [f'<strong>{len(items)} 条待复核</strong>']
+        if examples:
+            result_parts.append("<ul>" + "".join(f"<li>{esc(example)}</li>" for example in examples) + "</ul>")
+        if extra_groups:
+            result_parts.append(f'<span class="muted">另有 {extra_groups} 组同类线索，已计入数量</span>')
+        if not_run.get(label):
+            result_parts.append(f'<p><span class="state skipped">未执行</span> {esc("；".join(list(dict.fromkeys(not_run[label]))[:2]))}</p>')
+        rows.append(f'<tr><th>{esc(label)}</th><td>{"".join(result_parts)}</td></tr>')
+
+    source_label = esc(title)
+    html_report = f'''<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{source_label}报告</title><style>
+:root{{color-scheme:light;--ink:#202a24;--muted:#6c756f;--line:#e3e9e4;--green:#2f7651;--pale:#f4f8f4;--amber:#9a5b08}}
+*{{box-sizing:border-box}}body{{margin:0;background:#f5f7f5;color:var(--ink);font:15px/1.65 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}}
+main{{max-width:1020px;margin:36px auto;padding:0 20px}}.card{{background:#fff;border:1px solid var(--line);border-radius:16px;box-shadow:0 8px 28px #18351c0a;overflow:hidden}}
+header{{padding:26px 30px 20px;border-bottom:1px solid var(--line)}}h1{{margin:0 0 14px;font-size:24px;letter-spacing:.02em}}.stats{{display:flex;flex-wrap:wrap;gap:9px}}
+.stat{{padding:6px 11px;background:var(--pale);border:1px solid var(--line);border-radius:999px;font-size:13px}}.stat b{{color:var(--green)}}
+.intro{{margin:14px 0 0;color:var(--muted);font-size:13px}}.notice{{margin:18px 30px 0;padding:12px 14px;border-radius:10px;background:#fff7e8;color:#754d15;border:1px solid #f1dfbf;display:grid;gap:3px}}
+.table-wrap{{padding:18px 30px 26px;overflow-x:auto}}table{{width:100%;border-collapse:collapse}}th,td{{padding:14px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}}
+th{{width:190px;font-weight:650;white-space:nowrap}}tr:last-child th,tr:last-child td{{border-bottom:0}}td strong{{display:inline-block;margin:2px 0 4px}}
+ul{{margin:5px 0 0;padding-left:20px}}li+li{{margin-top:5px}}.muted{{color:var(--muted);font-size:13px}}.state{{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;font-weight:650;margin-right:7px}}
+.clear{{color:var(--green);background:#edf7f0}}.skipped{{color:var(--amber);background:#fff2d8}}footer{{padding:14px 30px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}}
+@media(max-width:640px){{main{{margin:14px auto;padding:0 10px}}header,.table-wrap{{padding-left:18px;padding-right:18px}}.notice{{margin-left:18px;margin-right:18px}}th{{width:130px;white-space:normal}}}}
+</style></head><body><main><article class="card"><header><h1>{source_label}报告</h1>
+<div class="stats"><span class="stat">状态：<b>{esc(status_text)}</b></span><span class="stat">文件/工作表：<b>{n_files}/{sheets}</b></span>
+<span class="stat">检查范围：<b>{inspected_rows} 行 × {inspected_cols} 列</b></span><span class="stat">待复核：<b>{total_findings} 条</b></span></div>
+<p class="intro">规则命中仅为复核线索，不代表数据错误或研究不端。</p></header>
+{coverage_notice}
+<div class="table-wrap"><table><thead><tr><th>检查类别</th><th>结果与位置</th></tr></thead><tbody>{"".join(row for row in rows if row.startswith("<tr>") )}</tbody></table></div>
+<footer>本报告由数据规则扫描生成。请结合原始记录、实验设计与文稿说明人工复核。</footer></article></main></body></html>'''
+    return html_report.encode("utf-8")
 
 
 @tool
@@ -1233,7 +1289,8 @@ def audit_uploaded_data(file_indexes_json: str | list[int] = "",
                         header_row: int = 1, header_rows_json: str | list[int] = "",
                         integer_data_confirmed: bool = False, sd_kind: str = "",
                         include_report: bool = True) -> str:
-    """统一审查本轮上传的一份或多份表格/论文附件。先 inspect_uploaded_table 理解复杂表头和字段；本工具调用 PaperConan 数值检测全套并补充缺失、类型混杂、重复行、IQR 离群、分组/重复数平衡等通用检查。支持跨工作表/文件关系、行列/局部/块级/小数尾/末位模式及整数摘要统计。所有命中只是复核线索，不推断意图、不修改原件；默认生成可下载报告，并报告完整/部分覆盖状态。"""
+    """统一审查本轮上传的一份或多份表格/论文附件。先 inspect_uploaded_table 理解复杂表头和字段；调用 PaperConan 数值检测并补充数据质量检查。支持跨工作表/文件、行列/局部/块级/小数尾/末位模式及整数摘要统计。所有命中只是复核线索，不推断意图、不修改原件；每次只生成一份按类别汇总的 HTML 异常报告，并标明完整/部分覆盖状态。"""
+    audit_started = time.perf_counter()
     tables = get_request_tables()
     requested = _json_arg(file_indexes_json, list, list(range(len(tables))))
     if any(type(index) is not int for index in requested):
@@ -1250,12 +1307,15 @@ def audit_uploaded_data(file_indexes_json: str | list[int] = "",
     header_rows = _parse_header_rows(header_rows_json, int(header_row))
 
     from src.research.paperconan_adapter import scan_request_tables
+    scan_started = time.perf_counter()
     numeric = scan_request_tables(tables, requested)
+    scan_ms = int((time.perf_counter() - scan_started) * 1000)
     scan = numeric["scan"]
     findings = list(numeric["findings"])
     skipped = list(scan.get("scan_errors") or [])
     inspected_rows = 0
     inspected_cols = 0
+    quality_started = time.perf_counter()
     # Keep general table-quality checks that complement PaperConan. Relation and
     # digit-pattern duplicates are intentionally omitted here; PaperConan owns them.
     upstream_checks = {"identical_columns", "constant_offset_columns", "constant_ratio_columns",
@@ -1291,68 +1351,59 @@ def audit_uploaded_data(file_indexes_json: str | list[int] = "",
                     skipped.append(f"{item.get('name')} · {sheet}: {type(exc).__name__}: {exc}")
         except Exception as exc:
             skipped.append(f"{item.get('name')}: {type(exc).__name__}: {exc}")
+    quality_ms = int((time.perf_counter() - quality_started) * 1000)
     status = str(scan.get("scan_status") or "partial")
     coverage = scan.get("coverage") or {}
     if skipped and status == "complete":
         status = "partial"
     source_names = [str(tables[index].get("name") or f"附件{index + 1}") for index in requested]
-    report_stem = _safe_name(Path(source_names[0]).stem if source_names else "", "科研数据")
     display_name = "、".join(source_names[:3]) + (f" 等 {len(source_names)} 个文件" if len(source_names) > 3 else "")
     safe_skipped = [value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
                     for value in skipped]
-    scan_meta = {
-        "name": display_name,
-        "sheet": f"PaperConan 扫描 {scan.get('n_files', 0)} 个文件、{len(scan.get('scan_stats', {}).get('sheets', []))} 张工作表",
-        "rows": inspected_rows,
-        "columns": inspected_cols,
-        "scan_errors": safe_skipped,
-    }
     non_finding_statuses = {"design_checks_skipped", "grim_sd_skipped"}
     chat_findings = [finding for finding in findings
                      if str(finding.get("check") or finding.get("kind") or "") not in non_finding_statuses]
 
-    report_links = ""
-    need_report = bool(include_report or len(findings) > 8 or len(requested) > 1 or status != "complete")
-    if need_report:
-        xlsx_name = f"{report_stem}_科研数据审查.xlsx"
-        html_name = f"{report_stem}_科研数据审查_详细视图.html"
-        json_name = f"{report_stem}_科研数据审查_机器可读结果.json"
-        markdown_name = f"{report_stem}_科研数据审查.md"
-        scan["name"] = display_name
-        numeric["scan"]["name"] = display_name
-        xlsx = _write_audit_xlsx(xlsx_name, scan_meta, findings)
-        xlsx_url = _save_artifact(xlsx_name, xlsx,
-                                  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        html_url = _save_artifact(html_name, numeric["html_report"], "text/html; charset=utf-8")
-        json_url = _save_artifact(json_name, numeric["json_report"], "application/json; charset=utf-8")
-        markdown = _render_audit_markdown(findings, scan=scan, inspected_rows=inspected_rows,
-                                          inspected_cols=inspected_cols, skipped=safe_skipped)
-        markdown_url = _save_artifact(markdown_name, markdown, "text/markdown; charset=utf-8")
-        report_links = (f"\n\n下载：\n- [Markdown 分类审查报告]({markdown_url})"
-                        f"\n- [XLSX 审查总表]({xlsx_url})"
-                        f"\n- [HTML 详细报告]({html_url})"
-                        f"\n- [JSON 完整扫描结果]({json_url})")
+    # Always produce one user-facing HTML artifact. The structured scan remains
+    # internal instead of becoming several separate downloads.
+    report_subject = _audit_report_subject(source_names[0] if source_names else "")
+    report_name = f"{report_subject}报告.html"
+    scan["name"] = display_name
+    render_started = time.perf_counter()
+    html_report = _render_audit_html(findings, title=report_subject, scan=scan,
+                                     inspected_rows=inspected_rows, inspected_cols=inspected_cols,
+                                     skipped=safe_skipped)
+    render_ms = int((time.perf_counter() - render_started) * 1000)
+    artifact_started = time.perf_counter()
+    report_url = _save_artifact(report_name, html_report, "text/html; charset=utf-8")
+    artifact_ms = int((time.perf_counter() - artifact_started) * 1000)
+    logger.info("[DataAudit] complete status=%s files=%d rows=%d columns=%d findings=%d "
+                "scan_ms=%d quality_ms=%d render_ms=%d artifact_ms=%d total_ms=%d",
+                status, len(requested), inspected_rows, inspected_cols, len(chat_findings),
+                scan_ms, quality_ms, render_ms, artifact_ms,
+                int((time.perf_counter() - audit_started) * 1000))
+    report_links = f"\n\n[打开异常报告]({report_url})"
     if status == "complete":
+        skipped_checks = len(findings) - len(chat_findings)
         if chat_findings:
-            summary = f"数据审查已完成，发现 {len(chat_findings)} 条待复核线索："
-            priority = {"high": 0, "error": 0, "warning": 1, "medium": 2, "review": 3, "info": 4}
-            ordered = sorted(chat_findings, key=lambda item: priority.get(str(item.get("severity") or "review").lower(), 3))
-            for finding in ordered[:3]:
-                location = " · ".join(str(finding.get(key) or "") for key in
-                                       ("file", "sheet", "location", "field") if finding.get(key))
-                detail = str(finding.get("detail") or finding.get("rule") or "需结合实验背景复核")
-                if len(detail) > 180:
-                    detail = detail[:177].rstrip() + "..."
-                summary += f"\n- {finding.get('check') or finding.get('kind') or '复核线索'}"
-                summary += f"{(' · ' + location) if location else ''}：{detail}"
-            if len(chat_findings) > 3:
-                summary += f"\n其余 {len(chat_findings) - 3} 条及各类别结果见审查报告。"
+            category_counts: dict[str, int] = {}
+            for finding in chat_findings:
+                kind = str(finding.get("check") or finding.get("kind") or "")
+                category = _audit_category_for_kind(kind)
+                category_counts[category] = category_counts.get(category, 0) + 1
+            category_summary = "；".join(
+                f"{label} {count} 条" for label, count in category_counts.items()
+            )
+            skipped_summary = f"；另有 {skipped_checks} 项检查未执行" if skipped_checks else ""
+            summary = f"数据审查已完成：{category_summary}{skipped_summary}。详情见异常报告。"
+        elif skipped_checks:
+            summary = f"数据审查已完成，但有 {skipped_checks} 项检查未执行；这些项目不能视为无异常。详情见异常报告。"
         else:
-            summary = "数据审查已完成，当前规则未发现需要复核的异常线索；这不等于证明数据完全无问题。详情见报告。"
+            summary = "数据审查已完成，当前规则未发现待复核线索。详情见异常报告。"
     else:
         summary = "数据审查未完整完成，未完成范围不能判断为无异常。"
         if chat_findings:
-            summary += f"已发现 {len(chat_findings)} 条待复核线索；详情见报告。"
+            summary += f"已发现 {len(chat_findings)} 条待复核线索；详情见异常报告。"
         if safe_skipped:
             summary += " 未完成项：" + "；".join(safe_skipped[:3])
     return summary + report_links
@@ -1468,17 +1519,98 @@ def fetch_and_audit_open_supplements(doi: str) -> str:
             f"[下载原始补充材料归档]({archive_url})\n[下载数据审查报告]({report_url})")
 
 
+def _clean_reference_value(value: Any) -> str:
+    text = str(value or "")
+    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\r\n\t]+", " ", text).strip()[:4000]
+
+
+def _render_reference_export(rows: list[dict[str, Any]], output_format: str) -> tuple[str, str, str]:
+    """Render verified bibliography metadata without inferring missing fields."""
+    fmt = str(output_format or "xlsx").strip().lower()
+    if fmt == "ris":
+        records = []
+        for row in rows[:2000]:
+            fields = ["TY  - JOUR" if _clean_reference_value(row.get("journal")) else "TY  - GEN"]
+            for key, tag in (("title", "TI"), ("journal", "JO"), ("year", "PY"),
+                             ("volume", "VL"), ("issue", "IS"), ("pages", "SP"),
+                             ("doi", "DO"), ("url", "UR")):
+                value = _clean_reference_value(row.get(key, ""))
+                if value:
+                    fields.append(f"{tag}  - {value}")
+            authors = row.get("authors") or []
+            if isinstance(authors, str):
+                authors = [part.strip() for part in re.split(r"\s*;\s*|\s*\|\s*", authors) if part.strip()]
+            if isinstance(authors, list):
+                fields.extend(f"AU  - {_clean_reference_value(author)}" for author in authors if _clean_reference_value(author))
+            citation = _clean_reference_value(row.get("citation", ""))
+            evidence = _clean_reference_value(row.get("evidence", ""))
+            claim = _clean_reference_value(row.get("claim", ""))
+            notes = " | ".join(x for x in (citation, f"结论: {claim}" if claim else "",
+                                             f"证据: {evidence}" if evidence else "") if x)
+            if notes:
+                fields.append(f"N1  - {notes}")
+            fields.append("ER  - ")
+            records.append("\r\n".join(fields))
+        return "\r\n\r\n".join(records) + "\r\n", ".ris", "application/x-research-info-systems; charset=utf-8"
+    if fmt == "bibtex":
+        def escape(value: str) -> str:
+            value = _clean_reference_value(value)
+            substitutions = {"\\": r"\textbackslash{}", "{": r"\{", "}": r"\}",
+                             "&": r"\&", "%": r"\%", "$": r"\$", "#": r"\#",
+                             "_": r"\_", "~": r"\textasciitilde{}", "^": r"\textasciicircum{}"}
+            return "".join(substitutions.get(character, character) for character in value)
+
+        records = []
+        for index, row in enumerate(rows[:2000], 1):
+            seed = _clean_reference_value(row.get("doi") or row.get("url") or row.get("citation") or f"ref{index}")
+            key = "ref_" + hashlib.sha1(seed.encode("utf-8")).hexdigest()[:10]
+            fields = []
+            for key_name, source_key in (("title", "title"), ("author", "authors"),
+                                         ("journal", "journal"), ("year", "year"),
+                                         ("volume", "volume"), ("number", "issue"),
+                                         ("pages", "pages"), ("doi", "doi"), ("url", "url")):
+                value = row.get(source_key, "")
+                if isinstance(value, list):
+                    value = " and ".join(_clean_reference_value(part) for part in value if _clean_reference_value(part))
+                elif source_key == "authors" and isinstance(value, str):
+                    value = " and ".join(part.strip() for part in re.split(r"\s*;\s*|\s*\|\s*", value) if part.strip())
+                value = escape(value)
+                if value:
+                    fields.append(f"  {key_name} = {{{value}}}")
+            citation = escape(row.get("citation", ""))
+            evidence = escape(row.get("evidence", ""))
+            claim = escape(row.get("claim", ""))
+            note = "; ".join(x for x in (citation, f"Claim: {claim}" if claim else "",
+                                              f"Evidence: {evidence}" if evidence else "") if x)
+            if note:
+                fields.append(f"  note = {{{note}}}")
+            entry_type = "article" if _clean_reference_value(row.get("journal")) else "misc"
+            records.append("@" + entry_type + "{" + key + ",\n" + ",\n".join(fields) + "\n}")
+        return "\n\n".join(records) + "\n", ".bib", "application/x-bibtex; charset=utf-8"
+    raise ValueError("format 必须为 xlsx、ris 或 bibtex")
+
+
 @tool
-def export_literature_evidence(title: str, evidence_rows_json: str) -> str:
-    """将已检索到的真实文献证据整理为可下载 XLSX 表格。每行可含 citation、claim、evidence、source、doi、url；不得补造未检索到的书目信息。"""
+def export_literature_evidence(title: str, evidence_rows_json: str,
+                               output_format: str = "xlsx") -> str:
+    """导出已检索/核验的文献证据；output_format 可选 xlsx、ris、bibtex。行可含 citation、title、authors、journal、year、volume、issue、pages、claim、evidence、source、doi、url；缺失字段不补造。"""
     rows = _json_arg(evidence_rows_json, list, [])
+    rows = [row for row in rows[:2000] if isinstance(row, dict)]
+    output_format = str(output_format or "xlsx").strip().lower()
+    if output_format in {"ris", "bibtex"}:
+        body, extension, mime = _render_reference_export(rows, output_format)
+        filename = _safe_name(title, "文献证据") + extension
+        url = _save_artifact(filename, body.encode("utf-8"), mime)
+        return f"文献引用已导出（{len(rows)} 条）。[下载 {output_format.upper()}]({url})"
+    if output_format != "xlsx":
+        return "[ERR_PARSE] output_format 只支持 xlsx、ris 或 bibtex。"
     from openpyxl import Workbook
     wb = Workbook()
     ws = wb.active
     ws.title = "文献证据"
     headers = ["文献", "支持的结论", "原文/证据摘要", "来源", "DOI", "链接"]
     ws.append([_safe_spreadsheet_value(value) for value in headers])
-    for item in rows[:2000]:
+    for item in rows:
         ws.append([_safe_spreadsheet_value(item.get(key, "")) for key in
                    ("citation", "claim", "evidence", "source", "doi", "url")])
     ws.freeze_panes = "A2"
@@ -1489,7 +1621,7 @@ def export_literature_evidence(title: str, evidence_rows_json: str) -> str:
     filename = _safe_name(title, "文献证据") + ".xlsx"
     url = _save_artifact(filename, out.getvalue(),
                          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    return f"文献证据表已生成（{min(len(rows), 2000)} 条）。[下载 XLSX]({url})"
+    return f"文献证据表已生成（{len(rows)} 条）。[下载 XLSX]({url})"
 
 
 def _export_markdown(title: str, content: str, kind: str, svg_code: str = "") -> str:
@@ -1567,30 +1699,32 @@ def export_experiment_design(design_markdown: str = "", title: str = "", svg_cod
 
 @tool
 def save_research_note(project_name: str, note: str) -> str:
-    """仅在用户明确要求保存课题信息时，向当前会话的课题记录写入一条备注。"""
+    """仅在用户明确要求时，向该账号跨会话共享的课题记录写入一条备注。"""
     sid = str(get_session_id() or "")
+    owner = get_user_id()
     project = str(project_name or "").strip()[:120]
     text = str(note or "").strip()[:10000]
-    if not sid or not project or not text:
-        return "[ERR_PARSE] 需要有效会话、课题名称和非空记录"
+    if not sid or not owner or not project or not text:
+        return "[ERR_PARSE] 需要有效登录账号、会话、课题名称和非空记录"
     with sqlite3.connect(str(_db_path())) as conn:
-        conn.execute("INSERT INTO research_notes(session_id,project_name,note,created_at) VALUES(?,?,?,?)",
-                     (sid, project, text, time.time()))
-    return f"已将这条记录保存到当前会话的课题“{project}”；不会自动写入共享知识库。"
+        conn.execute("INSERT INTO research_notes(session_id,owner_user_id,project_name,note,created_at) "
+                     "VALUES(?,?,?,?,?)", (sid, int(owner), project, text, time.time()))
+    return f"已将记录保存到账号内课题“{project}”，可在该账号的其他会话回顾；不会写入共享知识库。"
 
 
 @tool
 def recall_research_notes(project_name: str, limit: int = 20) -> str:
-    """回顾当前会话内指定课题已明确保存的记录。"""
-    sid = str(get_session_id() or "")
+    """回顾当前登录账号在不同会话中已明确保存的指定课题记录。"""
+    owner = get_user_id()
     project = str(project_name or "").strip()[:120]
-    if not sid or not project:
-        return "[ERR_PARSE] 需要有效会话和课题名称"
+    if not owner or not project:
+        return "[ERR_PARSE] 需要有效登录账号和课题名称"
     with sqlite3.connect(str(_db_path())) as conn:
-        rows = conn.execute("SELECT note,created_at FROM research_notes WHERE session_id=? AND project_name=? ORDER BY id DESC LIMIT ?",
-                             (sid, project, max(1, min(int(limit), 50)))).fetchall()
+        rows = conn.execute("SELECT note,created_at FROM research_notes WHERE owner_user_id=? "
+                            "AND project_name=? ORDER BY id DESC LIMIT ?",
+                            (int(owner), project, max(1, min(int(limit), 50)))).fetchall()
     if not rows:
-        return f"当前会话没有课题“{project}”的已保存记录。"
+        return f"当前账号没有课题“{project}”的已保存记录。"
     return "\n".join(f"- [{datetime.fromtimestamp(ts, timezone.utc).astimezone().isoformat(timespec='minutes')}] {note}"
                      for note, ts in reversed(rows))
 
@@ -1598,15 +1732,16 @@ def recall_research_notes(project_name: str, limit: int = 20) -> str:
 @tool
 def export_research_notes(project_name: str, limit: int = 100, svg_code: str = "") -> str:
     """将课题记录导出为按课题命名的 HTML 文件；若记录配有 SVG，将代码放入 svg_code 自动安全清理并内嵌。"""
-    sid = str(get_session_id() or "")
+    owner = get_user_id()
     project = str(project_name or "").strip()[:120]
-    if not sid or not project:
-        return "[ERR_PARSE] 需要有效会话和课题名称"
+    if not owner or not project:
+        return "[ERR_PARSE] 需要有效登录账号和课题名称"
     with sqlite3.connect(str(_db_path())) as conn:
-        rows = conn.execute("SELECT note,created_at FROM research_notes WHERE session_id=? AND project_name=? ORDER BY id ASC LIMIT ?",
-                            (sid, project, max(1, min(int(limit), 500)))).fetchall()
+        rows = conn.execute("SELECT note,created_at FROM research_notes WHERE owner_user_id=? "
+                            "AND project_name=? ORDER BY id ASC LIMIT ?",
+                            (int(owner), project, max(1, min(int(limit), 500)))).fetchall()
     if not rows:
-        return f"当前会话没有课题“{project}”的记录可导出。"
+        return f"当前账号没有课题“{project}”的记录可导出。"
     body = "\n\n".join(
         f"## {datetime.fromtimestamp(ts, timezone.utc).astimezone().isoformat(timespec='minutes')}\n\n{note}"
         for note, ts in rows)

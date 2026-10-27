@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Interactively create the first CitrusQA administrator on a private server session."""
+"""Create the first CitrusQA administrator, or promote its existing account privately."""
 from __future__ import annotations
 
 import getpass
@@ -9,7 +9,8 @@ from pathlib import Path
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE_ROOT))
 
-from src.auth import create_first_admin, init_store, list_users  # noqa: E402
+from src.auth import (create_first_admin, init_store, list_users,
+                      promote_existing_first_admin)  # noqa: E402
 
 
 def main() -> int:
@@ -19,13 +20,17 @@ def main() -> int:
         return 2
 
     username = input("管理员用户名（3–32 位）: ").strip()
-    password = getpass.getpass("管理员密码（至少 10 位，不会回显）: ")
-    confirmation = getpass.getpass("再次输入管理员密码: ")
-    if password != confirmation:
-        print("两次密码不一致，没有创建账号。")
-        return 2
-
-    user, _session_token, error = create_first_admin(username, password)
+    existing = next((user for user in list_users() if user.get("username") == username), None)
+    if existing:
+        password = getpass.getpass("输入该账号当前密码以升级为管理员（不会回显）: ")
+        user, error = promote_existing_first_admin(username, password)
+    else:
+        password = getpass.getpass("管理员密码（至少 10 位，不会回显）: ")
+        confirmation = getpass.getpass("再次输入管理员密码: ")
+        if password != confirmation:
+            print("两次密码不一致，没有创建账号。")
+            return 2
+        user, _session_token, error = create_first_admin(username, password)
     if error or not user:
         print(error or "管理员账号创建失败。")
         return 2

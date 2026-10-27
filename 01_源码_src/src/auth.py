@@ -98,8 +98,23 @@ def init_store() -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_workspace_files_owner ON workspace_files(user_id, session_id);
         """)
+        _ensure_user_profile_columns(conn)
         conn.execute("DELETE FROM browser_sessions WHERE expires_at < ?", (_stamp(),))
         _ensure_session_owner_column()
+
+
+def _ensure_user_profile_columns(conn: sqlite3.Connection) -> None:
+    """Add profile fields in place so existing users and sessions stay intact."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(users)")}
+    migrations = (
+        ("avatar_preset", "ALTER TABLE users ADD COLUMN avatar_preset TEXT NOT NULL DEFAULT '01'"),
+        ("avatar_data", "ALTER TABLE users ADD COLUMN avatar_data BLOB"),
+        ("avatar_updated_at", "ALTER TABLE users ADD COLUMN avatar_updated_at TEXT NOT NULL DEFAULT ''"),
+        ("onboarding_completed", "ALTER TABLE users ADD COLUMN onboarding_completed INTEGER NOT NULL DEFAULT 0"),
+    )
+    for name, statement in migrations:
+        if name not in columns:
+            conn.execute(statement)
 
 
 def _ensure_session_owner_column() -> None:
@@ -122,6 +137,11 @@ def _password_hash(password: str, salt: bytes) -> bytes:
 
 
 def _public_user(row: sqlite3.Row) -> dict[str, Any]:
+    keys = set(row.keys())
+    preset = str(row["avatar_preset"] or "01") if "avatar_preset" in keys else "01"
+    if not re.fullmatch(r"(?:0[1-9]|1[0-9]|20)", preset):
+        preset = "01"
+    onboarding_completed = bool(row["onboarding_completed"]) if "onboarding_completed" in keys else False
     return {
         "user_id": int(row["user_id"]),
         "username": str(row["username"]),
@@ -129,6 +149,11 @@ def _public_user(row: sqlite3.Row) -> dict[str, Any]:
         "active": bool(row["active"]),
         "daily_limit": int(row["daily_limit"]),
         "created_at": str(row["created_at"]),
+        "avatar_preset": preset,
+        "avatar_custom": bool(row["avatar_data"]) if "avatar_data" in keys else False,
+        "avatar_updated_at": str(row["avatar_updated_at"] or "") if "avatar_updated_at" in keys else "",
+        "onboarding_completed": onboarding_completed,
+        "onboarding_required": not onboarding_completed,
     }
 
 
@@ -141,12 +166,15 @@ def validate_credentials(username: str, password: str) -> str | None:
     return None
 
 
-def _create_account(username: str, password: str, *, bootstrap_admin: bool
+def _create_account(username: str, password: str, *, bootstrap_admin: bool, avatar_preset: str = "01"
                     ) -> tuple[dict[str, Any] | None, str | None, str | None]:
     username = str(username or "").strip()
     error = validate_credentials(username, password)
     if error:
         return None, None, error
+    avatar_preset = str(avatar_preset or "01").strip()
+    if not re.fullmatch(r"(?:0[1-9]|1[0-9]|20)", avatar_preset):
+        return None, None, "请选择 01–20 号头像。"
     salt = secrets.token_bytes(16)
     digest = _password_hash(password, salt)
     with _lock, _connect() as conn:
@@ -159,8 +187,9 @@ def _create_account(username: str, password: str, *, bootstrap_admin: bool
             role = "admin" if bootstrap_admin else "user"
             try:
                 cur = conn.execute(
-                    "INSERT INTO users(username,salt,password_hash,role,active,daily_limit,created_at) VALUES(?,?,?,?,1,30,?)",
-                    (username, salt, digest, role, _stamp()))
+                    "INSERT INTO users(username,salt,password_hash,role,active,daily_limit,created_at,avatar_preset) "
+                    "VALUES(?,?,?,?,1,30,?,?)",
+                    (username, salt, digest, role, _stamp(), avatar_preset))
             except sqlite3.IntegrityError:
                 conn.rollback()
                 return None, None, "该用户名已被使用。"
@@ -179,15 +208,87 @@ def _create_account(username: str, password: str, *, bootstrap_admin: bool
     return _public_user(row), token, None
 
 
-def register(username: str, password: str) -> tuple[dict[str, Any] | None, str | None, str | None]:
+def register(username: str, password: str, avatar_preset: str = "01"
+             ) -> tuple[dict[str, Any] | None, str | None, str | None]:
     """Public self-service registration; never grants administrator rights."""
-    return _create_account(username, password, bootstrap_admin=False)
+    return _create_account(username, password, bootstrap_admin=False, avatar_preset=avatar_preset)
 
 
 def create_first_admin(username: str, password: str
                        ) -> tuple[dict[str, Any] | None, str | None, str | None]:
     """Create an administrator from a private local CLI, never from HTTP."""
     return _create_account(username, password, bootstrap_admin=True)
+
+
+def promote_existing_first_admin(username: str, password: str
+                                 ) -> tuple[dict[str, Any] | None, str | None]:
+    """Promote an existing account from a private CLI if no administrator exists.
+
+    This recovers installations where public registration happened before the
+    private administrator bootstrap. The account's password must be verified;
+    the HTTP registration path never calls this function.
+    """
+    username = str(username or "").strip()
+    with _lock, _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("SELECT 1 FROM users WHERE role='admin' LIMIT 1").fetchone():
+            conn.rollback()
+            return None, "管理员账号已存在；拒绝再次初始化。"
+        row = conn.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+        if not row:
+            conn.rollback()
+            return None, "没有找到该账号。"
+        if not row["active"]:
+            conn.rollback()
+            return None, "该账号已停用，不能升级。"
+        candidate = _password_hash(str(password or ""), bytes(row["salt"]))
+        if not hmac.compare_digest(candidate, bytes(row["password_hash"])):
+            conn.rollback()
+            return None, "当前密码不正确。"
+        conn.execute("UPDATE users SET role='admin' WHERE user_id=?", (int(row["user_id"]),))
+        promoted = conn.execute("SELECT * FROM users WHERE user_id=?", (int(row["user_id"]),)).fetchone()
+        conn.commit()
+    assign_legacy_sessions_to_admin(int(promoted["user_id"]))
+    return _public_user(promoted), None
+
+
+def set_avatar_preset(user_id: int, preset: str) -> bool:
+    preset = str(preset or "").strip()
+    if not re.fullmatch(r"(?:0[1-9]|1[0-9]|20)", preset):
+        return False
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            "UPDATE users SET avatar_preset=?,avatar_data=NULL,avatar_updated_at=? WHERE user_id=? AND active=1",
+            (preset, _stamp(), int(user_id)),
+        )
+    return cur.rowcount > 0
+
+
+def set_custom_avatar(user_id: int, image_data: bytes) -> bool:
+    if not image_data:
+        return False
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            "UPDATE users SET avatar_data=?,avatar_updated_at=? WHERE user_id=? AND active=1",
+            (sqlite3.Binary(image_data), _stamp(), int(user_id)),
+        )
+    return cur.rowcount > 0
+
+
+def get_custom_avatar(user_id: int) -> bytes | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT avatar_data FROM users WHERE user_id=? AND active=1", (int(user_id),)
+        ).fetchone()
+    return bytes(row["avatar_data"]) if row and row["avatar_data"] else None
+
+
+def complete_onboarding(user_id: int) -> bool:
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            "UPDATE users SET onboarding_completed=1 WHERE user_id=? AND active=1", (int(user_id),)
+        )
+    return cur.rowcount > 0
 
 
 def login(username: str, password: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -283,6 +384,21 @@ def reserve_chat_request(user: dict[str, Any]) -> tuple[bool, int]:
                      (user["user_id"], day))
         conn.commit()
     return True, limit
+
+
+def release_chat_request(user: dict[str, Any]) -> None:
+    """Undo a reserved request only when its attachment payload is rejected."""
+    if user.get("role") == "admin":
+        return
+    day = _now().date().isoformat()
+    with _lock, _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "UPDATE daily_usage SET request_count=MAX(0,request_count-1) "
+            "WHERE user_id=? AND day=?",
+            (int(user["user_id"]), day),
+        )
+        conn.commit()
 
 
 def list_users() -> list[dict[str, Any]]:
@@ -389,6 +505,7 @@ def delete_user_account(user_id: int) -> bool:
                     pass
     try:
         from src.guardrails.memory import memory_store
+        memory_store.clear_user_memory(user_id)
         for sid in session_ids:
             memory_store.clear_session(sid)
     except Exception:

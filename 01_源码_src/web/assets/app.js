@@ -1,7 +1,51 @@
 var API_URL = '/api/v2/chat';
 var currentAccount = null;
 var visualizationEnabled = localStorage.getItem('citrus_visualization_enabled') === 'true';
+var citrusAvatarPresets = Array.from({length: 20}, function(_, index) { return String(index + 1).padStart(2, '0'); });
+var signupAvatarPreset = '01';
+var signupAvatarDataUrl = '';
+var settingsAvatarPreset = '01';
+var settingsAvatarDataUrl = '';
+var onboardingSaveInFlight = false;
 function sessionStorageKey() { return 'citrus_session_id_' + (currentAccount ? currentAccount.user_id : ''); }
+function avatarSource(account) {
+  if (!account) return '/assets/avatars/01.webp';
+  if (account.avatar_custom) return '/api/v2/auth/avatar?v=' + encodeURIComponent(account.avatar_updated_at || 'current');
+  var preset = /^\d{2}$/.test(account.avatar_preset || '') ? account.avatar_preset : '01';
+  return '/assets/avatars/' + preset + '.webp';
+}
+function renderAvatarImage(container, account, className, altText) {
+  if (!container) return;
+  container.replaceChildren();
+  var image = document.createElement('img');
+  image.className = className || '';
+  image.src = avatarSource(account);
+  image.alt = altText || '用户头像';
+  image.decoding = 'async';
+  image.onerror = function() {
+    container.replaceChildren();
+    container.textContent = account && account.username
+      ? Array.from(account.username.trim())[0].toLocaleUpperCase() : 'C';
+  };
+  container.appendChild(image);
+}
+function renderAgentAvatar(container) {
+  if (!container) return;
+  var image = document.createElement('img');
+  image.className = 'agent-avatar-image';
+  image.src = '/assets/avatars/08.webp';
+  image.alt = 'CitrusQA 助手';
+  image.width = 36;
+  image.height = 36;
+  image.decoding = 'async';
+  container.replaceChildren(image);
+}
+function refreshCurrentUserAvatars() {
+  renderAvatarImage(document.getElementById('accountAvatar'), currentAccount, 'account-avatar-image', '账户头像');
+  document.querySelectorAll('.message.user .avatar').forEach(function(node) {
+    renderAvatarImage(node, currentAccount, 'message-avatar-image', '我的头像');
+  });
+}
 function showAuthGate(show) {
   var gate = document.getElementById('authGate');
   if (gate) gate.hidden = !show;
@@ -13,15 +57,11 @@ function showAuthGate(show) {
   if (settings) settings.hidden = !currentAccount || currentAccount.role !== 'admin';
   var who = document.getElementById('accountLabel');
   if (who) who.textContent = currentAccount ? currentAccount.username : '';
-  var avatar = document.getElementById('accountAvatar');
-  if (avatar) avatar.textContent = currentAccount && currentAccount.username
-    ? Array.from(currentAccount.username.trim())[0].toLocaleUpperCase() : '?';
+  refreshCurrentUserAvatars();
   var role = document.getElementById('accountRole');
   if (role) role.textContent = currentAccount && currentAccount.role === 'admin' ? '管理员' : '账户';
   var admin = document.getElementById('adminUsersBtn');
   if (admin) admin.hidden = !currentAccount || currentAccount.role !== 'admin';
-  var permission = document.getElementById('permBadge');
-  if (permission) permission.hidden = !currentAccount || currentAccount.role !== 'admin';
   var logout = document.getElementById('logoutBtn');
   if (logout) logout.hidden = !currentAccount;
   if (show) setAccountMenuOpen(false);
@@ -40,13 +80,188 @@ document.addEventListener('click', function(event) {
   var area = document.getElementById('sidebarAccount');
   if (area && !area.contains(event.target)) setAccountMenuOpen(false);
 });
+function renderAvatarGrid(host, selected, onSelect) {
+  if (!host) return;
+  host.replaceChildren();
+  citrusAvatarPresets.forEach(function(preset) {
+    var option = document.createElement('button');
+    option.type = 'button'; option.className = 'avatar-option' + (selected === preset ? ' selected' : '');
+    option.setAttribute('role', 'option'); option.setAttribute('aria-selected', selected === preset ? 'true' : 'false');
+    option.setAttribute('aria-label', '头像 ' + preset); option.title = '头像 ' + preset;
+    var img = document.createElement('img'); img.src = '/assets/avatars/' + preset + '.webp'; img.alt = '';
+    var label = document.createElement('span'); label.textContent = preset;
+    option.appendChild(img); option.appendChild(label);
+    option.addEventListener('click', function() { onSelect(preset); });
+    host.appendChild(option);
+  });
+}
+function setSignupAvatar(preset) {
+  signupAvatarPreset = preset; signupAvatarDataUrl = '';
+  var file = document.getElementById('authAvatarFile'); if (file) file.value = '';
+  var error = document.getElementById('authAvatarError'); if (error) error.textContent = '';
+  var preview = document.getElementById('authAvatarPreview'); if (preview) preview.src = '/assets/avatars/' + preset + '.webp';
+  var label = document.getElementById('authAvatarLabel'); if (label) label.textContent = '已选 ' + preset;
+  renderAvatarGrid(document.getElementById('authAvatarGrid'), preset, setSignupAvatar);
+}
+function syncAuthAvatarPicker() {
+  var picker = document.getElementById('authAvatarPicker');
+  var mode = document.getElementById('authMode');
+  if (!picker || !mode) return;
+  picker.hidden = mode.value !== 'register';
+  if (mode.value === 'register' && !document.getElementById('authAvatarGrid').childElementCount) setSignupAvatar('01');
+}
+function previewSignupAvatar(input) {
+  var file = input && input.files && input.files[0];
+  var error = document.getElementById('authAvatarError'); if (error) error.textContent = '';
+  if (!file) return;
+  if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 5 * 1024 * 1024) {
+    if (error) error.textContent = file.size > 5 * 1024 * 1024 ? '图片不能超过 5 MB。' : '请选择 JPG、PNG 或 WebP 图片。';
+    input.value = ''; return;
+  }
+  var reader = new FileReader();
+  reader.onload = function() {
+    signupAvatarDataUrl = String(reader.result || '');
+    var preview = document.getElementById('authAvatarPreview'); if (preview) preview.src = signupAvatarDataUrl;
+    var label = document.getElementById('authAvatarLabel'); if (label) label.textContent = '自定义头像';
+    renderAvatarGrid(document.getElementById('authAvatarGrid'), '', setSignupAvatar);
+  };
+  reader.onerror = function() { if (error) error.textContent = '读取图片失败，请重试。'; };
+  reader.readAsDataURL(file);
+}
+function openAvatarSettings() {
+  var overlay = document.getElementById('avatarSettingsOverlay'); if (!overlay) return;
+  settingsAvatarPreset = currentAccount && currentAccount.avatar_preset || '01';
+  settingsAvatarDataUrl = '';
+  var input = document.getElementById('settingsAvatarFile'); if (input) input.value = '';
+  var error = document.getElementById('settingsAvatarError'); if (error) error.textContent = '';
+  var preview = document.getElementById('settingsAvatarPreview');
+  if (preview) preview.src = avatarSource(currentAccount);
+  var label = document.getElementById('settingsAvatarLabel');
+  if (label) label.textContent = currentAccount && currentAccount.avatar_custom ? '当前自定义头像' : '预设头像 ' + settingsAvatarPreset;
+  renderAvatarGrid(document.getElementById('settingsAvatarGrid'),
+    currentAccount && currentAccount.avatar_custom ? '' : settingsAvatarPreset, selectSettingsAvatar);
+  overlay.hidden = false;
+  var first = overlay.querySelector('.avatar-option'); if (first) first.focus();
+}
+function closeAvatarSettings() {
+  var overlay = document.getElementById('avatarSettingsOverlay'); if (overlay) overlay.hidden = true;
+  var trigger = document.getElementById('accountTrigger'); if (trigger) trigger.focus();
+}
+function selectSettingsAvatar(preset) {
+  settingsAvatarPreset = preset; settingsAvatarDataUrl = '';
+  var input = document.getElementById('settingsAvatarFile'); if (input) input.value = '';
+  var preview = document.getElementById('settingsAvatarPreview'); if (preview) preview.src = '/assets/avatars/' + preset + '.webp';
+  var label = document.getElementById('settingsAvatarLabel'); if (label) label.textContent = '预设头像 ' + preset;
+  var error = document.getElementById('settingsAvatarError'); if (error) error.textContent = '';
+  renderAvatarGrid(document.getElementById('settingsAvatarGrid'), preset, selectSettingsAvatar);
+}
+function previewSettingsAvatar(input) {
+  var file = input && input.files && input.files[0];
+  var error = document.getElementById('settingsAvatarError'); if (error) error.textContent = '';
+  if (!file) return;
+  if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 5 * 1024 * 1024) {
+    if (error) error.textContent = file.size > 5 * 1024 * 1024 ? '图片不能超过 5 MB。' : '请选择 JPG、PNG 或 WebP 图片。';
+    input.value = ''; return;
+  }
+  var reader = new FileReader();
+  reader.onload = function() {
+    settingsAvatarDataUrl = String(reader.result || '');
+    var preview = document.getElementById('settingsAvatarPreview'); if (preview) preview.src = settingsAvatarDataUrl;
+    var label = document.getElementById('settingsAvatarLabel'); if (label) label.textContent = '自定义头像';
+    renderAvatarGrid(document.getElementById('settingsAvatarGrid'), '', selectSettingsAvatar);
+  };
+  reader.onerror = function() { if (error) error.textContent = '读取图片失败，请重试。'; };
+  reader.readAsDataURL(file);
+}
+async function saveAccountAvatar() {
+  var button = document.getElementById('saveAvatarButton');
+  var error = document.getElementById('settingsAvatarError');
+  if (button) button.disabled = true;
+  if (error) error.textContent = '';
+  try {
+    var endpoint = settingsAvatarDataUrl ? '/api/v2/auth/avatar/upload' : '/api/v2/auth/avatar/preset';
+    var body = settingsAvatarDataUrl ? {data_url: settingsAvatarDataUrl} : {preset: settingsAvatarPreset};
+    var response = await fetch(endpoint, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    var result = await response.json();
+    if (!response.ok) throw new Error(result.detail || '头像保存失败。');
+    currentAccount = result.user;
+    showAuthGate(false);
+    closeAvatarSettings();
+  } catch (e) { if (error) error.textContent = e.message || '头像保存失败。'; }
+  finally { if (button) button.disabled = false; }
+}
+function openOnboardingGuide() {
+  var overlay = document.getElementById('onboardingOverlay'); if (overlay) overlay.hidden = false;
+  var button = overlay && overlay.querySelector('.onboarding-footer button'); if (button) button.focus();
+}
+async function openMemorySettings() {
+  var overlay = document.getElementById('memorySettingsOverlay');
+  var content = document.getElementById('accountMemoryContent');
+  var status = document.getElementById('accountMemoryStatus');
+  if (!overlay || !content) return;
+  overlay.hidden = false; content.textContent = '正在读取…';
+  if (status) status.textContent = '';
+  try {
+    var response = await fetch('/api/v2/auth/memory');
+    var data = await response.json();
+    if (!response.ok) throw new Error(data.detail || '读取账号记忆失败。');
+    var preferences = data.preferences || [], facts = data.facts || [];
+    if (!preferences.length && !facts.length) {
+      content.innerHTML = '<div class="memory-empty">当前账号还没有保存长期记忆。</div>';
+      return;
+    }
+    var html = '';
+    if (preferences.length) {
+      html += '<h3>偏好</h3><div class="memory-list">' + preferences.map(function(item) {
+        return '<article class="memory-row"><strong>' + escapeHtml(item.key || '') + '</strong><span>' + escapeHtml(item.value || '') + '</span></article>';
+      }).join('') + '</div>';
+    }
+    if (facts.length) {
+      html += '<h3>长期事实</h3><div class="memory-list">' + facts.map(function(item) {
+        return '<article class="memory-row"><strong>' + escapeHtml(item.key || '记忆') + '</strong><span>' + escapeHtml(item.value || '') + '</span><small>置信度 ' + Math.round(Number(item.confidence || 0) * 100) + '% · ' + escapeHtml((item.updated_at || '').slice(0,10)) + '</small></article>';
+      }).join('') + '</div>';
+    }
+    content.innerHTML = html;
+  } catch (error) { content.textContent = error.message || '读取账号记忆失败。'; }
+}
+function closeMemorySettings() {
+  var overlay = document.getElementById('memorySettingsOverlay'); if (overlay) overlay.hidden = true;
+  var trigger = document.getElementById('accountTrigger'); if (trigger) trigger.focus();
+}
+async function clearAccountMemory() {
+  if (!window.confirm('清除这个账号保存的偏好和长期事实？会话历史不会删除。')) return;
+  var status = document.getElementById('accountMemoryStatus');
+  var content = document.getElementById('accountMemoryContent');
+  try {
+    var response = await fetch('/api/v2/auth/memory', {method:'DELETE'});
+    var data = await response.json();
+    if (!response.ok) throw new Error(data.detail || '清理失败。');
+    if (status) status.textContent = '已清除';
+    if (content) content.innerHTML = '<div class="memory-empty">当前账号还没有保存长期记忆。</div>';
+  } catch (error) { if (status) status.textContent = error.message || '清理失败。'; }
+}
+async function completeOnboarding() {
+  var overlay = document.getElementById('onboardingOverlay');
+  if (overlay) overlay.hidden = true;
+  if (!currentAccount || currentAccount.onboarding_completed || onboardingSaveInFlight) return;
+  onboardingSaveInFlight = true;
+  try {
+    var response = await fetch('/api/v2/auth/onboarding/complete', {method:'POST'});
+    if (!response.ok) throw new Error('guide state not saved');
+    var data = await response.json(); currentAccount = data.user;
+  } catch (_) {
+    if (overlay) overlay.hidden = false;
+  } finally { onboardingSaveInFlight = false; }
+}
 async function authenticate(mode) {
   var username = (document.getElementById('authUsername').value || '').trim();
   var password = document.getElementById('authPassword').value || '';
   var error = document.getElementById('authError');
   error.textContent = '';
   try {
-    var response = await fetch('/api/v2/auth/' + mode, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:username,password:password})});
+    var payload = {username:username,password:password};
+    if (mode === 'register') payload.avatar_preset = signupAvatarPreset;
+    var response = await fetch('/api/v2/auth/' + mode, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
     var data = await response.json();
     if (!response.ok) throw new Error(data.detail || '登录失败');
     currentAccount = data.user;
@@ -56,7 +271,18 @@ async function authenticate(mode) {
       if (currentAccount.role !== 'admin') throw new Error('此页面仅管理员可访问。');
       location.replace('/admin'); return;
     }
+    var signupAvatarError = '';
+    if (mode === 'register' && signupAvatarDataUrl) {
+      try {
+        var avatarResponse = await fetch('/api/v2/auth/avatar/upload', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({data_url:signupAvatarDataUrl})});
+        var avatarResult = await avatarResponse.json();
+        if (!avatarResponse.ok) throw new Error(avatarResult.detail || '头像上传失败。');
+        currentAccount = avatarResult.user;
+      } catch (avatarErr) { signupAvatarError = '账号已创建，自定义头像未保存；你可以稍后在账户菜单中更换。'; }
+    }
+    signupAvatarDataUrl = '';
     await startAuthenticatedApp();
+    if (signupAvatarError) updateStatus('warn', signupAvatarError);
   } catch (e) { error.textContent = e.message || '请求失败'; }
 }
 async function logoutAccount() {
@@ -79,6 +305,9 @@ async function startAuthenticatedApp() {
     if (configReady) await configReady;
     history.replaceState(null, '', '/');
     openSettingsModal();
+  }
+  if (currentAccount && currentAccount.onboarding_required) {
+    window.setTimeout(openOnboardingGuide, 300);
   }
 }
 async function bootstrapAccount() {
@@ -765,56 +994,6 @@ function applyAppVersion() {
   if (badge) badge.textContent = 'v' + v;
   var w = document.getElementById('welcomeVersion');
   if (w) w.textContent = 'CitrusQA v' + v;
-  updatePermBadge();
-}
-/* v8.4.8 HITL 服务端化：权限模式徽标与 WebUI 切换
-   v8.10f: SVG 简笔线条图标——护盾+对号(全权)/护盾+笔(询问)/护盾+感叹号(只读)，
-   currentColor 描边不渲染色彩 */
-var _permMode = null;
-var _SHIELD = '<path d="M12 3l7 2.8v5.2c0 4.3-2.9 7.8-7 9.5-4.1-1.7-7-5.2-7-9.5V5.8z"/>';
-function _permSvg(inner) {
-  return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' + inner + '</svg>';
-}
-var _permMeta = {
-  'auto_workspace': { ico: _permSvg(_SHIELD + '<path d="M8.6 12.4l2.3 2.3 4.5-4.8"/>'), name: '全权', label: '全权（工作区免询问）' },
-  'ask': { ico: _permSvg(_SHIELD + '<path d="M14.4 6.2l3.4 3.4L9.5 18H7.5v-2z"/><path d="M13 8.6l2.4 2.4"/>'), name: '询问', label: '询问（危险操作审批）' },
-  'deny': { ico: _permSvg(_SHIELD + '<path d="M12 8.2v5.2"/><path d="M12 16.6h.01"/>'), name: '只读', label: '只读（一律拒绝）' },
-};
-function updatePermBadge() {
-  // v8.10j: 仅首次（_permMode 未初始化）用后端下发值；切换后 _permMode 优先——
-  // 旧逻辑每帧用缓存的 runtimeConfig 覆盖新值，导致切换后徽标不刷新（需刷新页面才正确）
-  if (_permMode === null && _runtimeConfig && _runtimeConfig.permission_mode) _permMode = _runtimeConfig.permission_mode;
-  var mode = _permMode || 'auto_workspace';
-  var meta = _permMeta[mode] || _permMeta['auto_workspace'];
-  var b = document.getElementById('permBadge');
-  var ico = document.getElementById('permIco');
-  var nm = document.getElementById('permName');
-  if (ico) ico.innerHTML = meta.ico;
-  if (nm) nm.textContent = meta.name;
-  if (b) { b.className = 'perm-badge ' + mode; b.title = '权限模式（HITL）：' + meta.label + '，点击切换'; }
-  var items = document.querySelectorAll('.perm-menu-item');
-  for (var i = 0; i < items.length; i++) {
-    items[i].className = 'perm-menu-item' + (items[i].getAttribute('data-mode') === mode ? ' active' : '');
-  }
-}
-function togglePermMenu(ev) {
-  var m = document.getElementById('permMenu');
-  if (ev) ev.stopPropagation();
-  m.style.display = m.style.display === 'none' ? 'block' : 'none';
-}
-document.addEventListener('click', function() {
-  var m = document.getElementById('permMenu');
-  if (m) m.style.display = 'none';
-});
-function setPermMode(mode) {
-  if (!confirm('切换权限模式为「' + ((_permMeta[mode] || {}).label || mode) + '」？\n询问模式下写文件需在审批卡片中点击允许。')) return;
-  fetch('/api/v2/permission/mode', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mode: mode }),
-  }).then(function(r) { return r.json(); }).then(function(d) {
-    if (d && d.permission_mode) { _permMode = d.permission_mode; updatePermBadge(); }
-    document.getElementById('permMenu').style.display = 'none';
-  }).catch(function(e) { alert('切换失败: ' + e.message); });
 }
 
 /* ─── v8.4.3/8.4.12: 权限审批卡片（授权动作不写入对话历史）───
@@ -859,73 +1038,6 @@ function grantPermission(toolName, scope) {
     // v8.10j: 不再重放流——v8.4.5 起后端为"挂起等待授权→同一执行内继续"，
     // 授权后原请求自动继续输出；前端重放会造成双通道（二次权限检查 + 二次回答）
   }).catch(function(e) { alert('授权失败: ' + e.message); });
-}
-
-/* ─── v10.0（卡点①）意图澄清卡：LLM 判定歧义后弹出，中文候选 + 自填；超时按推荐项放行 ─── */
-function showIntentCard(data) {
-  var existing = document.getElementById('intent-card');
-  if (existing) existing.remove();
-  var card = document.createElement('div');
-  card.id = 'intent-card';
-  card.className = 'perm-card';
-  var opts = data.options || [];
-  var html = '<div class="perm-title">🤔 确认一下你的问题</div>';
-  if (data.intent_summary) {
-    html += '<div class="intent-question">我理解你想问：' + escapeHtml(data.intent_summary) + '</div>';
-  }
-  if (data.reason) {
-    html += '<div class="perm-hint">存在歧义：' + escapeHtml(data.reason) + '</div>';
-  }
-  for (var i = 0; i < opts.length; i++) {
-    var o = opts[i] || {};
-    var label = escapeHtml(o.text || '');
-    if (o.caliber) {
-      label += '<br><span class="perm-hint">口径：' + escapeHtml(o.caliber) + '</span>';
-    }
-    html += '<button class="intent-opt" data-id="' + (o.id != null ? o.id : (i + 1)) + '">'
-          + (i + 1) + '. ' + label + '</button>';
-  }
-  html += '<div class="intent-custom">'
-        + '<input id="intent-custom-input" type="text" placeholder="以上都不是，自己说明一下…" />'
-        + '<button class="primary" id="intent-custom-send">提交</button></div>'
-        + '<div class="perm-hint">' + (data.timeout_sec || 30) + 's 未选择将按第 1 项继续</div>';
-  card.innerHTML = html;
-  card.querySelectorAll('.intent-opt').forEach(function(btn) {
-    btn.onclick = function() {
-      confirmIntent(data.token, btn.getAttribute('data-id'), '');
-    };
-  });
-  var send = card.querySelector('#intent-custom-send');
-  if (send) {
-    send.onclick = function() {
-      var el = card.querySelector('#intent-custom-input');
-      var v = (el && el.value ? el.value : '').trim();
-      if (!v) return;
-      confirmIntent(data.token, null, v);
-    };
-  }
-  document.body.appendChild(card);
-}
-
-function confirmIntent(token, choiceId, customText) {
-  fetch('/api/v2/intent/confirm', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      token: token,
-      // data-id 来自按钮属性（字符串）→ 归一为数字，NaN 转 null（后端 Optional[int]）
-      choice_id: (function(v) {
-        if (v === null || v === undefined || v === '') return null;
-        var n = parseInt(v, 10);
-        return isNaN(n) ? null : n;
-      })(choiceId),
-      custom_text: customText || null,
-    }),
-  }).then(function(r) { return r.json(); }).then(function() {
-    var card = document.getElementById('intent-card');
-    if (card) card.remove();
-    // 后端为"挂起等待→同一请求内继续"，选择后原 SSE 流自动继续，无需重放
-  }).catch(function(e) { alert('提交失败: ' + e.message); });
 }
 
 /* ─── Theme ─── */
@@ -1339,11 +1451,10 @@ function _updateCtxBtnRing(pct) {
 }
 
 function renderContextPanel(data) {
-  _ctxData = data;
-  var est = data.estimated_tokens || 0;
-  var max = data.max_tokens || _ctxMaxTokens();
+  _ctxData = data || {};
+  var est = Math.max(0, Number(_ctxData.estimated_tokens || 0));
+  var max = Number(_ctxData.max_tokens || _ctxMaxTokens());
   var pct = max > 0 ? est / max : 0;
-
   _updateCtxBtnRing(pct);
 
   var emptyEl = document.getElementById('ctx-empty');
@@ -1351,74 +1462,41 @@ function renderContextPanel(data) {
   if (emptyEl) emptyEl.style.display = 'none';
   if (bodyEl) bodyEl.style.display = '';
 
-  var lvl = _ctxLevelClass(pct);
   var bar = document.getElementById('ctxBar');
   var barLabel = document.getElementById('ctxBarLabel');
-  if (bar) { bar.style.width = Math.round(pct * 100) + '%'; bar.className = 'ctx-bar-inner ' + lvl; }
-  if (barLabel) barLabel.textContent = est.toLocaleString() + ' / ' + max.toLocaleString();
+  if (bar) { bar.style.width = Math.round(Math.min(pct, 1) * 100) + '%'; bar.className = 'ctx-bar-inner ' + _ctxLevelClass(pct); }
+  if (barLabel) barLabel.textContent = est.toLocaleString() + ' / ' + max.toLocaleString() + ' · ' + (_ctxData.estimate_label || '上下文估算');
   var pctEl = document.getElementById('ctx-pct');
   if (pctEl) pctEl.textContent = Math.round(pct * 100) + '%';
 
-  var items = [];
-  if (est <= 0) {
-    items.push({ name: '新会话（无历史消息）', tok: 1 });
-    items.push({ name: '等待首次检索填充上下文...', tok: 0 });
-  } else {
-    var totalForBars = Math.max(est, 1);
-    items.push({ name: '系统提示词', tok: Math.round(totalForBars * 0.12) });
-    items.push({ name: '对话历史 (' + (data.history_msgs || 0) + '轮)', tok: Math.round(totalForBars * 0.42) });
-    if (data.ltm_recalled) {
-      items.push({ name: '长期记忆', tok: Math.round(totalForBars * 0.06) });
-    }
-    var sugCount = (data.suggestions || []).length;
-    if (data.ltm_chars > 0 || sugCount > 0) {
-      items.push({ name: '检索上下文', tok: Math.round(totalForBars * 0.30) });
-    }
-    items.push({ name: '其他开销', tok: Math.round(totalForBars * 0.10) });
-  }
-
-  var itemsHtml = '';
-  var totalForBars = items.reduce(function(s, i) { return s + i.tok; }, 0) || 1;
-  for (var i = 0; i < items.length; i++) {
-    var it = items[i];
-    itemsHtml += '<div class="ctx-item">';
-    itemsHtml += '<span class="ctx-item-name">' + it.name + '</span>';
-    itemsHtml += '<div class="ctx-item-bar"><div class="ctx-item-fill" style="width:' + Math.round(it.tok / totalForBars * 100) + '%"></div></div>';
-    itemsHtml += '<span class="ctx-item-val">' + it.tok.toLocaleString() + '</span>';
-    itemsHtml += '</div>';
-  }
+  var memoryState = _ctxData.memory_status === 'recalled' ? '已召回' : (_ctxData.memory_status === 'empty' ? '当前无相关记忆' : (_ctxData.memory_status === 'not_loaded' ? '刷新后未记录本轮召回状态' : '本轮尚未加载'));
+  var ragState = _ctxData.rag_cache_status === 'hit' ? '命中' : (_ctxData.rag_cache_status === 'miss' ? '未命中' : (_ctxData.rag_cache_status === 'disabled' ? '未启用' : '本轮尚未查询'));
+  var providerCache = _ctxData.model_cache_status === 'reported'
+    ? ((_ctxData.model_cache_source ? _ctxData.model_cache_source + ' · ' : '服务商已报告 · ') + '命中 ' + Number(_ctxData.model_cache_hit || 0).toLocaleString() + ' / 未命中 ' + Number(_ctxData.model_cache_miss || 0).toLocaleString() + ' tokens')
+    : (_ctxData.model_cache_status === 'unavailable' ? '服务商未提供缓存数据' : '本轮尚未收到模型用量');
+  var items = [
+    ['会话历史', Number(_ctxData.history_msgs || 0) + ' 条消息 · ' + Number(_ctxData.history_chars || 0).toLocaleString() + ' 字符'],
+    ['账号记忆', memoryState],
+    ['RAG 查询缓存', ragState],
+    ['模型提示缓存', providerCache]
+  ];
   var itemsEl = document.getElementById('ctxItems');
-  if (itemsEl) {
-    // P3-3: 明细为按初始估算的比例切分（占比可视化），标注说明避免误读为真实测量
-    itemsHtml = '<div class="ctx-item-hint" style="font-size:10px;color:var(--text-muted);opacity:.75;margin-bottom:4px">明细为占比估算，顶部为实际用量</div>' + itemsHtml;
-    itemsEl.innerHTML = itemsHtml;
-  }
+  if (itemsEl) itemsEl.innerHTML = items.map(function(item) {
+    return '<div class="ctx-item"><span class="ctx-item-name">' + escapeHtml(item[0]) + '</span><span class="ctx-item-value">' + escapeHtml(item[1]) + '</span></div>';
+  }).join('');
 
-  var soft = data.soft_threshold || 0.75;
-  var hard = data.hard_threshold || 0.93;
+  var soft = _ctxData.soft_threshold || 0.75;
+  var hard = _ctxData.hard_threshold || 0.93;
   var sumEl = document.getElementById('ctxSummary');
-  if (sumEl) sumEl.innerHTML =
-    '剩余 <b>' + (max - est).toLocaleString() + '</b> tokens' +
-    '  ·  ' + '压缩 <b>' + Math.round(soft * 100) + '%</b> / ' + Math.round(hard * 100) + '%';
+  if (sumEl) sumEl.innerHTML = '剩余 <b>' + Math.max(max - est, 0).toLocaleString() + '</b> tokens · 压缩阈值 <b>' + Math.round(soft * 100) + '%</b> / <b>' + Math.round(hard * 100) + '%</b>';
 
   var sugEl = document.getElementById('ctxSuggestions');
-  if (sugEl) {
-    // v8.10: 搜索建议（检索内部提示）不再显示——上下文面板只展示真实上下文构成
-    if (data.format_hint) {
-      sugEl.innerHTML = '<div class="ctx-sug-label">格式提示</div><div class="ctx-sug-item">' + data.format_hint + '</div>';
-    } else {
-      sugEl.innerHTML = '';
-    }
-  }
-
+  if (sugEl) sugEl.innerHTML = _ctxData.format_hint
+    ? '<div class="ctx-sug-label">格式提示</div><div class="ctx-sug-item">' + escapeHtml(_ctxData.format_hint) + '</div>' : '';
   var compEl = document.getElementById('ctxCompressed');
   if (compEl) {
-    if (data.compressed) {
-      compEl.style.display = '';
-      compEl.innerHTML = '⚡ 上下文已压缩 (' + (data.compression_len || 0) + ' 字摘要)';
-    } else {
-      compEl.style.display = 'none';
-    }
+    if (_ctxData.compressed) { compEl.style.display = ''; compEl.textContent = '上下文已压缩为检查点摘要'; }
+    else compEl.style.display = 'none';
   }
 }
 
@@ -1465,31 +1543,11 @@ function renderContextPanel(data) {
     }
   }
 
-  function updateContextTokens(extraTokens) {
-  // v8.3.1: 入参即 token 数（调用方自行折算字符→token；context_usage 事件传真实 token）
-  _totalTokensUsed += (extraTokens || 0);
-  if (!_ctxData) return;
-  var max = _ctxData.max_tokens || _ctxMaxTokens();
-  var est = (_ctxData.estimated_tokens || 0) + Math.round(_totalTokensUsed);
-  var pct = max > 0 ? Math.min(est / max, 1) : 0;
-
-  _updateCtxBtnRing(pct);
-  var pctEl = document.getElementById('ctx-pct');
-  if (pctEl) pctEl.textContent = Math.round(pct * 100) + '%';
-
-  var bar = document.getElementById('ctxBar');
-  if (bar) { bar.style.width = Math.round(pct * 100) + '%'; bar.className = 'ctx-bar-inner ' + _ctxLevelClass(pct); }
-  var barLabel = document.getElementById('ctxBarLabel');
-  if (barLabel) barLabel.textContent = Math.round(est).toLocaleString() + ' / ' + max.toLocaleString();
-
-  // P3-1: 同步"剩余 tokens / 压缩阈值"文本（此前只更新顶部 bar，剩余文本停在初始 est 造成 15% vs 99% 矛盾）
-  var sumEl = document.getElementById('ctxSummary');
-  if (sumEl) {
-    var soft = _ctxData.soft_threshold || 0.75;
-    var hard = _ctxData.hard_threshold || 0.93;
-    sumEl.innerHTML = '剩余 <b>' + Math.max(max - est, 0).toLocaleString() + '</b> tokens' +
-      '  ·  ' + '压缩 <b>' + Math.round(soft * 100) + '%</b> / ' + Math.round(hard * 100) + '%';
-  }
+function updateContextTokens(inputTokens) {
+  if (!_ctxData || !Number.isFinite(Number(inputTokens))) return;
+  _ctxData.estimated_tokens = Math.max(0, Math.round(Number(inputTokens)));
+  _ctxData.estimate_label = '服务商统计的本次模型输入';
+  renderContextPanel(_ctxData);
 }
 
 
@@ -1499,7 +1557,9 @@ function renderContextPanel(data) {
 function addMessage(role, html) {
   var div = document.createElement('div');
   div.className = 'message ' + role;
-  div.innerHTML = '<div class="avatar">' + (role === 'user' ? '→' : '◆') + '</div><div class="content">' + html + '</div>';
+  div.innerHTML = '<div class="avatar"></div><div class="content">' + html + '</div>';
+  if (role === 'user') renderAvatarImage(div.querySelector('.avatar'), currentAccount, 'message-avatar-image', '我的头像');
+  else renderAgentAvatar(div.querySelector('.avatar'));
   chatContainer.appendChild(div);
   chatContainer.scrollTop = chatContainer.scrollHeight;
   return div.querySelector('.content');
@@ -1574,7 +1634,7 @@ async function clearSession(silent) {
   if (!silent && !confirm('确定清空当前会话？')) return;
   try {
     await fetch('/api/v1/session/' + sessionId + '/clear', { method: 'POST' });
-    chatContainer.innerHTML = '<div class="message bot"><div class="avatar">◆</div><div class="content">您好！有什么想了解的？</div></div>';
+    chatContainer.innerHTML = '<div class="message bot"><div class="avatar"><img class="agent-avatar-image" src="/assets/avatars/08.webp" alt="CitrusQA 助手" width="36" height="36"></div><div class="content">您好！有什么想了解的？</div></div>';
     sidebarContent.innerHTML = '<div class="empty-sidebar">提交问题后文献将在此展示</div>';
     citationCount.textContent = '0';
     roundHistory = [];
@@ -1690,6 +1750,8 @@ async function sendMsg(isFollowUp) {
   if (sendBtnEl && sendBtnEl.disabled) return;
   var query = userInput.value.trim();
   if (!query) return;
+  var _requestStartedAt = performance.now();
+  var _firstTokenElapsedMs = null;
   var filesForRequest = _selectedAttachments.slice();
 
   // v8.3.7 M1: 每次点击生成稳定幂等 ID，重试复用（防重发重复写历史）
@@ -1888,7 +1950,7 @@ async function sendMsg(isFollowUp) {
       case 'thinking': updateStatus('thinking', '正在处理…'); break;
       case 'tool_call_start':
         _toolCount++;
-        updateStatus('tool', (data.summary || data.display_name || displayToolName(data.tool_name) || '工具') + ' 执行中…'); updateContextTokens(30);
+        updateStatus('tool', (data.summary || data.display_name || displayToolName(data.tool_name) || '工具') + ' 执行中…');
         var _callLine = appendTerminal('⚙ ' + (data.summary || data.display_name || displayToolName(data.tool_name) || '工具') + ' · 执行中');
         _toolTraceLines = _toolTraceLines || {};
         if (data.tool_call_id) _toolTraceLines[data.tool_call_id] = _callLine;
@@ -1900,7 +1962,7 @@ async function sendMsg(isFollowUp) {
         updateStatus('tool', _toolMsg); break;
       case 'tool_progress': updateStatus('tool', data.message||''); break;
       case 'tool_result':
-        updateContextTokens((data.output || '').length * 0.7);
+
         var _summary = data.summary || (data.is_error ? '执行失败' : '完成');
         var _detailSummary = toolSummaryDetail(data.tool_name, _summary);
         var _line = data.tool_call_id && _toolTraceLines && _toolTraceLines[data.tool_call_id];
@@ -1917,13 +1979,13 @@ async function sendMsg(isFollowUp) {
         } else appendTerminal((data.is_error ? '⚠ ' : '✓ ') + displayToolName(data.tool_name) + (_detailSummary ? ' · ' + _detailSummary : ''));
         break;
       case 'agent_switch':
-        updateStatus('agent', '启动: '+(data.agent_name||'')); updateContextTokens(50);
+        updateStatus('agent', '启动: '+(data.agent_name||''));
         appendTerminal('── 子Agent「' + (data.agent_name||'') + '」启动 ── ' + (data.task||''));
         break;
       case 'text':
         // v8.17.15: 草稿已删除——首字到达即视为正式回答开始，无草稿面板需处理
-        if (!isAnswerStarted) { isAnswerStarted=true; clearTimeout(spinnerTimeout); updateStatus('answer','生成回答中...'); answerDiv.style.display=''; collapseReasoning(); }
-        fullText+=data.content; updateContextTokens((data.content||'').length * 0.7); renderAnswer(); break;
+        if (!isAnswerStarted) { _firstTokenElapsedMs = performance.now() - _requestStartedAt; isAnswerStarted=true; clearTimeout(spinnerTimeout); updateStatus('answer','生成回答中...'); answerDiv.style.display=''; collapseReasoning(); }
+        fullText+=data.content; renderAnswer(); break;
       case 'draft':
         // v8.17.15: 草稿全链删除——后端不再推送 draft 事件，忽略（防御残留）
         break;
@@ -1932,22 +1994,33 @@ async function sendMsg(isFollowUp) {
         handleStatusEvent(data);
         break;
       case 'context_usage':
-        updateContextTokens((data.delta != null ? data.delta : data.total) || 0);
-        if (data.call && ((data.call.cache_hit || 0) + (data.call.cache_miss || 0) > 0)) {
-          appendTerminal('◈ 提示缓存命中 ' + (data.call.cache_hit || 0).toLocaleString() + ' tokens · 未命中 ' + (data.call.cache_miss || 0).toLocaleString() + ' tokens'); termLog.style.display = 'block';
+        if (data.call) {
+          // Context-window occupancy uses the main Agent call only; auxiliary
+          // hints, summaries and memory extraction have separate token events.
+          if (data.source === 'general_agent') updateContextTokens(data.call.input_tokens || 0);
+          if (_ctxData) {
+            _ctxData.model_cache_status = data.call.cache_status || 'unavailable';
+            _ctxData.model_cache_hit = data.call.cache_hit || 0;
+            _ctxData.model_cache_miss = data.call.cache_miss || 0;
+            _ctxData.model_cache_source = data.source || '';
+            renderContextPanel(_ctxData);
+          }
+          var usageSourceNames = {general_agent:'主 Agent', context_hints:'问题规划', context_summary:'上下文摘要', memory_extraction:'记忆提取'};
+          var usagePrefix = (usageSourceNames[data.source] || data.source || '模型调用') + ' · ';
+          if (data.call.cache_status === 'reported') {
+            appendTerminal('◈ 模型提示缓存 · ' + usagePrefix + '命中 ' + Number(data.call.cache_hit || 0).toLocaleString() + ' · 未命中 ' + Number(data.call.cache_miss || 0).toLocaleString() + ' tokens');
+          } else {
+            appendTerminal('◈ 模型提示缓存 · ' + usagePrefix + '服务商未提供本次缓存数据');
+          }
+          termLog.style.display = 'block';
         }
         break;
+      case 'retrieval_cache':
+        if (_ctxData) { _ctxData.rag_cache_status = data.status || ''; renderContextPanel(_ctxData); }
+        appendTerminal('◈ RAG 查询缓存：' + (data.status === 'hit' ? '命中' : (data.status === 'disabled' ? '未启用' : '未命中')));
+        termLog.style.display = 'block';
+        break;
       case 'context_degraded': showBanner('⚠️ 历史会话加载失败，本次回答可能缺少上下文'); break;
-      case 'intent_confirm':
-        showIntentCard(data);
-        appendTerminal('🤔 已弹出意图确认卡片（' + ((data.options || []).length) + ' 个候选）');
-        break;
-      case 'intent_resolved':
-        var _ic = document.getElementById('intent-card');
-        if (_ic) _ic.remove();
-        appendTerminal('✓ 已按确认意图继续：' + String(data.intent || '').substring(0, 80)
-                       + (data.timeout ? '（超时·按推荐项）' : ''));
-        break;
       case 'permission_request':
         showPermissionCard(data);
         appendTerminal('⚠ 工具 ' + (data.tool_name || '') + ' 需要权限确认（已弹出审批卡片）');
@@ -2092,7 +2165,7 @@ async function sendMsg(isFollowUp) {
           ub.onclick=function(){userInput.value=currentQuery;sendMsg()};
           uc.appendChild(ub);botContent.appendChild(uc);
         }
-        botContent.appendChild(createElapsedBadge(data.gen_time_ms));
+        botContent.appendChild(createElapsedBadge(_firstTokenElapsedMs != null ? _firstTokenElapsedMs : (performance.now() - _requestStartedAt)));
         sessionId=data.session_id;if(sessionId)localStorage.setItem(sessionStorageKey(),sessionId);
         // v8.10: 回答完整生成后才显示 👍/👎 反馈栏（主流时序）
         appendFeedback(answerDiv.closest('.message'));
@@ -2442,9 +2515,6 @@ async function restoreSessionHistory() {
         // Render the answer, then place the safe tool trace above it.
         // （此前 append 到 .message 外层会被 flex 排到对话区右侧——位置错乱）
         contentEl.innerHTML = renderMarkdownSafe(m.content);
-        if (Number(m.gen_time_ms) > 0) {
-          contentEl.appendChild(createElapsedBadge(m.gen_time_ms));
-        }
         // Restore visible tool names, query summaries, and result snippets.
         if (pendingTools.length > 0) {
           var tid = 'terminal_hist_' + (++histSeq);
@@ -2483,7 +2553,7 @@ async function restoreSessionHistory() {
 function createElapsedBadge(milliseconds) {
   var badge = document.createElement('div');
   badge.style.cssText = 'margin-top:8px;font-size:11px;color:var(--text-muted);font-family:var(--font-mono)';
-  badge.textContent = '⏱ ' + (Math.max(0, Number(milliseconds) || 0) / 1000).toFixed(1) + 's';
+  badge.textContent = '生成 ' + (Math.max(0, Number(milliseconds) || 0) / 1000).toFixed(1) + 's';
   return badge;
 }
 
@@ -2500,6 +2570,3 @@ async function ensureSession() {
   restoreSessionHistory();
   loadSessions();
 }
-
-
-

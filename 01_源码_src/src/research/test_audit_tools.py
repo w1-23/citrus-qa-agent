@@ -63,6 +63,50 @@ def test_csv_and_tsv_are_decoded_without_rewriting_values():
     assert tsv_frame.shape == (1, 3)
 
 
+def test_csv_cell_budget_marks_partial_coverage(monkeypatch):
+    import src.research.tools as research_tools
+    monkeypatch.setattr(research_tools, "_MAX_TABLE_CELLS", 9)
+    frame, _encoding, _preview, _headers, truncated = _decode_csv(
+        b"group,rep,value\nA,1,2.1\nA,2,2.2\nA,3,2.3\n")
+    assert frame.shape == (2, 3)
+    assert truncated is True
+
+
+def test_xlsx_dimensions_are_limited_before_materialization(monkeypatch):
+    import src.research.tools as research_tools
+    wb = Workbook()
+    ws = wb.active
+    ws.append([f"c{i}" for i in range(201)])
+    output = io.BytesIO()
+    wb.save(output)
+    token = set_request_tables([{"name": "wide.xlsx", "data": output.getvalue()}])
+    try:
+        try:
+            _load_frame(0)
+        except ValueError as exc:
+            assert "列数" in str(exc)
+        else:
+            raise AssertionError("worksheet wider than the declared column bound should be rejected")
+    finally:
+        reset_request_tables(token)
+
+    monkeypatch.setattr(research_tools, "_MAX_TABLE_CELLS", 12)
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["group", "rep", "value"])
+    for i in range(10):
+        ws.append(["A", i, float(i)])
+    output = io.BytesIO()
+    wb.save(output)
+    token = set_request_tables([{"name": "many-rows.xlsx", "data": output.getvalue()}])
+    try:
+        frame, meta = _load_frame(0)
+        assert frame.shape == (4, 3)
+        assert meta["truncated"] is True
+    finally:
+        reset_request_tables(token)
+
+
 def test_xlsx_lists_and_reads_multiple_sheets_in_request_context():
     wb = Workbook()
     wb.active.title = "raw"

@@ -388,17 +388,16 @@ async def run_save_node(state: dict, *, log_tag: str,
         # （书 3.1 记忆生命周期: 后台提取候选 → 核验 → 更新；提取器不阻塞主链路）
         from src.core.background import spawn as _spawn
 
-        def _extract_and_save_ltm(q: str, a: str, sid: str):
+        def _extract_and_save_ltm(q: str, a: str, sid: str, uid: int):
             try:
                 from src.guardrails.memory import memory_store
-                facts = memory_store.extract_key_facts(q, a)
+                facts = memory_store.extract_key_facts(q, a, session_id=sid)
                 for f in facts:
                     # v8.6 (书 §3.1 偏好追踪): type=preference 走 preference_memory
                     # （消费点见 build_human_message 的 <user_preferences> 块）
-                    # v8.9: 偏好写入全局域（用户级偏好跨会话生效）
                     if f.get("type") == "preference":
                         memory_store.set_preference(
-                            memory_store.GLOBAL_PREF_DOMAIN,
+                            uid,
                             f.get("key", ""), f.get("value", ""))
                         continue
                     memory_store.save_long_term_fact(
@@ -407,6 +406,7 @@ async def run_save_node(state: dict, *, log_tag: str,
                         f.get("confidence", 0.5),
                         owner_session=sid,
                         source_query=q,
+                        owner_user_id=uid,
                     )
             except Exception as e:
                 logger.debug(f"[{log_tag}:save] LTM background extract failed: {e}")
@@ -416,7 +416,8 @@ async def run_save_node(state: dict, *, log_tag: str,
             ltm_ok = ltm_ok and ltm_gate(answer)
         if ltm_ok:
             _spawn(asyncio.to_thread(
-                _extract_and_save_ltm, query, answer, session_id))
+                _extract_and_save_ltm, query, answer, session_id,
+                int(state.get("user_id") or 0)))
     except Exception as e:
         logger.debug(f"[{log_tag}:save] LTM skip: {e}")
 

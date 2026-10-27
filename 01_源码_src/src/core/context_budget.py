@@ -355,7 +355,8 @@ class ContextBudget:
             return self._rules_summary(messages)
         try:
             summary = await self._compact_fn(
-                messages, query=query, prior_summary=prior_summary)
+                messages, query=query, prior_summary=prior_summary,
+                session_id=session_id)
             if session_id:
                 _reset_compaction_failures(session_id)
             return summary or self._rules_summary(messages)

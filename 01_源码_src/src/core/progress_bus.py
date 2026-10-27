@@ -96,47 +96,31 @@ def emit_encoded(event_type: str, data: dict) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Token usage delta emitter — context_usage 增量推送
+# Per-call provider usage events
 # ═══════════════════════════════════════════════════════════════════════
-
-# 每次 LLM 调用的 usage.total_tokens 是该次请求的累计值（含重放历史），
-# 前端若直接累加会多轮重复计数 → 按 session+source 发增量。
-_usage_last: dict = {}
 
 
 def emit_usage_delta(session_id: str, source: str, input_tokens: int = 0,
                      output_tokens: int = 0, total: int = 0,
-                     cache_hit: int = 0, cache_miss: int = 0) -> None:
-    """context_usage 增量推送 (v8.3.3): total 为单次调用累计，delta 为相对上次的增量。
-
-    cache_hit/cache_miss 为 DeepSeek prompt_cache 命中/未命中 token
-    （阶段0 缓存观测，见 core/cache_metrics.py）。
-    """
-    if not total:
+                     cache_hit: int = 0, cache_miss: int = 0,
+                     cache_status: str = "unavailable") -> None:
+    """Emit one independent event per provider call; never subtract adjacent calls."""
+    if not (input_tokens or output_tokens or total):
         return
-    key = f"{session_id}:{source}"
-    last = _usage_last.get(key, 0)
-    if last == 0:
-        delta = total  # 首次调用: 增量 = 本次总量
-    else:
-        delta = max(total - last, 0)  # 后续: 相对上次的增量（重放历史不重复计）
-    if delta == 0:
-        return  # 同值重复（如调用未消耗新 token），不发零增量
-    _usage_last[key] = total
+    total = int(total or (input_tokens + output_tokens))
     cache_denom = cache_hit + cache_miss
-    # v8.13: 语义分家——此前单次调用绝对值与 session 累计值平铺混在一起
-    # （input_tokens 是单次、total 是累计、cache 又是单次），消费端无法区分。
-    # 改为: call.* = 本次调用绝对值；total/delta = session+source 累计与增量。
     emit_encoded("context_usage", {
         "call": {
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "cache_hit": cache_hit,
             "cache_miss": cache_miss,
-            "cache_ratio": round(cache_hit / cache_denom, 4) if cache_denom else 0,
+            "cache_status": cache_status,
+            "cache_ratio": round(cache_hit / cache_denom, 4)
+            if cache_status == "reported" and cache_denom else None,
         },
         "total": total,
-        "delta": delta,
+        "scope": "single_call",
         "source": source,
     })
 
@@ -224,8 +208,6 @@ _TOOL_LABELS = {
     "statistical_analysis": "统计分析",
     "experimental_design": "实验设计",
     "inspect_uploaded_table": "读取表格",
-    "audit_uploaded_table": "数据审查",
-    "audit_uploaded_data_bundle": "数据审查",
     "audit_uploaded_data": "数据审查",
     "verify_uploaded_references": "文献核验",
     "fetch_and_audit_open_supplements": "获取补充数据",
@@ -317,11 +299,12 @@ def emit_tool_executing(message: str, tool_name: str = "", tool_call_id: str = "
 
 
 def emit_tool_result(tool_name: str, output: str, tool_call_id: str = "",
-                     is_error: bool = False, summary: str = "") -> None:
+                     is_error: bool = False, summary: str = "",
+                     outcome: dict | None = None) -> None:
     """Emit a TOOL_RESULT event with output content and optional summary."""
     if tool_call_id:
         mark_tool_end(tool_call_id)
-    is_error = bool(is_error or str(output).startswith((
+    is_error = bool(is_error or (outcome or {}).get("status") == "failed" or str(output).startswith((
         "[WEB_TOOL_ERROR]", "[WEB_DISABLED]", "[WEB_FETCH_EMPTY]",
         "[LOCAL_SEARCH_ERROR]", "[LOCAL_SEARCH_TRANSLATION_ERROR]", "[TOOL_ERROR]",
         "[ERR_REQUEST_DEADLINE]", "[ERR_TIMEOUT]", "[ERR_NETWORK]", "[ERR_MISSING_DEP]")))
@@ -332,6 +315,7 @@ def emit_tool_result(tool_name: str, output: str, tool_call_id: str = "",
         "summary": summary[:500],
         "is_error": is_error,
         "tool_call_id": tool_call_id,
+        "outcome": outcome or {},
     })
 
 
