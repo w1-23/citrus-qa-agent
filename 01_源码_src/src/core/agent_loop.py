@@ -14,7 +14,6 @@ expert_graph（专家 supervisor）/ light_graph（轻量 supervisor）/ agent_r
 """
 import asyncio
 import logging
-import time
 import uuid
 
 from langchain_core.messages import AIMessage, SystemMessage
@@ -270,21 +269,19 @@ async def run_save_node(state: dict, *, log_tag: str,
                      章节关键词门，light 传 None 仅保留长度 >500 门槛）
 
     行为不变量逐条保留：无 answer 早退、[历史检索证据] 注入消息不入历史、
-    trace[-1].content == answer 判重（防重复消息）、幂等键透传；会话消息及耗时
-    元数据在完成事件前可靠写入，SQLite 操作在线程池中执行，长耗时记忆提取仍后台处理。
+    trace[-1].content == answer 判重（防重复消息）、幂等键透传、后台 spawn
+    不阻塞主链路、save 失败不抛（仅 warning 日志）。
     """
     query = state.get("query", "")
     answer = state.get("answer", "")
     session_id = state.get("session_id", "default")
-    saved = False
-    generation_ms = 0
     if not answer:
-        return {"_trace": {"node": "save", "elapsed_ms": 0, "summary": "no answer",
-                           "history_saved": False, "generation_ms": 0}}
+        return {"_trace": {"node": "save", "elapsed_ms": 0, "summary": "no answer"}}
 
     try:
         from langchain_core.messages import AIMessage, ToolMessage
         from src.session.manager import session_manager, _validate_trace
+        from src.core.background import spawn
         # v8.3.8: 完整轨迹持久化（含 tool_calls/ToolMessage 配对）
         trace = list(state.get("turn_trace") or [])
         # 过滤 system 与注入的证据块（它们不属于会话轨迹）；expert 原实现
@@ -304,24 +301,8 @@ async def run_save_node(state: dict, *, log_tag: str,
                 and not getattr(trace[-1], "tool_calls", None)
                 and trace[-1].content == answer):
             trace.append(AIMessage(content=answer))
-        # The visible elapsed time must survive a page refresh. Store it on the
-        # final assistant message and finish the small SQLite write before the
-        # API emits ``done``; the database call itself runs in SessionManager's
-        # worker thread, so this does not block the event loop.
-        try:
-            request_started_at = float(state.get("request_started_at") or 0)
-            generation_ms = int(max(0.0, time.perf_counter() - request_started_at) * 1000)
-        except (TypeError, ValueError):
-            generation_ms = int(max(0, state.get("gen_time_ms") or 0))
-        if generation_ms > 0:
-            final_message = trace[-1]
-            metadata = dict(getattr(final_message, "response_metadata", {}) or {})
-            metadata["citrus_generation_ms"] = generation_ms
-            final_message.response_metadata = metadata
-        saved = await session_manager.save_messages(
-            session_id, trace, state.get("idempotency_key", ""))
-        if not saved:
-            logger.warning("[%s:save] conversation history was not written", log_tag)
+        spawn(session_manager.save_messages(
+            session_id, trace, state.get("idempotency_key", "")))
         # v8.3.8: 证据账本（检索报告 + 结构化清单，跨轮复用）
         # v8.3.9: 合并全部检索报告（多轮检索不丢） + evidence 保留 chunk_id 可回查原文
         report_parts = []
@@ -376,8 +357,6 @@ async def run_save_node(state: dict, *, log_tag: str,
             # 账本一并落盘，使 /citations 刷新路径与实时 SSE 的 cited_refs 一致。
             _refs_data = state.get("references_data") or {}
             _cited = _refs_data.get("cited") if isinstance(_refs_data, dict) else None
-            from src.core.background import spawn
-
             spawn(session_manager.save_evidence(
                 session_id, query, evidence, report_text, _cited))
     except Exception as e:
@@ -388,16 +367,17 @@ async def run_save_node(state: dict, *, log_tag: str,
         # （书 3.1 记忆生命周期: 后台提取候选 → 核验 → 更新；提取器不阻塞主链路）
         from src.core.background import spawn as _spawn
 
-        def _extract_and_save_ltm(q: str, a: str, sid: str, uid: int):
+        def _extract_and_save_ltm(q: str, a: str, sid: str):
             try:
                 from src.guardrails.memory import memory_store
-                facts = memory_store.extract_key_facts(q, a, session_id=sid)
+                facts = memory_store.extract_key_facts(q, a)
                 for f in facts:
                     # v8.6 (书 §3.1 偏好追踪): type=preference 走 preference_memory
                     # （消费点见 build_human_message 的 <user_preferences> 块）
+                    # v8.9: 偏好写入全局域（用户级偏好跨会话生效）
                     if f.get("type") == "preference":
                         memory_store.set_preference(
-                            uid,
+                            memory_store.GLOBAL_PREF_DOMAIN,
                             f.get("key", ""), f.get("value", ""))
                         continue
                     memory_store.save_long_term_fact(
@@ -406,7 +386,6 @@ async def run_save_node(state: dict, *, log_tag: str,
                         f.get("confidence", 0.5),
                         owner_session=sid,
                         source_query=q,
-                        owner_user_id=uid,
                     )
             except Exception as e:
                 logger.debug(f"[{log_tag}:save] LTM background extract failed: {e}")
@@ -416,11 +395,8 @@ async def run_save_node(state: dict, *, log_tag: str,
             ltm_ok = ltm_ok and ltm_gate(answer)
         if ltm_ok:
             _spawn(asyncio.to_thread(
-                _extract_and_save_ltm, query, answer, session_id,
-                int(state.get("user_id") or 0)))
+                _extract_and_save_ltm, query, answer, session_id))
     except Exception as e:
         logger.debug(f"[{log_tag}:save] LTM skip: {e}")
 
-    return {"_trace": {"node": "save", "elapsed_ms": 0,
-                        "summary": "saved" if saved else "already saved or skipped",
-                        "history_saved": bool(saved), "generation_ms": generation_ms}}
+    return {"_trace": {"node": "save", "elapsed_ms": 0, "summary": "saved"}}

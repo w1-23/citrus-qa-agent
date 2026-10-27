@@ -5,8 +5,6 @@ Priority: environment variable > YAML > pydantic-settings default
 import json
 import os
 import logging
-import re
-import uuid
 from pathlib import Path
 from typing import Dict, Any, Optional
 from pydantic import Field
@@ -17,11 +15,8 @@ from openai import OpenAI
 #   （data/ state/ workspace/ .env 按 B3(a) 原地不动）。
 _REPO = Path(__file__).resolve().parents[2]
 PROJECT_ROOT = _REPO / "agent"          # 运行期数据根（data/state/workspace/.env）
-MODEL_CACHE_ROOT = Path(os.getenv(
-    "CITRUSQA_MODEL_CACHE_ROOT", str(PROJECT_ROOT / ".hf_cache")
-)).expanduser().resolve()
 CONFIG_DIR = _REPO / "02_配置_config"   # 配置文件新家（config.yaml 等）
-WEB_DIR = Path(__file__).resolve().parents[1] / "web"  # 前端与源码同目录维护
+WEB_DIR = _REPO / "06_网页_index"       # index.html 新家
 
 _yaml_config: Dict[str, Any] = {}
 
@@ -64,23 +59,7 @@ class Settings(BaseSettings):
     # 1. API Keys
     LLAMA_CLOUD_API_KEY: str = ""
     DEEPSEEK_API_KEY: str = ""
-    # Deployment-owned credential for DeepSeek Search/Fetch, independent from
-    # the user-configurable main-model provider key.
-    DEEPSEEK_WEB_API_KEY: str = ""
 
-    # 旧分类器配置仅为迁移兼容保留；当前工具链不注册该分类器。
-    VISION_ENABLED: bool = False
-    VISION_MODEL_DIR: str = Field(default_factory=lambda: _yaml_val("vision", "model_dir", default=""))
-    VISION_CONFIDENCE_THRESHOLD: float = Field(
-        default_factory=lambda: _yaml_val("vision", "confidence_threshold", default=0.60))
-    VISION_MARGIN_THRESHOLD: float = Field(
-        default_factory=lambda: _yaml_val("vision", "margin_threshold", default=0.12))
-    VISION_HEALTHY_VETO: float = Field(
-        default_factory=lambda: _yaml_val("vision", "healthy_veto", default=0.25))
-    # 许可不明的权重（dima806 ViT、PlantVillage MobileNetV2）默认不加载；
-    # 打开后补上 melanose / greening / 白粉病弱标签。
-    VISION_ALLOW_UNLICENSED: bool = Field(
-        default_factory=lambda: _yaml_val("vision", "allow_unlicensed_models", default=False))
     # 2. Model Endpoints & Fallback Keys
     MAIN_API_KEY: str = Field(default="")
     MAIN_BASE_URL: str = "https://api.deepseek.com"
@@ -213,12 +192,13 @@ class Settings(BaseSettings):
     #   原硬编码 2000 会被内部检索+思考吃光 → stop_reason=max_tokens → 只拿到引用
     #   条目、拿不到综合正文）；②每轮"按正文过滤 + 重编号"后的 cited_refs 落盘，
     #   /citations 刷新路径改读它并去掉 LIMIT 10，侧栏与正文标号一致。
-    VERSION: str = "1.0"
+    VERSION: str = "9.6.3"
 
     # ── Context Engineering (阶段1: 静态前缀灰度开关) ──
     # true = SystemMessage 字节级稳定（format 指南/策略卡片/skills 移出前缀，
     #        追加到当前轮 HumanMessage 尾部），利于 DeepSeek 上下文缓存命中；
     # false = 旧行为（动态内容进 SystemMessage，前缀每次请求重算）
+    CONTEXT_STATIC_PREFIX: bool = Field(default_factory=lambda: _yaml_val("context", "static_prefix", default=False))
 
     # 5. Tools Parameters
     # v8.3.3: MAX_TOOL_CALLS 死配置已删除（无引用）
@@ -249,12 +229,6 @@ class Settings(BaseSettings):
     LIGHT_MAX_TURNS: int = Field(default_factory=lambda: _yaml_val("light", "max_turns", default=2))
     SUBAGENT_MAX_TURNS: dict = Field(default_factory=lambda: _yaml_val("subagents", default={}))
     TOOL_EXEC_TIMEOUT_SEC: int = Field(default_factory=lambda: _yaml_val("agent", "tool_exec_timeout_sec", default=60))
-    # Single-agent request deadline. The model chooses how many tool turns to use;
-    # this wall-clock deadline is the only loop-level stop condition.
-    AGENT_REQUEST_TIMEOUT_SEC: int = Field(
-        default_factory=lambda: _yaml_val("agent", "request_timeout_sec", default=180))
-    SEARCH_FETCH_TIMEOUT_SEC: int = Field(
-        default_factory=lambda: _yaml_val("agent", "search_fetch_timeout_sec", default=30))
     # v8.15.3b: 单工具超时覆盖（{tool_name: 秒}，覆盖 TOOL_EXEC_TIMEOUT_SEC 默认值）
     TOOL_TIMEOUTS: dict = Field(default_factory=lambda: _yaml_val("agent", "tool_timeouts", default={}))
 
@@ -309,11 +283,6 @@ class Settings(BaseSettings):
     # v8.5.0 开源版：运行时 API Key（WebUI 引导填写）——优先于 .env，
     # 持久化到 state/api_key（gitignore 内，不入仓库）；.env 保持不动
     _runtime_api_key: str = ""
-    _runtime_provider_api_keys: Dict[str, str] = {}
-    _runtime_configured_model_providers: set[str] = set()
-    # DeepSeek Search/Fetch has a separate runtime credential from the main model.
-    _runtime_deepseek_web_api_key: str = ""
-    _runtime_web_search_cfg: Dict[str, str] = {}
 
     def _load_runtime_api_key(self) -> None:
         """启动时从 state/api_key 读取（WebUI 填写的 key 跨重启保留）。"""
@@ -342,152 +311,6 @@ class Settings(BaseSettings):
         except Exception:
             return False
 
-    def _load_runtime_provider_api_keys(self) -> None:
-        try:
-            p = PROJECT_ROOT / "state" / "provider_api_keys.json"
-            if p.exists():
-                data = json.loads(p.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    self._runtime_provider_api_keys = {
-                        str(k): str(v).strip() for k, v in data.items()
-                        if re.fullmatch(r"[a-z][a-z0-9_]{1,40}", str(k)) and str(v).strip()
-                    }
-        except Exception:
-            self._runtime_provider_api_keys = {}
-
-    def save_runtime_provider_api_key(self, provider_id: str, api_key: str) -> bool:
-        if not re.fullmatch(r"[a-z][a-z0-9_]{1,40}", str(provider_id or "")):
-            return False
-        keys = dict(self._runtime_provider_api_keys)
-        keys[provider_id] = api_key.strip()
-        try:
-            p = PROJECT_ROOT / "state" / "provider_api_keys.json"
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps(keys, ensure_ascii=False, indent=2), encoding="utf-8")
-            try:
-                os.chmod(p, 0o600)
-            except Exception:
-                pass
-            self._runtime_provider_api_keys = keys
-            return True
-        except Exception:
-            return False
-
-    def _load_runtime_configured_model_providers(self) -> None:
-        """Load provider IDs configured for the main model (not search credentials)."""
-        try:
-            p = PROJECT_ROOT / "state" / "configured_model_providers.json"
-            data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
-            if isinstance(data, list):
-                self._runtime_configured_model_providers = {
-                    str(item) for item in data
-                    if re.fullmatch(r"[a-z][a-z0-9_]{1,40}", str(item))
-                }
-        except Exception:
-            self._runtime_configured_model_providers = set()
-        # Provider keys saved by earlier versions remain configured. Zhipu also
-        # stores Web Search credentials under the same provider ID, so only
-        # infer it from the active main-model configuration.
-        self._runtime_configured_model_providers.update(
-            provider_id for provider_id in self._runtime_provider_api_keys
-            if provider_id != "zhipu"
-        )
-        # Migrate legacy state: the active provider's working key is configured.
-        if self.RESOLVED_MAIN_API_KEY and self.RESOLVED_PROVIDER_ID:
-            self._runtime_configured_model_providers.add(self.RESOLVED_PROVIDER_ID)
-
-    def save_runtime_configured_model_provider(self, provider_id: str) -> bool:
-        if not re.fullmatch(r"[a-z][a-z0-9_]{1,40}", str(provider_id or "")):
-            return False
-        configured = set(self._runtime_configured_model_providers)
-        configured.add(provider_id)
-        try:
-            p = PROJECT_ROOT / "state" / "configured_model_providers.json"
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps(sorted(configured), ensure_ascii=False, indent=2), encoding="utf-8")
-            try:
-                os.chmod(p, 0o600)
-            except Exception:
-                pass
-            self._runtime_configured_model_providers = configured
-            return True
-        except Exception:
-            return False
-
-    @property
-    def RESOLVED_PROVIDER_ID(self) -> str:
-        return self._runtime_model_cfg.get("provider_id") or "deepseek"
-
-    @property
-    def RESOLVED_PROVIDER_HEADERS(self) -> Dict[str, str]:
-        if self.RESOLVED_PROVIDER_ID != "opencode_go":
-            return {}
-        try:
-            p = PROJECT_ROOT / "state" / "opencode_session_id"
-            if p.exists():
-                session_id = p.read_text(encoding="utf-8").strip()
-            else:
-                session_id = str(uuid.uuid4())
-                p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text(session_id, encoding="utf-8")
-            return {"x-opencode-session": session_id}
-        except Exception:
-            return {"x-opencode-session": "citrusqa-local"}
-
-    def _load_runtime_deepseek_web_api_key(self) -> None:
-        """Load the separately configured Search/Fetch key from local state."""
-        try:
-            p = PROJECT_ROOT / "state" / "deepseek_web_api_key"
-            if p.exists():
-                value = p.read_text(encoding="utf-8").strip()
-                if value:
-                    self._runtime_deepseek_web_api_key = value
-        except Exception:
-            pass
-
-    def save_runtime_deepseek_web_api_key(self, api_key: str) -> bool:
-        """Persist a WebUI-provided Search/Fetch key outside tracked config."""
-        try:
-            p = PROJECT_ROOT / "state" / "deepseek_web_api_key"
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(api_key.strip(), encoding="utf-8")
-            try:
-                import os
-                os.chmod(p, 0o600)
-            except Exception:
-                pass
-            self._runtime_deepseek_web_api_key = api_key.strip()
-            return True
-        except Exception:
-            return False
-
-    def _load_runtime_web_search_config(self) -> None:
-        try:
-            p = PROJECT_ROOT / "state" / "web_search_config.json"
-            if p.exists():
-                data = json.loads(p.read_text(encoding="utf-8"))
-                provider = str(data.get("provider_id", "")).strip()
-                if provider in {"deepseek_search_fetch", "zhipu_web_search"}:
-                    self._runtime_web_search_cfg = {"provider_id": provider}
-        except Exception:
-            self._runtime_web_search_cfg = {}
-
-    def save_runtime_web_search_provider(self, provider_id: str) -> bool:
-        if provider_id not in {"deepseek_search_fetch", "zhipu_web_search"}:
-            return False
-        try:
-            p = PROJECT_ROOT / "state" / "web_search_config.json"
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps({"provider_id": provider_id}, ensure_ascii=False, indent=2), encoding="utf-8")
-            try:
-                os.chmod(p, 0o600)
-            except Exception:
-                pass
-            self._runtime_web_search_cfg = {"provider_id": provider_id}
-            return True
-        except Exception:
-            return False
-
     # ── v8.14.1 运行时模型覆盖（前端设置面板切换底座模型）──
     # state/model_config.json（gitignore 内）存 {main_model,fast_model,main_base_url,fast_base_url}；
     # 空字段 = 回退 yaml/env 默认。优先级: 运行时覆盖 > 环境变量 > YAML > 默认值。
@@ -500,25 +323,19 @@ class Settings(BaseSettings):
                 data = json.loads(p.read_text(encoding="utf-8"))
                 self._runtime_model_cfg = {
                     k: str(v).strip() for k, v in data.items()
-                    if k in ("main_model", "fast_model", "main_base_url", "fast_base_url",
-                             "context_window_tokens", "provider_id")
+                    if k in ("main_model", "fast_model", "main_base_url", "fast_base_url")
                     and str(v).strip()
                 }
         except Exception:
             self._runtime_model_cfg = {}
 
     def save_runtime_model_config(self, *, main: str = "", fast: str = "",
-                                  main_base_url: str = "", fast_base_url: str = "",
-                                  context_window_tokens: int | str = "",
-                                  provider_id: str = "") -> bool:
+                                  main_base_url: str = "", fast_base_url: str = "") -> bool:
         cfg = {}
         for k, v in (("main_model", main), ("fast_model", fast),
-                     ("main_base_url", main_base_url), ("fast_base_url", fast_base_url),
-                     ("context_window_tokens", context_window_tokens),
-                     ("provider_id", provider_id)):
-            value = str(v or "").strip()
-            if value:
-                cfg[k] = value
+                     ("main_base_url", main_base_url), ("fast_base_url", fast_base_url)):
+            if (v or "").strip():
+                cfg[k] = v.strip()
         try:
             p = PROJECT_ROOT / "state" / "model_config.json"
             if not cfg:
@@ -540,82 +357,16 @@ class Settings(BaseSettings):
         return self._runtime_model_cfg.get("main_model") or self.MAIN_MODEL
 
     @property
-    def RESOLVED_MAIN_MODEL_IMAGE_INPUT(self) -> Optional[bool]:
-        from src.core.model_capabilities import model_supports_images
-        return model_supports_images(self.RESOLVED_PROVIDER_ID, self.RESOLVED_MAIN_MODEL)
-
-    @property
-    def RESOLVED_CONTEXT_BUDGET_MAX_TOKENS(self) -> int:
-        value = self._runtime_model_cfg.get("context_window_tokens")
-        try:
-            return min(max(int(value), 4096), 1_000_000) if value else self.CONTEXT_BUDGET_MAX_TOKENS
-        except (TypeError, ValueError):
-            return self.CONTEXT_BUDGET_MAX_TOKENS
-
-    @property
     def RESOLVED_FAST_MODEL(self) -> str:
-        explicit_fast = self._runtime_model_cfg.get("fast_model")
-        if explicit_fast:
-            return explicit_fast
-        # When a user switches the main Provider, do not send the default
-        # DeepSeek fast-model ID to that Provider. Blank fast-model means follow main.
-        if self._runtime_model_cfg.get("main_model"):
-            return self.RESOLVED_MAIN_MODEL
-        return self.FAST_MODEL
+        return self._runtime_model_cfg.get("fast_model") or self.FAST_MODEL
 
     @property
     def RESOLVED_MAIN_BASE_URL(self) -> str:
-        provider_id = self.RESOLVED_PROVIDER_ID
-        if provider_id == "opencode_go":
-            return "https://opencode.ai/inference/go/openai/v1"
-        if provider_id == "deepseek" and self._runtime_model_cfg.get("provider_id"):
-            return "https://api.deepseek.com"
         return self._runtime_model_cfg.get("main_base_url") or self.MAIN_BASE_URL
 
     @property
     def RESOLVED_MAIN_API_KEY(self) -> str:
-        provider_key = self._runtime_provider_api_keys.get(self.RESOLVED_PROVIDER_ID)
-        if provider_key:
-            return provider_key
-        if self.RESOLVED_PROVIDER_ID == "opencode_go":
-            return ""
-        if self._runtime_api_key:
-            return self._runtime_api_key
-        if self.MAIN_API_KEY:
-            return self.MAIN_API_KEY
-        if "api.deepseek.com" in self.RESOLVED_MAIN_BASE_URL.lower():
-            return self.DEEPSEEK_API_KEY
-        return ""
-
-    @property
-    def RESOLVED_DEEPSEEK_WEB_API_KEY(self) -> str:
-        """Resolve deployment web credential without coupling it to other Providers."""
-        if self._runtime_deepseek_web_api_key:
-            return self._runtime_deepseek_web_api_key
-        dedicated = (self.DEEPSEEK_WEB_API_KEY or self.DEEPSEEK_API_KEY or "").strip()
-        if dedicated:
-            return dedicated
-        if "api.deepseek.com" in self.RESOLVED_MAIN_BASE_URL.lower():
-            return self.RESOLVED_MAIN_API_KEY
-        return ""
-
-    @property
-    def RESOLVED_WEB_SEARCH_PROVIDER(self) -> str:
-        return (self._runtime_web_search_cfg.get("provider_id")
-                or "deepseek_search_fetch")
-
-    @property
-    def RESOLVED_ZHIPU_API_KEY(self) -> str:
-        if self._runtime_provider_api_keys.get("zhipu"):
-            return self._runtime_provider_api_keys["zhipu"]
-        if self.RESOLVED_PROVIDER_ID == "zhipu":
-            return self.RESOLVED_MAIN_API_KEY
-        return ""
-
-    @property
-    def HAS_EXPLICIT_DEEPSEEK_WEB_API_KEY(self) -> bool:
-        """Whether Search/Fetch has a dedicated key, rather than a main-key fallback."""
-        return bool(self._runtime_deepseek_web_api_key or self.DEEPSEEK_WEB_API_KEY)
+        return self._runtime_api_key or self.DEEPSEEK_API_KEY or self.MAIN_API_KEY
 
     @property
     def RESOLVED_FAST_API_KEY(self) -> str:
@@ -628,17 +379,13 @@ class Settings(BaseSettings):
                 or self.RESOLVED_MAIN_BASE_URL)
 
 settings = Settings()
-settings._load_runtime_deepseek_web_api_key()
 
 # v8.5.0 模型镜像兜底：任何启动方式（run.ps1 / 手动 uvicorn）下，
 # HuggingFace 模型（reranker/embedding）首次下载统一走国内镜像，
 # 已有 HF_ENDPOINT 环境变量则尊重用户自定义
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 settings._load_runtime_api_key()
-settings._load_runtime_provider_api_keys()
 settings._load_runtime_model_config()
-settings._load_runtime_configured_model_providers()
-settings._load_runtime_web_search_config()
 
 # ── 启动配置校验（v8.3.3 fail-fast）──
 def validate_config() -> list:

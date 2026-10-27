@@ -16,12 +16,7 @@ from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
-_CITATION_PATTERN = re.compile(r'\[(?:W|H)?\d+\]', re.IGNORECASE)
-_IDENTIFIER_PATTERN = re.compile(
-    r"\b(?:doi|evidence_id|artifact_id|chunk_id|source_id|pmid|url)\b\s*[:=]\s*[^\s,;]+"
-    r"|\b10\.\d{4,9}/[^\s,;]+",
-    re.IGNORECASE,
-)
+_CITE_PATTERN = re.compile(r'\[[^\]]+\]')
 
 # checkpoint 旧摘要经 prior_summary 参数单独传入；对话文本中残留的包装块
 # 需剥离，避免同一信息双份进 prompt（v8.4）
@@ -43,20 +38,7 @@ def _messages_to_text(messages: list, max_per_msg: int = 600) -> str:
             role = m.role
         if hasattr(m, "content") and m.content:
             content = str(m.content) if not isinstance(m.content, str) else m.content
-        # Keep visible citation markers (e.g. [3], [W2], [H1]) in the text.
-        # When an old long message is shortened, append its exact identifiers so
-        # compaction cannot silently erase the trail needed to recover evidence.
-        clean = content[:max_per_msg]
-        if len(content) > max_per_msg:
-            identifiers = list(dict.fromkeys(_CITATION_PATTERN.findall(content)))
-            identifier_tokens = list(dict.fromkeys(_IDENTIFIER_PATTERN.findall(content)))
-            suffix_parts = []
-            if identifiers:
-                suffix_parts.append("引用编号=" + ",".join(identifiers[:40]))
-            if identifier_tokens:
-                suffix_parts.append("证据标识=" + " | ".join(identifier_tokens[:20]))
-            if suffix_parts:
-                clean += "\n[截断后保留标识: " + "；".join(suffix_parts)[:1200] + "]"
+        clean = _CITE_PATTERN.sub("", content)[:max_per_msg]
         lines.append(f"[{role}]: {clean}")
     return "\n".join(lines)
 
@@ -86,8 +68,8 @@ def _build_prompt(dialogue: str, query: str, prior_summary: str) -> str:
         + "1. 保留所有关键科研实体(基因名、病害名、品种名、化合物名等)\n"
         + "2. 保留所有具体数值(浓度、倍数、p值、百分比等)\n"
         + "3. 保留用户的核心研究意图、已达成的共识与关键决策\n"
-        + "4. 必须原样保留正文引用编号（[n]、[Wn]、[Hn]）、DOI、evidence_id、"
-        + "artifact_id、chunk_id、source_id、PMID 和文件路径；不得删除或重编号引用。\n"
+        + "4. 必须原样保留所有标识符: DOI、evidence_id、artifact_id、chunk_id、"
+        + "文件路径（正文中的 [n] 引用编号因原引用列表不持久化，可不保留）\n"
         + "5. 保留被引用证据的结论与验证状态(pass/fail)\n"
         + "6. 可丢弃: 工具调用过程细节、错误日志、低相关检索中间结果\n"
         + "7. 仅输出摘要内容, 不要前缀说明\n\n"
@@ -101,7 +83,6 @@ async def compact_messages(
     max_tokens: int = 800,
     query: str = "",
     prior_summary: str = "",
-    usage_session_id: str = "",
 ) -> str:
     """压缩一组消息为摘要字符串（上下文感知 + 分片 + 透明截断）。
 
@@ -146,9 +127,6 @@ async def compact_messages(
                 ],
                 max_tokens=max_tokens,
             )
-            if usage_session_id:
-                from src.core.cache_metrics import emit_usage_from_response
-                emit_usage_from_response(usage_session_id, "context_summary", resp)
             part = (resp.content or "").strip()
             if part:
                 merged = part  # 后续分片基于前片摘要增量整合（git-log 式）

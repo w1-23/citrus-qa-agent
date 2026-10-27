@@ -5,7 +5,7 @@ all_main_results / all_web_results（进而影响引用池与 write-agent 上下
 
   1) 程序化（always，零成本）：web 条目经 source_tiers 域名分级，写入
      source_tier 字段（T3 = 低可信，下游标注/交叉要求；不在此处直接丢）；
-  2) LLM（fast，每批一次）：按当前用户请求判断相关性，丢弃答非所问/
+  2) LLM（fast，每批一次）：按 intent_confirmed 判断相关性，丢弃答非所问/
      广告导购/无关背景；**上限 = min(3, n//2)**，不确定性一律保留；
   3) fail-open：模型/解析/超时任何异常 → 不丢任何东西（宁留噪声，不丢证据）。
 

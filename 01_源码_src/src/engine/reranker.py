@@ -11,7 +11,7 @@ warnings.filterwarnings("ignore", message=".*mean pooling instead of CLS.*")
 from typing import List, Dict
 from optimum.onnxruntime import ORTModelForSequenceClassification
 from transformers import AutoTokenizer
-from src.config import settings, MODEL_CACHE_ROOT
+from src.config import settings, PROJECT_ROOT
 from src.engine.hardware import get_ort_providers
 
 logger = logging.getLogger(__name__)
@@ -39,10 +39,10 @@ class Reranker:
         with self._singleton_lock:
             if getattr(self, "_loaded", False):
                 return
-            # Model weights live in a persistent cache independent of the
-            # request/session data root. Isolated tests may redirect PROJECT_ROOT;
-            # that must not make a present reranker look missing and trigger a download.
-            self._cache_dir = MODEL_CACHE_ROOT / "onnx_reranker"
+            # v8.11: ONNX 缓存锚定 PROJECT_ROOT 绝对路径——此前 Path(".hf_cache/...")
+            # 相对 CWD，从非 agent/ 目录启动会 miss 缓存 → 触发 HF Hub 下载 → 网络不通
+            # 时 init/rerank 永久挂起（排查实测复现）。与 DATA_DIR 同为绝对路径口径。
+            self._cache_dir = PROJECT_ROOT / ".hf_cache" / "onnx_reranker"
             self._force_cpu = False
             self._providers = None
             self._needs_lock = False
@@ -61,7 +61,7 @@ class Reranker:
         self._providers = raw_providers
         if any("DmlExecutionProvider" in p or "CUDAExecutionProvider" in p for p in raw_providers):
             self._needs_lock = True
-        logger.info(f"[Reranker] 配置 | Provider: {raw_providers} | 进程内共享模型")
+        logger.info(f"[Reranker] 配置 | Provider: {raw_providers} | Per-thread: {not self._needs_lock}")
 
     def _create_session(self):
         if not self._cache_dir.exists():
@@ -77,13 +77,14 @@ class Reranker:
         return model, tokenizer
 
     def _get_model(self):
-        # One model instance per service process for both CPU and GPU. The old
-        # CPU path cached a separate ONNX session per worker thread, which could
-        # multiply memory use under concurrent requests.
-        with self._shared_lock:
-            if self._shared_model is None:
-                self._shared_model, self._shared_tokenizer = self._create_session()
+        if self._needs_lock:
+            with self._shared_lock:
+                if self._shared_model is None:
+                    self._shared_model, self._shared_tokenizer = self._create_session()
             return self._shared_model, self._shared_tokenizer
+        if not hasattr(self._thread_local, "_model") or self._thread_local._model is None:
+            self._thread_local._model, self._thread_local._tokenizer = self._create_session()
+        return self._thread_local._model, self._thread_local._tokenizer
 
     def _safe_rerank(self, query: str, chunks: List[Dict], top_k: int) -> List[Dict]:
         for attempt in range(2):
@@ -100,8 +101,7 @@ class Reranker:
                         with self._shared_lock:
                             outputs = model(**inputs)
                 else:
-                    with self._shared_lock:
-                        outputs = model(**inputs)
+                    outputs = model(**inputs)
                 logits = outputs.logits.squeeze(-1).tolist()
                 if isinstance(logits, float):
                     logits = [logits]
@@ -118,6 +118,7 @@ class Reranker:
                         self._shared_model = None
                         self._shared_tokenizer = None
                         self._providers = ["CPUExecutionProvider"]
+                        self._thread_local = threading.local()
                     continue
                 raise
             except Exception as e:
@@ -129,6 +130,7 @@ class Reranker:
                         self._shared_model = None
                         self._shared_tokenizer = None
                         self._providers = ["CPUExecutionProvider"]
+                        self._thread_local = threading.local()
                     continue
                 raise
 

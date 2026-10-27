@@ -9,70 +9,22 @@ import threading
 from collections import OrderedDict
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
-from concurrent.futures import as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
-from src.config import MODEL_CACHE_ROOT, settings
+from src.config import settings
 from src.engine.embedder import Embedder
 from src.engine.reranker import Reranker
 from src.retrieval.bm25 import (
     BM25Plus, rrf_fuse,
     bm25_to_cache_dict, bm25_from_cache_dict, BM25_CACHE_FORMAT,
 )
-from src.core.executors import (
-    RAG_BM25_EXECUTOR,
-    RAG_MODEL_SEMAPHORE,
-    RAG_VECTOR_EXECUTOR,
-)
 
 logger = logging.getLogger(__name__)
 
-LOCAL_CORPUS_FAMILIES = {
-    "literature", "ucr_varieties", "deng_variety_book", "experiment_methods",
-}
-
-# The Agent prompt uses stable English category names while the indexed corpus
-# stores Chinese labels. Normalize both sides before applying category filters.
-_LOCAL_CATEGORY_ALIASES = {
-    "agriculture/ecology": "农业与生态",
-    "pathology/resistance": "病理与抗性",
-    "physiology/metabolism": "生理与代谢",
-    "nutrition/health": "营养与健康",
-    "breeding/biotechnology": "育种与生物技术",
-    "genomics/evolution": "基因组与进化",
-}
-
-
-def _normalized_local_category(value: object) -> str:
-    text = str(value or "").strip().casefold()
-    return _LOCAL_CATEGORY_ALIASES.get(text, text)
-
-
-def _local_category_allowed(row: dict, categories: set[str]) -> bool:
-    if not categories:
-        return True
-    actual = _normalized_local_category(row.get("l1_category"))
-    return actual in categories
-
-
-def local_corpus_family(chunk: Dict) -> str:
-    """Map an indexed record to the curated corpus families exposed to the Agent."""
-    batch = str(chunk.get("_batch") or "").lower()
-    source = str(chunk.get("source_type") or chunk.get("_src") or "").lower()
-    if batch == "citrus_varieties1" or "ucr citrus variety" in source:
-        return "ucr_varieties"
-    if (batch in {"citrus_varieties2", "chinese_citrus_varieties_deng_xiuxin"}
-            or "chinese citrus varieties book" in source):
-        return "deng_variety_book"
-    if batch == "cgi_experiment_methods_english" or "cgi_methods" in source:
-        return "experiment_methods"
-    if batch.startswith("paper") or "literature" in source:
-        return "literature"
-    return ""
-
 # v8.6 (书 §3.2 离线建索引): BM25 倒排索引持久化——语料不变则启动直接加载，
 # 跳过 fit（实测 119k chunk 语料 fit+倒排 ~15s → 加载 ~2s）；查询走倒排加速。
-_BM25_CACHE_DIR = MODEL_CACHE_ROOT / "bm25"
+_BM25_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / ".hf_cache" / "bm25"
 _BM25_CACHE_KEEP = 3   # 只保留最近 3 份缓存（不同语料指纹各自成文件）
 
 
@@ -97,14 +49,14 @@ def _bm25_search_parallel(bm25: BM25Plus, queries: List[str], k: int = 20) -> Li
     累加段串行（9 路实测 5.2s → 预期 ≈2-3x）。顺序与旧串行循环完全一致：
     按 queries 提交顺序取结果拼接（每路 top_k 独立、无共享状态）。
     """
-    from src.retrieval.local_query_language import require_english_local_query
-    queries = [require_english_local_query(q, field="bm25_queries") for q in queries]
     if len(queries) <= 1:
         return [hit for q in queries for hit in bm25.top_k(q, k=k)]
-    futures = [RAG_BM25_EXECUTOR.submit_wait(bm25.top_k, q, k) for q in queries]
-    out: List[Tuple[int, float]] = []
-    for f in futures:  # 按提交顺序取回 → 与串行逐位一致
-        out.extend(f.result())
+    workers = min(4, len(queries))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(bm25.top_k, q, k) for q in queries]
+        out: List[Tuple[int, float]] = []
+        for f in futures:  # 按提交顺序取回 → 与串行逐位一致
+            out.extend(f.result())
     return out
 
 
@@ -670,9 +622,8 @@ class MultiBatchRetriever:
                       for idx, _ in fused[:settings.CANDIDATE_WINDOW]]
 
         t_rerank = time.time()
-        with RAG_MODEL_SEMAPHORE:
-            reranked = self.reranker.rerank(rerank_query, candidates,
-                                            top_k=settings.TOP_K_FINAL)
+        reranked = self.reranker.rerank(rerank_query, candidates,
+                                        top_k=settings.TOP_K_FINAL)
         dt_rerank = (time.time() - t_rerank) * 1000
 
         if not reranked:
@@ -756,16 +707,6 @@ class MultiBatchRetriever:
         """
         if not queries:
             return []
-        from src.retrieval.local_query_language import require_english_local_query
-        # Final boundary guard: every lexical/vector query and the reranker query
-        # must be English before any worker or embedder is started.
-        queries = [require_english_local_query(q, field="queries") for q in queries]
-        if rerank_query:
-            english_rerank_query = require_english_local_query(rerank_query, field="rerank_query")
-        elif original_query:
-            english_rerank_query = require_english_local_query(original_query, field="original_query")
-        else:
-            english_rerank_query = queries[0]
         _t0 = time.time()
         logger.info(f"[Retriever] 启动多路并发检索 | 总 Query 数: {len(queries)}")
 
@@ -775,30 +716,31 @@ class MultiBatchRetriever:
         # BM25 为只读 numpy 向量化路径（多线程安全），多查询并行可再获 ≈2-3x 收益，
         # 结果与串行逐位一致（每路 top_k 独立、无共享状态）。
         t_bm25 = time.time()
-        _bm25_futures = [RAG_BM25_EXECUTOR.submit_wait(
-            self.bm25.top_k, query, settings.TOP_K_BM25) for query in queries]
+        with ThreadPoolExecutor(max_workers=1) as _bm25_ex:
+            _bm25_fut = _bm25_ex.submit(
+                lambda: _bm25_search_parallel(self.bm25, queries, k=settings.TOP_K_BM25))
 
-        t_embed = time.time()
-        # Query embeddings share a bounded model slot with reranking to avoid
-        # per-request CPU/ONNX fan-out under concurrent user traffic.
-        with RAG_MODEL_SEMAPHORE:
+            t_embed = time.time()
+            # v8.14-bugfix(2026-08-20): 查询编码必须走 embed_query（带 "query: " 前缀，E5 训练分布
+            # 一致）；此前误用 embed_docs → 查询向量缺前缀，dense 检索整体降分（21 号 l1-004 2/3→3/3）
             query_vecs = [self.embedder.embed_query(q) for q in queries]
-        dt_embed = (time.time() - t_embed) * 1000
+            dt_embed = (time.time() - t_embed) * 1000
 
-        if not self.batches and not self.lance_tables:
-            logger.warning("[Retriever] 无可用向量后端，降级为 BM25 纯文本检索")
-        t_vector = time.time()
-        batch_names = list(self.lance_tables.keys()) if self.backend == "lancedb" \
-            else list(self.batches.keys())
-        all_vector_hits: List[Tuple[int, float]] = []
-        futures = [RAG_VECTOR_EXECUTOR.submit_wait(self._vector_search, name, vec,
-                                              settings.TOP_K_VECTOR)
-                   for vec in query_vecs for name in batch_names]
-        for future in as_completed(futures):
-            all_vector_hits.extend(future.result())
-        dt_vector = (time.time() - t_vector) * 1000
+            if not self.batches and not self.lance_tables:
+                logger.warning("[Retriever] 无可用向量后端，降级为 BM25 纯文本检索")
+            t_vector = time.time()
+            batch_names = list(self.lance_tables.keys()) if self.backend == "lancedb" \
+                else list(self.batches.keys())
+            all_vector_hits: List[Tuple[int, float]] = []
+            workers = max(1, len(batch_names) * len(queries))
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                futures = [ex.submit(self._vector_search, name, vec, settings.TOP_K_VECTOR)
+                           for vec in query_vecs for name in batch_names]
+                for f in as_completed(futures):
+                    all_vector_hits.extend(f.result())
+            dt_vector = (time.time() - t_vector) * 1000
 
-        all_bm25_hits = [hit for future in _bm25_futures for hit in future.result()]
+            all_bm25_hits = _bm25_fut.result()
         dt_bm25 = (time.time() - t_bm25) * 1000
 
         return self._fuse_rerank_select(
@@ -808,7 +750,7 @@ class MultiBatchRetriever:
                 getattr(settings, 'RRF_WEIGHT_BM25', 1.0),
             ],
             stream_labels=["unique_v", "unique_b"],
-            rerank_query=english_rerank_query,
+            rerank_query=rerank_query or original_query or queries[0],
             mode="search_multi",
             t0=_t0,
             stage_ms={"embed": dt_embed, "vector": dt_vector, "bm25": dt_bm25},
@@ -820,94 +762,12 @@ class MultiBatchRetriever:
         # v9.2: 单查询路径同样登记用户原文（保持非 HyDE 路径统计校验不回归）
         return self.search_multi([query], original_query=query)
 
-    def search_dense_only(self, query: str, limit: int = 8) -> List[Dict]:
-        """Run vector retrieval only, without BM25 fusion or reranking.
-
-        This is intended for speculative local prefetch and evidence-gap checks,
-        where BM25 runs separately and both result streams must remain distinct.
-        """
-        return self.search_dense_filtered(query, limit=limit)
-
-    def search_dense_filtered(self, query: str, limit: int = 8,
-                              corpus_types: list[str] | None = None,
-                              l1_categories: list[str] | None = None) -> List[Dict]:
-        """Vector-only retrieval limited to selected corpus families/categories."""
-        from src.retrieval.local_query_language import require_english_local_query
-        query = require_english_local_query(query)
-        if not query or not self.global_chunks:
-            return []
-        allowed = ({str(x).strip() for x in corpus_types} & LOCAL_CORPUS_FAMILIES
-                   if corpus_types is not None else LOCAL_CORPUS_FAMILIES)
-        categories = {_normalized_local_category(x) for x in (l1_categories or []) if str(x).strip()}
-        eligible = {
-            int(row["_global_idx"]) for row in self.global_chunks
-            if local_corpus_family(row) in allowed
-            and _local_category_allowed(row, categories)
-        }
-        if not eligible:
-            return []
-        with RAG_MODEL_SEMAPHORE:
-            query_vec = self.embedder.embed_query(query)
-        batch_names = (list(self.lance_tables.keys()) if self.backend == "lancedb"
-                       else list(self.batches.keys()))
-        eligible_batches = {self.global_chunks[i].get("_batch") for i in eligible}
-        batch_names = [name for name in batch_names if name in eligible_batches]
-        if not batch_names:
-            return []
-        hits: list[tuple[int, float]] = []
-        futures = [RAG_VECTOR_EXECUTOR.submit_wait(
-            self._vector_search, name, query_vec,
-            min(max(int(limit) * 3, settings.TOP_K_VECTOR, 40), 200))
-            for name in batch_names]
-        for future in as_completed(futures):
-            hits.extend(future.result())
-        best: dict[int, float] = {}
-        for index, score in hits:
-            if index not in eligible:
-                continue
-            best[index] = max(float(score), best.get(index, float("-inf")))
-        selected = sorted(best.items(), key=lambda pair: pair[1], reverse=True)[:max(1, int(limit))]
-        rows = []
-        for index, score in selected:
-            row = self._chunk_full(index)
-            row["score"] = score
-            rows.append(row)
-        return rows
-
-    def search_bm25_filtered(self, query: str, limit: int = 8,
-                             corpus_types: list[str] | None = None,
-                             l1_categories: list[str] | None = None) -> List[Dict]:
-        """BM25-only retrieval over selected corpus families/categories."""
-        from src.retrieval.local_query_language import require_english_local_query
-        query = require_english_local_query(query)
-        allowed = {str(x).strip() for x in (corpus_types or [])}
-        allowed &= LOCAL_CORPUS_FAMILIES
-        if not query or not allowed:
-            return []
-        categories = {_normalized_local_category(x) for x in (l1_categories or []) if str(x).strip()}
-        eligible = {
-            int(row["_global_idx"]) for row in self.global_chunks
-            if local_corpus_family(row) in allowed
-            and _local_category_allowed(row, categories)
-        }
-        hits = self.bm25.top_k(query, k=max(int(limit) * 12, 80),
-                               allowed_doc_ids=eligible)
-        rows = []
-        for index, score in hits[:max(1, int(limit))]:
-            row = self._chunk_full(index)
-            row["score"] = float(score)
-            rows.append(row)
-        return rows
-
     def search_hyde(self, original_query: str, hyde_answer: str) -> List[Dict]:
         """HyDE hybrid search: dual dense (original + hyde) + BM25 + RRF + Reranker(original_query).
 
         v8.13-b4b: 仅保留命中流生成（原/假想双 dense + BM25），RRF 融合/去重/阈值/
         日志统一走 _fuse_rerank_select；阈值拦截或无 rerank 结果时回退基础检索。
         """
-        from src.retrieval.local_query_language import require_english_local_query
-        original_query = require_english_local_query(original_query, field="original_query")
-        hyde_answer = require_english_local_query(hyde_answer, field="hyde_answer")
         _t0 = time.time()
         logger.info(f"[Retriever] HyDE hybrid search | query_len={len(original_query)} hyde_len={len(hyde_answer)}")
 
@@ -922,32 +782,36 @@ class MultiBatchRetriever:
         t_embed = time.time()
         # v8.15 BM25 并行化：BM25 与 HyDE 双路 embedding 重叠执行（ONNX 释放 GIL）
         t_bm25 = time.time()
-        _bm25_fut = RAG_BM25_EXECUTOR.submit_wait(
-            self.bm25.top_k, original_query, k=settings.TOP_K_BM25)
-        with RAG_MODEL_SEMAPHORE:
+        with ThreadPoolExecutor(max_workers=1) as _bm25_ex:
+            _bm25_fut = _bm25_ex.submit(
+                lambda: self.bm25.top_k(original_query, k=settings.TOP_K_BM25))
             orig_vec = self.embedder.embed_query(original_query)
             hyde_vec = self.embedder.embed_query(hyde_answer)
-        dt_embed = (time.time() - t_embed) * 1000
+            dt_embed = (time.time() - t_embed) * 1000
 
-        batch_names = list(self.lance_tables.keys()) if self.backend == "lancedb" \
-            else list(self.batches.keys())
-        _emit(f"并发检索向量后端 ({len(batch_names)} 批次)...")
-        t_vector = time.time()
-        orig_v_hits: List[Tuple[int, float]] = []
-        hyde_v_hits: List[Tuple[int, float]] = []
-        futures_orig = [RAG_VECTOR_EXECUTOR.submit_wait(
-            self._vector_search, name, orig_vec, settings.TOP_K_VECTOR)
-            for name in batch_names]
-        futures_hyde = [RAG_VECTOR_EXECUTOR.submit_wait(
-            self._vector_search, name, hyde_vec, settings.TOP_K_VECTOR)
-            for name in batch_names]
-        for future in as_completed(futures_orig):
-            orig_v_hits.extend(future.result())
-        for future in as_completed(futures_hyde):
-            hyde_v_hits.extend(future.result())
-        dt_vector = (time.time() - t_vector) * 1000
+            batch_names = list(self.lance_tables.keys()) if self.backend == "lancedb" \
+                else list(self.batches.keys())
+            _emit(f"并发检索向量后端 ({len(batch_names)} 批次)...")
+            t_vector = time.time()
+            orig_v_hits: List[Tuple[int, float]] = []
+            hyde_v_hits: List[Tuple[int, float]] = []
+            if batch_names:
+                workers = max(1, len(batch_names) * 2)
+                with ThreadPoolExecutor(max_workers=workers) as ex:
+                    futures_orig: list = []
+                    futures_hyde: list = []
+                    for name in batch_names:
+                        futures_orig.append(ex.submit(
+                            self._vector_search, name, orig_vec, settings.TOP_K_VECTOR))
+                        futures_hyde.append(ex.submit(
+                            self._vector_search, name, hyde_vec, settings.TOP_K_VECTOR))
+                    for f in as_completed(futures_orig):
+                        orig_v_hits.extend(f.result())
+                    for f in as_completed(futures_hyde):
+                        hyde_v_hits.extend(f.result())
+            dt_vector = (time.time() - t_vector) * 1000
 
-        bm25_hits = _bm25_fut.result()
+            bm25_hits = _bm25_fut.result()
         dt_bm25 = (time.time() - t_bm25) * 1000
         _emit(f"BM25 词法检索完成, 共 {len(orig_v_hits)+len(hyde_v_hits)} 个向量命中 + {len(bm25_hits)} 个词法命中")
 

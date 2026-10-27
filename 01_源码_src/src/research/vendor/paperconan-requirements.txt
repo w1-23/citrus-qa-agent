@@ -1,9 +1,0 @@
-# Runtime dependencies used by the vendored PaperConan numeric engine.
-# numpy and openpyxl are already part of CitrusQA's spreadsheet/RAG environment;
-# keep these explicit so a clean deployment can provision all supported tables.
-numpy>=1.24
-scipy>=1.10
-openpyxl>=3.1
-python-calamine>=0.2
-pdfplumber>=0.11
-python-docx>=1.1

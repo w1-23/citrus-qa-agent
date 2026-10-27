@@ -1,7 +1,14 @@
-"""Normalize per-call token usage and provider prompt-cache telemetry.
+"""Prompt Cache 命中率观测（阶段0 · 上下文工程改造）.
 
-Cache counts are reported only when the provider supplies cache fields. Missing
-fields remain ``unavailable``; they are never converted into a zero-hit claim.
+DeepSeek 上下文缓存按块自动启用，usage 返回:
+  prompt_cache_hit_tokens / prompt_cache_miss_tokens
+LangChain 只把标准字段放进 usage_metadata；provider 原始 usage 保留在
+response_metadata["token_usage"]（或 "usage"）。
+
+本模块统一提取缓存字段:
+  - 向 context_usage SSE 事件追加 cache_hit / cache_miss / cache_ratio
+  - 按 source 累计统计，定期输出 INFO 日志
+作为静态前缀重构（阶段1）前后的对比基线。
 """
 from __future__ import annotations
 
@@ -22,94 +29,71 @@ _USAGE_SAMPLE_LIMIT = 5
 _usage_samples_logged = 0
 
 
-def _mapping(value) -> dict:
-    if isinstance(value, dict):
-        return value
-    if hasattr(value, "model_dump"):
-        try:
-            return value.model_dump()
-        except Exception:
-            pass
-    if hasattr(value, "__dict__"):
-        return {k: v for k, v in vars(value).items() if not k.startswith("_")}
-    return {}
-
-
-def _first_present(containers: list[dict], names: tuple[str, ...]) -> tuple[bool, int]:
-    for container in containers:
-        for name in names:
-            if name in container and container[name] is not None:
-                try:
-                    return True, max(0, int(container[name]))
-                except (TypeError, ValueError):
-                    continue
-    return False, 0
-
-
-def _first_int(first: dict, second: dict, names: tuple[str, ...]) -> int:
-    found, value = _first_present([first, second], names)
-    return value if found else 0
-
-
 def extract_usage(response) -> dict | None:
-    """Normalize one provider call; missing cache fields remain explicitly unknown."""
-    try:
-        response_map = _mapping(response)
-        um = _mapping(getattr(response, "usage_metadata", None)
-                       or response_map.get("usage_metadata") or {})
-        rm = _mapping(getattr(response, "response_metadata", None)
-                      or response_map.get("response_metadata") or {})
-        raw = _mapping(rm.get("token_usage") or rm.get("usage")
-                       or response_map.get("token_usage") or response_map.get("usage") or {})
-        # OpenAI Python SDK objects expose usage separately from response_metadata.
-        raw_usage = _mapping(getattr(response, "usage", None)
-                             or response_map.get("usage") or {})
-        if raw_usage:
-            raw = {**raw, **raw_usage}
-        containers = [raw, um]
-        for container in (raw, um):
-            for key in ("prompt_tokens_details", "input_token_details", "prompt_token_details"):
-                nested = _mapping(container.get(key))
-                if nested:
-                    containers.append(nested)
+    """归一化 usage，含 prompt cache 字段。取不到 total 时返回 None。
 
-        input_tokens = _first_int(um, raw, ("input_tokens", "prompt_tokens"))
-        output_tokens = _first_int(um, raw, ("output_tokens", "completion_tokens"))
-        total_tokens = _first_int(um, raw, ("total_tokens",)) or input_tokens + output_tokens
-        hit_found, cache_hit = _first_present(
-            containers, ("cached_tokens", "prompt_cache_hit_tokens", "cache_read_tokens", "cache_read"))
-        miss_found, cache_miss = _first_present(
-            containers, ("prompt_cache_miss_tokens", "cache_creation_input_tokens",
-                         "cache_creation_tokens", "cache_miss"))
-        cache_status = "reported" if hit_found or miss_found else "unavailable"
-        if cache_status == "reported" and not miss_found and input_tokens:
-            cache_miss = max(input_tokens - cache_hit, 0)
-        if not (input_tokens or output_tokens or total_tokens):
+    v8.4.4: 首次 5 次调用打印原始 usage 键集合（DeepSeek 的 prompt_cache
+    字段可能不在 usage_metadata 而在 response_metadata 的 token_usage/usage，
+    命中率恒 0 时据此定位适配点）。
+    """
+    try:
+        um = getattr(response, "usage_metadata", None) or {}
+        rm = getattr(response, "response_metadata", {}) or {}
+        raw = rm.get("token_usage") or rm.get("usage") or {}
+        # v8.12: DeepSeek cache 字段位置适配——旧版 prompt_cache_hit/miss_tokens
+        # 在 usage 顶层；新版（OpenAI 兼容）在 input_token_details 的
+        # cache_read_tokens / cache_creation_input_tokens。多候选兜底读取。
+        input_details = um.get("input_token_details") or raw.get("input_token_details") or {}
+        if not isinstance(input_details, dict):
+            input_details = {}
+        merged: dict = {}
+        # v8.4.4: DeepSeek raw usage 用 prompt_tokens/completion_tokens 命名，
+        # usage_metadata 用 input/output_tokens——两者都要读
+        for key, alt in (("input_tokens", "prompt_tokens"),
+                         ("output_tokens", "completion_tokens"),
+                         ("total_tokens", "total_tokens")):
+            val = um.get(key) or raw.get(key) or raw.get(alt) or 0
+            merged[key] = int(val or 0)
+        merged["cache_hit"] = int(
+            raw.get("prompt_cache_hit_tokens")
+            or um.get("prompt_cache_hit_tokens")
+            or input_details.get("cache_read_tokens")
+            or input_details.get("cached_tokens")
+            or input_details.get("cache_read")
+            or 0)
+        merged["cache_miss"] = int(
+            raw.get("prompt_cache_miss_tokens")
+            or um.get("prompt_cache_miss_tokens")
+            or input_details.get("cache_creation_input_tokens")
+            or input_details.get("cache_creation_tokens")
+            or input_details.get("cache_miss")
+            or 0)
+        if not merged["total_tokens"]:
             return None
-        merged = {"input_tokens": input_tokens, "output_tokens": output_tokens,
-                  "total_tokens": total_tokens, "cache_hit": cache_hit,
-                  "cache_miss": cache_miss, "cache_status": cache_status}
+        # v8.4.4: 首次样本输出 usage 键集合（诊断用，不改变正常路径）
         global _usage_samples_logged
         if _usage_samples_logged < _USAGE_SAMPLE_LIMIT:
             _usage_samples_logged += 1
-            logger.info("[CacheMetrics] usage sample#%s input=%s output=%s cache=%s hit=%s miss=%s",
-                        _usage_samples_logged, input_tokens, output_tokens,
-                        cache_status, cache_hit, cache_miss)
+            logger.info(
+                f"[CacheMetrics] usage 样本#{_usage_samples_logged}: "
+                f"usage_metadata_keys={sorted(um.keys())} "
+                f"input_token_details_keys={sorted(input_details.keys())} "
+                f"raw_keys={sorted(raw.keys())} "
+                f"cache_hit={merged['cache_hit']} cache_miss={merged['cache_miss']}"
+            )
         return merged
     except Exception as e:
-        logger.debug("[CacheMetrics] extract_usage failed: %s", e)
+        logger.debug(f"[CacheMetrics] extract_usage failed: {e}")
         return None
 
-def _record(source: str, cache_hit: int, cache_miss: int, cache_status: str) -> None:
+
+def _record(source: str, cache_hit: int, cache_miss: int) -> None:
     global _global_calls
     with _lock:
-        entry = _agg.setdefault(source, {"hit": 0, "miss": 0, "calls": 0, "unknown": 0})
-        if cache_status == "reported":
-            entry["hit"] += cache_hit
-            entry["miss"] += cache_miss
-            entry["calls"] += 1
-        else:
-            entry["unknown"] += 1
+        entry = _agg.setdefault(source, {"hit": 0, "miss": 0, "calls": 0})
+        entry["hit"] += cache_hit
+        entry["miss"] += cache_miss
+        entry["calls"] += 1
         _global_calls += 1
         if _global_calls % _AGG_INTERVAL == 0:
             total_hit = sum(e["hit"] for e in _agg.values())
@@ -117,13 +101,13 @@ def _record(source: str, cache_hit: int, cache_miss: int, cache_status: str) -> 
             denom = total_hit + total_miss
             ratio = (total_hit / denom) if denom else 0.0
             per_source = ", ".join(
-                f"{s}={e['hit']}/{e['hit']+e['miss']} (unknown={e['unknown']})"
+                f"{s}={e['hit']}/{e['hit']+e['miss']}"
                 for s, e in sorted(_agg.items())
             )
             logger.info(
                 f"[CacheMetrics] 累计 {_global_calls} 次调用: "
-                f"服务商已报告缓存命中率 {ratio:.1%} "
-                f"(hit={total_hit}, miss={total_miss}; unknown={sum(e['unknown'] for e in _agg.values())}) | 按来源: {per_source}"
+                f"前缀缓存命中率 {ratio:.1%} "
+                f"(hit={total_hit}, miss={total_miss}) | 按来源: {per_source}"
             )
 
 
@@ -152,10 +136,8 @@ def emit_usage_from_response(session_id: str, source: str, response) -> None:
             total=merged.get("total_tokens", 0),
             cache_hit=merged.get("cache_hit", 0),
             cache_miss=merged.get("cache_miss", 0),
-            cache_status=merged.get("cache_status", "unavailable"),
         )
-        _record(source, merged.get("cache_hit", 0), merged.get("cache_miss", 0),
-                merged.get("cache_status", "unavailable"))
+        _record(source, merged.get("cache_hit", 0), merged.get("cache_miss", 0))
         # v8.13: 结构化诊断事件（llm_usage）——一次调用一行 JSONL，覆盖所有 LLM 调用点
         from src.core.diag import diag
         diag("llm_usage", source=source,
@@ -163,7 +145,6 @@ def emit_usage_from_response(session_id: str, source: str, response) -> None:
              output_tokens=merged.get("output_tokens", 0),
              total_tokens=merged.get("total_tokens", 0),
              cache_hit=merged.get("cache_hit", 0),
-             cache_miss=merged.get("cache_miss", 0),
-             cache_status=merged.get("cache_status", "unavailable"))
+             cache_miss=merged.get("cache_miss", 0))
     except Exception:
         pass

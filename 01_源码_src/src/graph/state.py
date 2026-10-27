@@ -8,14 +8,7 @@ from langchain_core.messages import BaseMessage
 class AgentState(TypedDict, total=False):
     messages: Annotated[list[BaseMessage], add_messages]
     query: str
-    visualization_enabled: bool
-    attachment_context: str
-    image_attachments: list[dict]
-    request_deadline: float
-    request_started_at: float
-    agent_no_prefetch_hints: bool
     session_id: str
-    user_id: int
     mode: str
     # v8.3.7: 幂等键（save 节点写入历史时用，防重发重复）
     idempotency_key: str
@@ -40,6 +33,10 @@ class AgentState(TypedDict, total=False):
     resident_cards: Optional[str]     # v8.4: 常驻卡片（双层记忆"概览"层）
     search_suggestions: list[str]
     format_hint: Optional[str]
+
+    # v10.0（卡点① Intake）: 意图判定结果（结构化）与用户确认后的意图（全链路锚点）
+    intent_profile: Optional[dict]
+    intent_confirmed: Optional[str]
 
     retrieval_context: Optional[str]
     references_data: Optional[dict]

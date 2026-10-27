@@ -44,139 +44,49 @@ class MemoryStore:
 
     # ─── Preference Memory ───
 
-    def set_preference(self, user_id: int, key: str, value: str) -> None:
-        """Save an explicit preference within one authenticated account."""
-        user_id = int(user_id or 0)
-        key, value = str(key or "").strip(), str(value or "").strip()
-        if user_id <= 0 or not key or not value:
-            return
-        with self._mem_lock, _connect_db(self.db_path) as conn:
-            self._ensure_account_memory_schema(conn)
-            conn.execute(
-                """INSERT INTO account_preferences (user_id, pref_key, pref_value, updated_at)
-                   VALUES (?, ?, ?, ?)
-                   ON CONFLICT(user_id, pref_key) DO UPDATE SET
-                     pref_value=excluded.pref_value, updated_at=excluded.updated_at""",
-                (user_id, key[:80], value[:300], datetime.now().isoformat()),
-            )
-            conn.commit()
+    def set_preference(self, session_id: str, key: str, value: str) -> None:
+        with self._mem_lock:
+            store = self._load_store(session_id, "preference_memory")
+            store[key] = {"value": value, "updated_at": datetime.now().isoformat()}
+            self._save_store(session_id, "preference_memory", store)
 
-    def get_preferences(self, user_id: int, max_chars: int = 300) -> str:
-        """Return this account's explicit preferences for the current prompt."""
-        user_id = int(user_id or 0)
-        if user_id <= 0:
-            return ""
-        try:
-            with _connect_db(self.db_path) as conn:
-                self._ensure_account_memory_schema(conn)
-                rows = conn.execute(
-                    "SELECT pref_key, pref_value FROM account_preferences "
-                    "WHERE user_id=? ORDER BY updated_at DESC LIMIT 10", (user_id,)
-                ).fetchall()
-            if not rows:
-                return ""
-            header = ("## 用户偏好（仅当前账号；与本轮要求冲突时以本轮要求为准）\n")
-            parts = []
-            total = len(header)
-            for row in rows:
-                line = f"- {str(row[0])[:60]}: {str(row[1])[:120]}"
-                if total + len(line) + 1 > max_chars:
-                    break
-                parts.append(line)
-                total += len(line) + 1
-            return header + "\n".join(parts) if parts else ""
-        except Exception as exc:
-            logger.debug("[Memory] account preference recall failed: %s", exc)
-            return ""
+    # v8.9 偏好全局域（用户级偏好跨会话生效；会话域偏好仅本会话）
+    GLOBAL_PREF_DOMAIN = "__global__"
 
-    def _ensure_account_memory_schema(self, conn) -> None:
-        """Create account-scoped memory tables and safely attribute identifiable legacy rows.
+    def get_preferences(self, session_id: str, max_chars: int = 300) -> str:
+        """用户显式偏好（书 §3.1 偏好追踪）→ 上下文块（≤max_chars，空则 ""）。
 
-        Legacy rows without a session owner stay orphaned and are never injected into prompts.
-        Rows with a session are assigned only when sessions.owner_user_id identifies an account.
+        v8.6 消费点接线：LTM 提取出 type=preference 的事实写入本表，
+        这里在 build_human_message 中作为 <user_preferences> 块注入——
+        偏好是用户明确表达的长期约定（如"综述一律中文、要含局限与边界"），
+        注入后模型在写作/回答中自动遵循，无需用户每次重申。
+        v8.9 两层：全局域（__global__，用户级偏好跨会话）+ 当前会话域（覆盖全局）。
         """
-        conn.execute("""CREATE TABLE IF NOT EXISTS account_preferences (
-            user_id INTEGER NOT NULL, pref_key TEXT NOT NULL, pref_value TEXT NOT NULL,
-            updated_at TEXT NOT NULL, PRIMARY KEY(user_id, pref_key))""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS account_resident_cards (
-            user_id INTEGER NOT NULL, fact_key TEXT NOT NULL, fact_value TEXT NOT NULL,
-            confidence REAL DEFAULT 0.5, updated_at TEXT, PRIMARY KEY(user_id, fact_key))""")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_account_resident_user ON account_resident_cards(user_id, confidence DESC)")
-        conn.execute("""CREATE TABLE IF NOT EXISTS account_memory_migrations (
-            migration_key TEXT PRIMARY KEY, completed_at TEXT NOT NULL)""")
-
-        store_columns = {row[1] for row in conn.execute("PRAGMA table_info(memory_store)")}
-        session_columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
-        if {"session_id", "key", "value", "updated_at"}.issubset(store_columns) and "owner_user_id" in session_columns:
-            migrated = conn.execute(
-                "SELECT 1 FROM account_memory_migrations WHERE migration_key='session_preferences_v1'"
-            ).fetchone()
-            if not migrated:
-                # Migrate only session-owned legacy preferences; the old __global__ bucket
-                # has no trustworthy owner and is intentionally never assigned. A marker
-                # prevents a deliberate memory clear from being undone on the next read.
-                for row in conn.execute(
-                    """SELECT s.owner_user_id, m.value, m.updated_at FROM memory_store m
-                       JOIN sessions s ON s.session_id=m.session_id
-                       WHERE m.key='preference_memory' AND m.session_id<>''
-                         AND s.owner_user_id IS NOT NULL"""
-                ).fetchall():
-                    try:
-                        legacy = json.loads(row[1])
-                        if isinstance(legacy, dict):
-                            conn.executemany(
-                                """INSERT INTO account_preferences(user_id,pref_key,pref_value,updated_at)
-                                   VALUES(?,?,?,?)
-                                   ON CONFLICT(user_id,pref_key) DO UPDATE SET
-                                     pref_value=excluded.pref_value, updated_at=excluded.updated_at
-                                   WHERE excluded.updated_at > account_preferences.updated_at""",
-                                [(int(row[0]), str(k)[:80], str(v)[:300], str(row[2] or datetime.now().isoformat()))
-                                 for k, v in legacy.items() if k and v]
-                            )
-                    except Exception:
-                        continue
-                conn.execute(
-                    "INSERT INTO account_memory_migrations(migration_key,completed_at) VALUES('session_preferences_v1',?)",
-                    (datetime.now().isoformat(),))
-
-        for table in ("long_term_memory", "ltm_facts"):
-            columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-            if not columns:
+        store = self._load_store(session_id, "preference_memory")
+        merged: dict = {}
+        if session_id != self.GLOBAL_PREF_DOMAIN:
+            g = self._load_store(self.GLOBAL_PREF_DOMAIN, "preference_memory")
+            merged.update(g)          # 全局为底
+        merged.update(store)          # 会话域覆盖
+        if not merged:
+            return ""
+        header = ("## 用户偏好（历史交互中用户明确表达的偏好；如与用户最新要求冲突，"
+                  "以用户最新要求为准）\n")
+        budget = max(0, max_chars - len(header))
+        parts: list[str] = []
+        total = 0
+        for key, item in list(merged.items())[:10]:
+            value = item.get("value", "") if isinstance(item, dict) else str(item)
+            if not value:
                 continue
-            if "owner_user_id" not in columns:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN owner_user_id INTEGER")
-            session_columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
-            if "owner_user_id" in session_columns and "owner_session" in columns:
-                conn.execute(
-                    f"UPDATE {table} SET owner_user_id=(SELECT owner_user_id FROM sessions "
-                    f"WHERE sessions.session_id={table}.owner_session) "
-                    f"WHERE owner_user_id IS NULL AND owner_session<>'' "
-                    f"AND EXISTS (SELECT 1 FROM sessions WHERE sessions.session_id={table}.owner_session "
-                    f"AND owner_user_id IS NOT NULL)"
-                )
-        if {row[1] for row in conn.execute("PRAGMA table_info(ltm_facts)")}:
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_ltm_account_owner ON ltm_facts(owner_user_id, updated_at)")
-
-        # Attribute old resident cards only through a known session owner. Global legacy cards
-        # have no trustworthy account and deliberately remain excluded.
-        resident_columns = {row[1] for row in conn.execute("PRAGMA table_info(resident_cards)")}
-        if resident_columns and "session_id" in resident_columns:
-            session_columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
-            if "owner_user_id" in session_columns:
-                migrated = conn.execute(
-                    "SELECT 1 FROM account_memory_migrations WHERE migration_key='resident_cards_v1'"
-                ).fetchone()
-                if not migrated:
-                    conn.execute(
-                        """INSERT OR IGNORE INTO account_resident_cards
-                           (user_id, fact_key, fact_value, confidence, updated_at)
-                           SELECT s.owner_user_id, r.fact_key, r.fact_value, r.confidence, r.updated_at
-                           FROM resident_cards r JOIN sessions s ON s.session_id=r.session_id
-                           WHERE r.session_id<>'' AND s.owner_user_id IS NOT NULL"""
-                    )
-                    conn.execute(
-                        "INSERT INTO account_memory_migrations(migration_key,completed_at) VALUES('resident_cards_v1',?)",
-                        (datetime.now().isoformat(),))
+            line = f"- {str(key)[:60]}: {str(value)[:120]}"
+            if total + len(line) > budget:
+                break
+            parts.append(line)
+            total += len(line)
+        if not parts:
+            return ""
+        return header + "\n".join(parts)
 
     # ─── Long-term Memory (Cross-session) ───
 
@@ -222,16 +132,15 @@ class MemoryStore:
         # 一次性迁移老表 → 新表（幂等：迁移标记行）
         # v9.2 CON-8: memory_store 建表收敛共享常量（core/db）
         ensure_memory_store(conn)
-        self._ensure_account_memory_schema(conn)
         migrated = conn.execute(
             "SELECT COUNT(*) FROM memory_store WHERE key='_ltm_migrated_v2'"
         ).fetchone()[0]
         if not migrated:
             conn.execute(
                 """INSERT INTO ltm_facts (fact_key, fact_value, confidence,
-                                          updated_at, owner_session, source_query, owner_user_id)
+                                          updated_at, owner_session, source_query)
                    SELECT fact_key, fact_value, confidence, updated_at,
-                          owner_session, source_query, owner_user_id
+                          owner_session, source_query
                    FROM long_term_memory"""
             )
             conn.execute(
@@ -265,37 +174,41 @@ class MemoryStore:
     RESIDENT_CARD_MAX_CHARS = 60     # 单条卡片值上限
 
     def _upsert_resident_card(self, conn, fact_key: str, fact_value: str,
-                              confidence: float, user_id: int = 0) -> None:
+                              confidence: float, session_id: str = "") -> None:
         self._ensure_resident_schema(conn)
-        self._ensure_account_memory_schema(conn)
-        if not fact_key or not fact_value or int(user_id or 0) <= 0:
+        if not fact_key or not fact_value:
             return
         if confidence < self.RESIDENT_CARD_MIN_CONF:
             return
         if len(fact_value) > self.RESIDENT_CARD_MAX_CHARS:
             return
         conn.execute(
-            """INSERT INTO account_resident_cards (user_id, fact_key, fact_value, confidence, updated_at)
+            """INSERT INTO resident_cards (fact_key, fact_value, confidence, updated_at, session_id)
                VALUES (?, ?, ?, ?, ?)
-               ON CONFLICT(user_id, fact_key) DO UPDATE SET
+               ON CONFLICT(fact_key) DO UPDATE SET
                  fact_value=excluded.fact_value,
                  confidence=excluded.confidence,
-                 updated_at=excluded.updated_at""",
-            (int(user_id), fact_key, fact_value, confidence, datetime.now().isoformat()),
+                 updated_at=excluded.updated_at,
+                 session_id=excluded.session_id""",
+            (fact_key, fact_value, confidence, datetime.now().isoformat(), session_id or ""),
         )
         # 超上限淘汰：最低置信度 + 最旧的先出（代码维护，非 LLM）
         cur = conn.execute(
-            "SELECT COUNT(*) FROM account_resident_cards WHERE user_id=?", (int(user_id),))
+            "SELECT COUNT(*) FROM resident_cards")
         if (cur.fetchone()[0] or 0) > self.RESIDENT_CARD_MAX:
             conn.execute(
-                """DELETE FROM account_resident_cards WHERE user_id=? AND fact_key IN (
-                    SELECT fact_key FROM account_resident_cards WHERE user_id=?
+                """DELETE FROM resident_cards WHERE fact_key IN (
+                    SELECT fact_key FROM resident_cards
                     ORDER BY confidence ASC, updated_at ASC
-                    LIMIT 1)""",
-                (int(user_id), int(user_id)))
+                    LIMIT 1)"""
+            )
 
-    def get_resident_cards(self, user_id: int = 0, max_chars: int = 500) -> str:
-        """Return high-confidence resident facts belonging to this account only."""
+    def get_resident_cards(self, session_id: str = "", max_chars: int = 500) -> str:
+        """常驻卡片（双层记忆的'概览'层）：按置信度取 top-N 拼文本，≤max_chars。
+
+        v8.9 域化：返回「当前会话域 + 全局域」卡片（会话为主，全局高置信共享）；
+        空域时只读全局（兼容旧调用方）。
+        """
         try:
             import sqlite3
             from pathlib import Path
@@ -305,14 +218,19 @@ class MemoryStore:
                 return ""
             with _connect_db(str(db_path)) as conn:
                 conn.row_factory = sqlite3.Row
-                if int(user_id or 0) <= 0:
-                    return ""
                 self._ensure_resident_schema(conn)
-                self._ensure_account_memory_schema(conn)
-                rows = conn.execute(
-                    "SELECT fact_key, fact_value, confidence, updated_at "
-                    "FROM account_resident_cards WHERE user_id=? ORDER BY confidence DESC, updated_at DESC",
-                    (int(user_id),)).fetchall()
+                if session_id:
+                    rows = conn.execute(
+                        "SELECT fact_key, fact_value, confidence, updated_at, session_id "
+                        "FROM resident_cards "
+                        "WHERE session_id = ? OR session_id = '' "
+                        "ORDER BY confidence DESC, updated_at DESC",
+                        (session_id,)).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT fact_key, fact_value, confidence, updated_at, session_id "
+                        "FROM resident_cards ORDER BY confidence DESC, updated_at DESC"
+                    ).fetchall()
             if not rows:
                 return ""
             parts = []
@@ -332,12 +250,11 @@ class MemoryStore:
             return ""
 
     def save_long_term_fact(self, fact_key: str, fact_value: str, confidence: float = 0.5,
-                            owner_session: str = "", source_query: str = "",
-                            owner_user_id: int = 0) -> bool:
+                            owner_session: str = "", source_query: str = "") -> bool:
         """v8.4 (Mem0 v3): ADD-only 写入——同 key 多版本并存，绝不覆盖/删除历史。
         检索阶段用时间+置信度排序消歧。置信度 <0.5 的未核验事实拒绝写入。
         """
-        if not fact_key or not fact_value or int(owner_user_id or 0) <= 0:
+        if not fact_key or not fact_value:
             return False
         if float(confidence or 0) < 0.5:
             logger.debug(f"[Memory] 低置信度事实拒绝写入: {fact_key[:30]} ({confidence})")
@@ -353,14 +270,14 @@ class MemoryStore:
                     conn.execute(
                         """INSERT INTO ltm_facts
                            (fact_key, fact_value, confidence, updated_at,
-                            owner_session, source_query, owner_user_id)
-                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                            owner_session, source_query)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
                         (fact_key, fact_value, confidence, datetime.now().isoformat(),
-                         owner_session, source_query, int(owner_user_id)),
+                         owner_session, source_query),
                     )
-                    # High-confidence overview facts use the same account boundary as LTM.
+                    # v8.9: 常驻卡片带会话域（''=全局；域内高置信事实仅本会话可见）
                     self._upsert_resident_card(conn, fact_key, fact_value, confidence,
-                                               user_id=owner_user_id)
+                                               session_id=owner_session)
                     conn.commit()
                 return True
             except Exception as e:
@@ -368,47 +285,45 @@ class MemoryStore:
                 return False
 
     def recall_long_term_memory(self, query: str, top_k: int = 5,
-                                owner_user_id: int = 0, max_chars: int = 1500) -> str:
+                                owner_session: str = "", max_chars: int = 1500) -> str:
         """语义向量检索跨会话长期记忆 (fallback 到关键词)。
         AG-5: 置信度按时间衰减(0.95/天)，输出带来源与更新时间标注，超 max_chars 截断。
         v8.9 记忆域化（会话为主 + 高置信全局共享）：owner_session 传入当前会话——
         召回该会话域事实 + 全局高置信（≥0.9）事实；跨域事实排序权重 0.9（本会话优先）。
         """
         try:
-            if int(owner_user_id or 0) <= 0:
-                return ""
-            return self._recall_semantic(query, top_k, int(owner_user_id), max_chars)
+            return self._recall_semantic(query, top_k, owner_session, max_chars)
         except Exception as e:
             logger.debug(f"[Memory] 语义召回失败, 回退关键词: {e}")
-            return self._recall_keyword_fallback(query, top_k, int(owner_user_id or 0), max_chars)
+            return self._recall_keyword_fallback(query, top_k, owner_session, max_chars)
 
     # v8.9 记忆域化参数：跨域（全局共享）事实的排序权重（本会话域事实 1.0）
     CROSS_DOMAIN_WEIGHT = 0.9
     GLOBAL_SHARE_CONF = 0.9   # 全局共享置信度门槛
 
-    def _fetch_ltm_rows(self, conn, limit: int = 500, owner_user_id: int = 0):
+    def _fetch_ltm_rows(self, conn, limit: int = 500, owner_session: str = ""):
         """v8.4: 从 ltm_facts 读取；若新表为空回退老表（迁移前兼容）。
         v8.9 域过滤：本会话域 + 全局高置信（≥0.9）+ 旧数据（无域标记）三类。"""
         import sqlite3  # v9.2: 原依赖顶层 import（已收敛删除），本函数补局部导入
         conn.row_factory = sqlite3.Row
-        self._ensure_account_memory_schema(conn)
-        if owner_user_id:
+        if owner_session:
             rows = conn.execute(
-                "SELECT fact_key, fact_value, confidence, updated_at, owner_session, source_query, owner_user_id "
+                "SELECT fact_key, fact_value, confidence, updated_at, owner_session, source_query "
                 "FROM ltm_facts "
-                "WHERE owner_user_id = ? "
+                "WHERE owner_session = ? OR owner_session = '' OR confidence >= ? "
                 "ORDER BY updated_at DESC LIMIT ?",
-                (int(owner_user_id), limit)).fetchall()
+                (owner_session, self.GLOBAL_SHARE_CONF, limit)).fetchall()
         else:
-            return []
+            rows = conn.execute(
+                "SELECT fact_key, fact_value, confidence, updated_at, owner_session, source_query "
+                "FROM ltm_facts ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
         if not rows:
             rows = conn.execute(
-                "SELECT fact_key, fact_value, confidence, updated_at, owner_session, source_query, owner_user_id "
-                "FROM long_term_memory WHERE owner_user_id=? ORDER BY updated_at DESC LIMIT ?",
-                (int(owner_user_id), limit)).fetchall()
+                "SELECT fact_key, fact_value, confidence, updated_at, owner_session, source_query "
+                "FROM long_term_memory ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
         return rows
 
-    def _recall_semantic(self, query: str, top_k: int, owner_user_id: int, max_chars: int) -> str:
+    def _recall_semantic(self, query: str, top_k: int, owner_session: str, max_chars: int) -> str:
         import numpy as np
         import sqlite3
         from pathlib import Path
@@ -418,7 +333,7 @@ class MemoryStore:
             return ""
         with _connect_db(str(db_path)) as conn:
             self._ensure_ltm_schema(conn)
-            rows = self._fetch_ltm_rows(conn, owner_user_id=owner_user_id)
+            rows = self._fetch_ltm_rows(conn, owner_session=owner_session)
         if not rows:
             return ""
 
@@ -443,6 +358,9 @@ class MemoryStore:
                 days = 0
             eff = conf * (0.95 ** days)  # AG-5: 时间衰减
             # v8.9 记忆域化：跨域（全局共享）事实轻微降权，本会话域优先
+            row_sid = row["owner_session"] or ""
+            if owner_session and row_sid and row_sid != owner_session:
+                eff *= self.CROSS_DOMAIN_WEIGHT
             eff_confs[i] = eff
 
         # v8.4 (Mem0 v3): 混合信号排序 = 语义相似度 × 有效置信度
@@ -480,7 +398,7 @@ class MemoryStore:
                 "若与本次检索证据冲突，以本次检索证据为准）：\n" + "\n".join(parts))
         return text[:max_chars]
 
-    def _recall_keyword_fallback(self, query: str, top_k: int, owner_user_id: int, max_chars: int) -> str:
+    def _recall_keyword_fallback(self, query: str, top_k: int, owner_session: str, max_chars: int) -> str:
         try:
             import sqlite3
             from pathlib import Path
@@ -490,7 +408,7 @@ class MemoryStore:
                 return ""
             with _connect_db(str(db_path)) as conn:
                 self._ensure_ltm_schema(conn)
-                rows = self._fetch_ltm_rows(conn, limit=200, owner_user_id=owner_user_id)
+                rows = self._fetch_ltm_rows(conn, limit=200, owner_session=owner_session)
             query_tokens = set(re.findall(r'[\w\u4e00-\u9fff]{2,}', query.lower()))
             scored = []
             now = datetime.now()
@@ -506,6 +424,9 @@ class MemoryStore:
                         days = 0
                     eff_conf = conf * (0.95 ** days)
                     # v8.9 记忆域化：跨域轻微降权
+                    row_sid = row["owner_session"] or ""
+                    if owner_session and row_sid and row_sid != owner_session:
+                        eff_conf *= self.CROSS_DOMAIN_WEIGHT
                     if eff_conf >= 0.30:
                         scored.append((overlap * eff_conf, row["fact_value"], eff_conf, ts,
                                        row["source_query"] or ""))
@@ -527,7 +448,7 @@ class MemoryStore:
         except Exception:
             return ""
 
-    def extract_key_facts(self, query: str, answer: str, session_id: str = "") -> list[dict]:
+    def extract_key_facts(self, query: str, answer: str) -> list[dict]:
         """提取 3-5 条核心事实 + 用户偏好（异步调用，用最便宜模型）。
 
         v8.6 (书 §3.1 偏好追踪): 输出项可带 "type": "preference"——用户明确表达的
@@ -539,9 +460,7 @@ class MemoryStore:
         try:
             from src.config import settings
             from openai import OpenAI
-            client = OpenAI(api_key=settings.RESOLVED_MAIN_API_KEY,
-                            base_url=settings.RESOLVED_MAIN_BASE_URL,
-                            default_headers=settings.RESOLVED_PROVIDER_HEADERS)
+            client = OpenAI(api_key=settings.RESOLVED_MAIN_API_KEY, base_url=settings.RESOLVED_MAIN_BASE_URL)
             prompt = (
                 "从以下问答对中提取最多5条不可推导的核心事实，每条用一句话描述。\n"
                 "只保留那些如果不记录就会丢失的信息（如：具体数值、疾病-基因关联、实验条件）。\n"
@@ -559,9 +478,6 @@ class MemoryStore:
                 max_tokens=1000,
                 timeout=15,
             )
-            if session_id:
-                from src.core.cache_metrics import emit_usage_from_response
-                emit_usage_from_response(session_id, "memory_extraction", resp)
             content = resp.choices[0].message.content.strip()
             content = content.replace("```json", "").replace("```", "").strip()
             import json as _json
@@ -617,56 +533,6 @@ class MemoryStore:
                 conn.commit()
         except Exception as e:
             logger.error(f"[Memory] 保存 {store_name} 失败: {e}")
-
-    def list_user_memory(self, user_id: int) -> dict:
-        """Return inspectable memory belonging only to one authenticated account."""
-        user_id = int(user_id or 0)
-        if user_id <= 0:
-            return {"preferences": [], "facts": []}
-        try:
-            with self._mem_lock, _connect_db(self.db_path) as conn:
-                self._ensure_ltm_schema(conn)
-                preferences = conn.execute(
-                    "SELECT pref_key, pref_value, updated_at FROM account_preferences "
-                    "WHERE user_id=? ORDER BY updated_at DESC", (user_id,)).fetchall()
-                facts = conn.execute(
-                    "SELECT id, fact_key, fact_value, confidence, updated_at FROM ltm_facts "
-                    "WHERE owner_user_id=? ORDER BY updated_at DESC LIMIT 200", (user_id,)).fetchall()
-            return {
-                "preferences": [{"key": r[0], "value": r[1], "updated_at": r[2]} for r in preferences],
-                "facts": [{"id": int(r[0]), "key": r[1], "value": r[2],
-                           "confidence": float(r[3] or 0), "updated_at": r[4]} for r in facts],
-            }
-        except Exception as exc:
-            logger.warning("[Memory] account memory listing failed: %s", type(exc).__name__)
-            return {"preferences": [], "facts": []}
-
-    def clear_user_memory(self, user_id: int) -> bool:
-        """Clear account-scoped preferences, facts, and resident cards."""
-        user_id = int(user_id or 0)
-        if user_id <= 0:
-            return False
-        try:
-            with self._mem_lock, _connect_db(self.db_path) as conn:
-                self._ensure_ltm_schema(conn)
-                self._ensure_resident_schema(conn)
-                conn.execute("DELETE FROM account_preferences WHERE user_id=?", (user_id,))
-                conn.execute("DELETE FROM ltm_facts WHERE owner_user_id=?", (user_id,))
-                conn.execute("DELETE FROM long_term_memory WHERE owner_user_id=?", (user_id,))
-                conn.execute("DELETE FROM account_resident_cards WHERE user_id=?", (user_id,))
-                # Remove identifiable legacy sources too. Otherwise an old row could
-                # be re-imported (or be left behind after a user asks to clear memory).
-                conn.execute(
-                    """DELETE FROM memory_store WHERE key='preference_memory' AND session_id IN
-                       (SELECT session_id FROM sessions WHERE owner_user_id=?)""", (user_id,))
-                conn.execute(
-                    """DELETE FROM resident_cards WHERE session_id IN
-                       (SELECT session_id FROM sessions WHERE owner_user_id=?)""", (user_id,))
-                conn.commit()
-            return True
-        except Exception as exc:
-            logger.warning("[Memory] account memory clear failed: %s", type(exc).__name__)
-            return False
 
     def clear_session(self, session_id: str) -> None:
         try:

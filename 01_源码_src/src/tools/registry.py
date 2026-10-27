@@ -63,9 +63,6 @@ def get_tools_by_category(category: str) -> list[str]:
 
 def _classify_error(e: Exception) -> str:
     """统一错误回传 (v8.3.1): [ERR_类别] 原因 + 建议策略，让 LLM 对症下药。"""
-    from src.core.executors import ExecutorSaturatedError
-    if isinstance(e, ExecutorSaturatedError):
-        return "[ERR_BUSY] 服务当前繁忙，工具未进入执行队列。请稍后重试或缩小任务范围。"
     if isinstance(e, ImportError):
         pkg = getattr(e, "name", str(e))
         return f"[ERR_MISSING_DEP] 缺少依赖库: {pkg}。建议: pip install {pkg} 后重试"
@@ -129,11 +126,8 @@ def cleanup_offload_files() -> int:
 # v8.4.3: 只读/分析类工具白名单（注册表未初始化时替代 spec 放行，
 # 与 config.yaml tools.registrations 的 readonly 语义一致）
 _READONLY_TOOLS = frozenset({
-    "deepseek_search", "deepseek_fetch", "deepseek_fetch_paper", "local_hybrid_search",
-    "inspect_uploaded_table", "audit_uploaded_data", "export_literature_evidence",
-    "verify_uploaded_references", "fetch_and_audit_open_supplements",
-    "export_paper_analysis", "export_experiment_design", "save_research_note",
-    "recall_research_notes", "export_research_notes", "export_corpus_gap_report",
+    "citrus_rag_search", "pdf_read",
+    "read_local_file", "statistical_analysis", "experimental_design",
 })
 
 
@@ -244,9 +238,8 @@ async def _invoke_tool_with_ctx(ctx: contextvars.Context, tool: BaseTool, args: 
     """
     if getattr(tool, "coroutine", None) is not None:
         return await tool.ainvoke(args)
-    from src.core.executors import TOOL_EXECUTOR
     return await asyncio.get_running_loop().run_in_executor(
-        TOOL_EXECUTOR, lambda: ctx.run(lambda: tool.invoke(args)))
+        None, lambda: ctx.run(lambda: tool.invoke(args)))
 
 
 def _tool_exec_timeout(tool_name: str) -> int:
@@ -284,24 +277,22 @@ async def _run_single_tool(tool: BaseTool, tool_call: dict) -> ToolMessage:
 
     if response_format == "content_and_artifact" and raw_func is not None:
         try:
-            from src.core.executors import TOOL_EXECUTOR
             content, artifact = await asyncio.wait_for(
                 asyncio.get_running_loop().run_in_executor(
-                    TOOL_EXECUTOR, lambda: ctx.run(lambda: raw_func(**args))
+                    None, lambda: ctx.run(lambda: raw_func(**args))
                 ),
                 timeout=exec_timeout,
             )
         except asyncio.TimeoutError:
             logger.error(f"[PartitionedNode] 工具 {tool.name} 执行超时(>{exec_timeout}s)")
             return ToolMessage(
-                content=f"[ERR_TIMEOUT] 工具 {tool.name} 等待超过 {exec_timeout}s；请求已停止等待，后台执行仍受限资源池管理。可缩小范围后重试。",
+                content=f"[ERR_TIMEOUT] 工具 {tool.name} 执行超过 {exec_timeout}s，已中断。可稍后重试或换更小范围。",
                 tool_call_id=tool_call["id"], name=tool.name, artifact={})
         except Exception as e:
             logger.error(f"[PartitionedNode] 工具 {tool.name} 执行失败: {e}")
             error_msg = _classify_error(e)
             return ToolMessage(content=error_msg, tool_call_id=tool_call["id"], name=tool.name, artifact={})
-        if isinstance(content, str) and tool_name not in {
-                "deepseek_search", "deepseek_fetch", "deepseek_fetch_paper", "local_hybrid_search"}:
+        if isinstance(content, str):
             content = _offload_large_result(content, tool_name)
         return ToolMessage(content=content, artifact=artifact, tool_call_id=tool_call["id"], name=tool_name)
     else:
@@ -311,7 +302,7 @@ async def _run_single_tool(tool: BaseTool, tool_call: dict) -> ToolMessage:
         except asyncio.TimeoutError:
             logger.error(f"[PartitionedNode] 工具 {tool.name} 执行超时(>{exec_timeout}s)")
             return ToolMessage(
-                content=f"[ERR_TIMEOUT] 工具 {tool.name} 等待超过 {exec_timeout}s；请求已停止等待，后台执行仍受限资源池管理。可缩小范围后重试。",
+                content=f"[ERR_TIMEOUT] 工具 {tool.name} 执行超过 {exec_timeout}s，已中断。可稍后重试或换更小范围。",
                 tool_call_id=tool_call["id"], name=tool.name, artifact={})
         except Exception as e:
             logger.error(f"[PartitionedNode] 工具 {tool.name} 执行失败: {e}")
@@ -323,14 +314,12 @@ async def _run_single_tool(tool: BaseTool, tool_call: dict) -> ToolMessage:
                 result = ToolMessage(content=_offload_large_result(result, tool_name), tool_call_id=tool_call["id"], name=tool_name)
             elif isinstance(result, tuple) and len(result) == 2:
                 content, artifact = result
-                if isinstance(content, str) and tool_name not in {
-                        "deepseek_search", "deepseek_fetch", "deepseek_fetch_paper", "local_hybrid_search"}:
+                if isinstance(content, str):
                     content = _offload_large_result(content, tool_name)
                 result = ToolMessage(content=content, artifact=artifact, tool_call_id=tool_call["id"], name=tool_name)
             else:
                 result = ToolMessage(content=str(result), tool_call_id=tool_call["id"], name=tool_name)
-        elif isinstance(result.content, str) and tool_name not in {
-                "deepseek_search", "deepseek_fetch", "deepseek_fetch_paper", "local_hybrid_search"}:
+        elif isinstance(result.content, str):
             result.content = _offload_large_result(result.content, tool_name)
 
         return result
@@ -359,10 +348,9 @@ async def run_tool_checked(tool: BaseTool, args: dict) -> str:
 
     try:
         if response_format == "content_and_artifact" and raw_func is not None:
-            from src.core.executors import TOOL_EXECUTOR
             content, _artifact = await asyncio.wait_for(
                 asyncio.get_running_loop().run_in_executor(
-                    TOOL_EXECUTOR, lambda: ctx.run(lambda: raw_func(**args))),
+                    None, lambda: ctx.run(lambda: raw_func(**args))),
                 timeout=exec_timeout)
             return content if isinstance(content, str) else str(content)
         result = await asyncio.wait_for(_invoke_tool_with_ctx(ctx, tool, args),
@@ -495,12 +483,15 @@ def init_tool_registry():
             if registrations:
                 for reg in registrations:
                     name = reg.get("name")
+                    # deepseek_web_search 始终注册：是否联网由前端「联网」开关逐请求决定
+                    # （工具执行层短路），不以 config web_search.enabled 作为注册门槛。
                     tool = _TOOL_REGISTRY_BY_NAME.get(name)
                     if tool:
                         register_tool(tool, category=reg.get("category", "general"),
                                       is_readonly=reg.get("readonly", True),
                                       concurrency_key=reg.get("concurrency_key"))
-                    # Ignore retired names left in older deployment YAML files.
+                    else:
+                        logger.warning(f"[ToolRegistry] 配置中工具 '{name}' 未找到，跳过")
                 logger.info(f"[ToolRegistry] 从 YAML 注册 {len(registrations)} 个工具")
                 return
     except Exception as e:

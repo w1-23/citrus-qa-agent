@@ -18,15 +18,10 @@ _job_id: contextvars.ContextVar = contextvars.ContextVar(
 _session_id: contextvars.ContextVar = contextvars.ContextVar(
     "session_id", default="")
 
-# Authenticated account id, propagated into agent/tool execution so workspace
-# output paths and tool permissions remain isolated between browser accounts.
-_user_id: contextvars.ContextVar = contextvars.ContextVar(
-    "user_id", default=None)
-
-# Web tools are enabled by default; the Agent decides whether each query needs them.
-# Kept as request context so older tool execution paths remain compatible.
+# v8.15: 本次请求是否开启联网搜索（前端开关逐请求下发；工具执行层据此短路）
+# 与 session_id 同机制：chat_v2 显式写入，经 copy_context 贯穿到工具协程/线程。
 _web_search_enabled: contextvars.ContextVar = contextvars.ContextVar(
-    "web_search_enabled", default=True)
+    "web_search_enabled", default=False)
 
 # v9.1（用户决策：每个用户请求最多调用一次 deepseek_web_search）: 联网调用
 # 请求级预算。v8.17.17 的 _web_used 在 agent_runner 实例内（每次 run_agent 重置），
@@ -46,7 +41,7 @@ def set_web_search_enabled(enabled: bool) -> None:
 
 
 def web_search_enabled() -> bool:
-    return bool(_web_search_enabled.get())
+    return _web_search_enabled.get()
 
 
 def reset_web_budget(quota: int = 1) -> None:
@@ -93,15 +88,6 @@ def set_session_id(session_id: str) -> None:
 
 def get_session_id() -> str:
     return _session_id.get()
-
-
-def set_user_id(user_id: int | None) -> None:
-    _user_id.set(int(user_id) if user_id is not None else None)
-
-
-def get_user_id() -> int | None:
-    value = _user_id.get()
-    return int(value) if value is not None else None
 
 
 def new_request_id() -> str:

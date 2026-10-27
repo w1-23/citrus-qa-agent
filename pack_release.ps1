@@ -179,18 +179,6 @@ Get-ChildItem -Path (Join-Path $Root 'agent') -Force | ForEach-Object {
         Copy-Item -Force $_.FullName (Join-Path $StageAgent $_.Name)
     }
 }
-# ── 可运行代码布局（源码内含 web/ 前端）──
-foreach ($relativePath in @('01_源码_src', '02_配置_config', '04_脚本_scripts')) {
-    $sourcePath = Join-Path $Root $relativePath
-    if (-not (Test-Path -LiteralPath $sourcePath -PathType Container)) {
-        throw "缺少发布所需目录: $sourcePath"
-    }
-    $destinationPath = Join-Path $Stage $relativePath
-    New-Item -ItemType Directory -Force -Path $destinationPath | Out-Null
-    robocopy $sourcePath $destinationPath /E /XD '.hf_cache' 'logs' '__pycache__' '.pytest_cache' '.git' '_archive' '_scratch' 'tests' /XF '*.pyc' '*.tmp' '*.log' '*.lock' '.env' /R:0 /W:0 /NFL /NDL /NJH /NJS | Out-Null
-    if ($LASTEXITCODE -ge 8) { throw "发布目录复制失败: $relativePath (robocopy=$LASTEXITCODE)" }
-}
-
 # 确保目录结构
 New-Item -ItemType Directory -Force -Path (Join-Path $StageAgent 'workspace\output') | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $StageAgent 'state') | Out-Null

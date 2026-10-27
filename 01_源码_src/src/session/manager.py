@@ -149,7 +149,6 @@ class SessionManager:
                     tool_call_id TEXT,
                     tool_calls_json TEXT,
                     name TEXT,
-                    generation_ms INTEGER,
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (session_id) REFERENCES sessions(session_id)
                 )
@@ -199,7 +198,6 @@ class SessionManager:
                     ("tool_call_id", "TEXT"),
                     ("tool_calls_json", "TEXT"),
                     ("name", "TEXT"),
-                    ("generation_ms", "INTEGER"),
                     ("client_request_id", "TEXT"),   # v8.3.7 M1
                     ("idempotency_key", "TEXT"),     # v8.3.7 M1
                     ("reasoning", "TEXT"),           # v8.10l 深度思考持久化
@@ -234,7 +232,6 @@ class SessionManager:
                     ("checkpoint_updated_at", "TEXT DEFAULT ''"),
                     ("title", "TEXT DEFAULT ''"),        # v8.9 会话管理：首问自动命名
                     ("deleted_at", "TEXT DEFAULT ''"),   # v8.9 会话管理：软删除标记
-                    ("owner_user_id", "INTEGER"),        # multi-user web service ownership
                 ]:
                     if col not in session_cols:
                         try:
@@ -360,48 +357,24 @@ class SessionManager:
         except Exception as e:
             logger.warning(f"[SessionManager] idempotency index failed: {e}")
 
-    async def get_or_create_session(self, session_id: Optional[str], owner_user_id: int | None = None) -> str:
+    async def get_or_create_session(self, session_id: Optional[str]) -> str:
         if not session_id or session_id.lower() == "new":
             new_id = str(uuid.uuid4())
-            await asyncio.to_thread(self._create_session_sync, new_id, owner_user_id)
+            await asyncio.to_thread(self._create_session_sync, new_id)
             return new_id
         exists = await asyncio.to_thread(self._check_session_exists, session_id)
         if not exists:
-            await asyncio.to_thread(self._create_session_sync, session_id, owner_user_id)
+            await asyncio.to_thread(self._create_session_sync, session_id)
         return session_id
 
-    def _create_session_sync(self, session_id: str, owner_user_id: int | None = None):
+    def _create_session_sync(self, session_id: str):
         import sqlite3
         with _connect_db(self.db_path) as conn:
             conn.execute(
-                "INSERT OR IGNORE INTO sessions (session_id, owner_user_id) VALUES (?,?)",
-                (session_id, owner_user_id),
+                "INSERT OR IGNORE INTO sessions (session_id) VALUES (?)",
+                (session_id,),
             )
             conn.commit()
-
-    def get_session_owner(self, session_id: str) -> int | None:
-        """Return the account owning a session; unowned legacy rows are inaccessible."""
-        if not session_id:
-            return None
-        try:
-            with _connect_db(self.db_path) as conn:
-                row = conn.execute("SELECT owner_user_id FROM sessions WHERE session_id=?",
-                                   (session_id,)).fetchone()
-            return int(row[0]) if row and row[0] is not None else None
-        except Exception:
-            return None
-
-    def session_exists(self, session_id: str) -> bool:
-        if not session_id:
-            return False
-        try:
-            with _connect_db(self.db_path) as conn:
-                return conn.execute("SELECT 1 FROM sessions WHERE session_id=?", (session_id,)).fetchone() is not None
-        except Exception:
-            return False
-
-    def session_belongs_to(self, session_id: str, owner_user_id: int) -> bool:
-        return self.get_session_owner(session_id) == int(owner_user_id)
 
     def _check_session_exists(self, session_id: str) -> bool:
         import sqlite3
@@ -423,7 +396,7 @@ class SessionManager:
         with _connect_db(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.execute(
-                "SELECT id, msg_type, content, tool_call_id, tool_calls_json, name, reasoning, generation_ms "
+                "SELECT id, msg_type, content, tool_call_id, tool_calls_json, name, reasoning "
                 "FROM messages WHERE session_id = ? ORDER BY id ASC",
                 (session_id,),
             )
@@ -435,7 +408,6 @@ class SessionManager:
                 tool_calls_json = row["tool_calls_json"]
                 name = row["name"]
                 reasoning = row["reasoning"] if "reasoning" in row.keys() else None
-                generation_ms = row["generation_ms"] if "generation_ms" in row.keys() else None
 
                 try:
                     if msg_type == "human":
@@ -452,16 +424,9 @@ class SessionManager:
                         # v8.7: "AIMessageChunk" 为 v8.4.13 流式化后的旧数据
                         # 类型残留（保存端已归一化为 "ai"）——按 ai 还原，避免
                         # 其 ToolMessage 配对消息因跳过而孤立（API 400 根因）。
-                        # Provider reasoning is private internal model output;
-                        # do not restore it into conversation context.
                         kw = {"content": content, "name": name or None}
-                        try:
-                            persisted_generation_ms = int(generation_ms or 0)
-                        except (TypeError, ValueError):
-                            persisted_generation_ms = 0
-                        if persisted_generation_ms > 0:
-                            kw["response_metadata"] = {
-                                "citrus_generation_ms": persisted_generation_ms}
+                        if reasoning:
+                            kw["additional_kwargs"] = {"reasoning_content": reasoning}
                         if tool_calls_json:
                             try:
                                 tool_calls = [
@@ -561,14 +526,14 @@ class SessionManager:
             return False
 
     def _serialize_message(self, msg: BaseMessage) -> tuple:
-        """Extract the persisted fields from a conversation message."""
+        """Extract (msg_type, content, tool_call_id, tool_calls_json, name, reasoning)
+        from a message."""
         msg_type = ""
         content = ""
         tool_call_id = None
         tool_calls_json = None
         name = None
         reasoning = None
-        generation_ms = None
 
         if hasattr(msg, "type"):
             msg_type = msg.type
@@ -605,20 +570,13 @@ class SessionManager:
         if hasattr(msg, "name"):
             name = msg.name
 
-        metadata = getattr(msg, "response_metadata", None)
-        if isinstance(metadata, dict):
-            try:
-                value = int(metadata.get("citrus_generation_ms") or 0)
-                if 0 < value <= 7 * 24 * 60 * 60 * 1000:
-                    generation_ms = value
-            except (TypeError, ValueError):
-                pass
+        # v8.10l: 深度思考持久化（stream_llm 聚合时注入 additional_kwargs）
+        if hasattr(msg, "additional_kwargs") and isinstance(msg.additional_kwargs, dict):
+            rk = msg.additional_kwargs.get("reasoning_content")
+            if rk:
+                reasoning = str(rk)
 
-        # Provider reasoning_content is private internal model output. Never
-        # persist it as part of a user-visible conversation trace.
-
-        return (msg_type, content, tool_call_id, tool_calls_json, name, reasoning,
-                generation_ms)
+        return (msg_type, content, tool_call_id, tool_calls_json, name, reasoning)
 
     def _save_messages_sync(self, session_id: str, messages: List[BaseMessage],
                             idempotency_key: str = "") -> bool:
@@ -639,8 +597,8 @@ class SessionManager:
                     conn.execute(
                         "INSERT INTO messages "
                         "(session_id, msg_type, content, tool_call_id, tool_calls_json, "
-                        "name, reasoning, generation_ms, client_request_id, idempotency_key) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "name, reasoning, client_request_id, idempotency_key) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (session_id, *self._serialize_message(msg),
                          idempotency_key if (idx == 0 and idempotency_key.startswith("crid:")) else None,
                          row_key),
@@ -682,8 +640,8 @@ class SessionManager:
                 for msg in messages:
                     conn.execute(
                         "INSERT INTO messages "
-                        "(session_id, msg_type, content, tool_call_id, tool_calls_json, name, reasoning, generation_ms) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        "(session_id, msg_type, content, tool_call_id, tool_calls_json, name, reasoning) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
                         (session_id, *self._serialize_message(msg)),
                     )
                 conn.execute(
@@ -744,22 +702,20 @@ class SessionManager:
         except Exception as e:
             logger.debug(f"[SessionManager] ensure title failed: {e}")
 
-    def list_sessions(self, limit: int = 100, owner_user_id: int | None = None) -> list[dict]:
+    def list_sessions(self, limit: int = 100) -> list[dict]:
         """会话列表（排除软删除，按最近更新倒序），含消息数与标题。"""
         try:
             import sqlite3
             with _connect_db(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
-                owner_clause = " AND s.owner_user_id=?" if owner_user_id is not None else ""
-                params = (int(owner_user_id), int(limit)) if owner_user_id is not None else (int(limit),)
                 rows = conn.execute(
                     """SELECT s.session_id, s.title, s.created_at, s.updated_at,
                               (SELECT COUNT(*) FROM messages m
                                 WHERE m.session_id = s.session_id) AS msg_count
                        FROM sessions s
-                       WHERE (s.deleted_at = '' OR s.deleted_at IS NULL)"""
-                    + owner_clause + " ORDER BY s.updated_at DESC LIMIT ?",
-                    params).fetchall()
+                       WHERE s.deleted_at = '' OR s.deleted_at IS NULL
+                       ORDER BY s.updated_at DESC LIMIT ?""",
+                    (int(limit),)).fetchall()
             out = []
             for r in rows:
                 out.append({

@@ -114,12 +114,9 @@ embedder:
   # offline_mode: true     # 默认离线(大陆推荐)。改为 false 或设 HF_HUB_OFFLINE=0 可连 HuggingFace 检查更新
 
 onnx:
-  # 自动过滤当前 ONNX Runtime 实际可用的 Provider，再按 AMD ROCm → NVIDIA CUDA
-  # → Windows DirectML（AMD/NVIDIA/Intel GPU）→ CPU 回退。
   provider_priority:
-    - "ROCMExecutionProvider"
-    - "CUDAExecutionProvider"
     - "DmlExecutionProvider"
+    - "CUDAExecutionProvider"
     - "CPUExecutionProvider"
 
 # ── Compute Scheduler ──
@@ -243,6 +240,7 @@ context_budget:
 
 # ── Context Engineering v8.4 ──
 context:
+  static_prefix: true           # v8.4.4 转正: SystemMessage 字节级稳定(格式指南/策略卡片/
                                 #   skills 移出前缀，追加到当前轮 HumanMessage 尾部)，
                                 #   利于 DeepSeek 上下文缓存命中（灰度验证通过后转默认）
 
@@ -309,22 +307,3 @@ tools:
       category: analysis
       readonly: true
       concurrency_key: analysis
-
-# ── Vision：柑橘病害图像初筛（v8.16）──────────────────────────────
-# 工具只在「本轮请求带了图片」时暴露给模型；模型文件由
-# 04_脚本_scripts/prepare_models.py --vision 下载到 model_dir。
-vision:
-  enabled: true
-  # 留空 = <项目根>/agent/models/vision
-  model_dir: ""
-  # top-1 低于该阈值 → 返回“不确定”，不硬给病名
-  confidence_threshold: 0.60
-  # top-1 与 top-2 的差值低于该值 → 视为模型间不一致
-  margin_threshold: 0.12
-  # 判为“健康”但病害信号仍高于该值 → 降级为不确定（缺素/虫害陷阱）
-  healthy_veto: 0.25
-  # 许可不明的权重（dima806 ViT / PlantVillage MobileNetV2）是否加载：
-  # 关闭 → 只跑 apache-2.0 的 ConvNeXt-Small（8 类，无黄龙病/黑点病/白粉病弱标签）
-  allow_unlicensed_models: true
-
-
